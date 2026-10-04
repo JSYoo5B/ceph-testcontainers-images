@@ -84,4 +84,6 @@ The output is `ceph-testcontainers:<release>-<role>` for the four roles and `all
 
 ## License
 
-[MIT License](LICENSE).
+The code and documents in this repository are licensed under the [MIT License](LICENSE).
+
+The checker and the functional scenarios run Ceph only inside containers and include no Ceph code. Role images extracted with `image/roles/` are different: they contain Ceph and distribution packages from the official image, each under its own license (Ceph is mostly LGPL-2.1 or LGPL-3, see its [COPYING](https://github.com/ceph/ceph/blob/v20.2.4/COPYING)). The extraction keeps their license files in every image. Whoever distributes such images must meet those licenses, including making the corresponding source available where required.
