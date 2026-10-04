@@ -65,15 +65,16 @@ def query(*args):
 
 def installed_inventory():
     inventory = {}
-    for line in query("rpm", "-qa", "--qf", "%{NAME}\t%{SIZE}\t%{VERSION}-%{RELEASE}.%{ARCH}\n"):
-        name, size, version = line.split("\t", 2)
+    for line in query("rpm", "-qa", "--qf", "%{NAME}\t%{SIZE}\t%{VERSION}-%{RELEASE}.%{ARCH}\t%{SOURCERPM}\t%{VENDOR}\n"):
+        name, size, version, source_rpm, vendor = line.split("\t", 4)
         # RPM stores imported signing keys as multiple gpg-pubkey records;
         # these are metadata, not installed filesystem package payloads.
         if name == "gpg-pubkey":
             continue
         if name in inventory:
             raise RuntimeError("Multiple installed versions/architectures for " + name)
-        inventory[name] = {"rpm_size_bytes": int(size), "version": version, "files": [], "licenses": set()}
+        inventory[name] = {"rpm_size_bytes": int(size), "version": version, "files": [], "licenses": set(),
+                           "source_rpm": source_rpm, "vendor": vendor}
     current = None
     for line in query("rpm", "-qa", "--qf", "PACKAGE\t%{NAME}\n[%{FILENAMES}\t%{FILEFLAGS:fflags}\n]"):
         if line.startswith("PACKAGE\t"):

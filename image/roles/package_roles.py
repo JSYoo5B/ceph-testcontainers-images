@@ -43,6 +43,25 @@ REQUIRED_EXECUTABLES = {
     "mds": ("/usr/bin/ceph-mds",),
 }
 COPYING = "/usr/share/doc/ceph/COPYING"
+SOURCE_NOTICE = """Ceph testcontainers role image: licenses and corresponding source
+
+This image holds unmodified files extracted from the official Ceph image
+  {source_image}
+They belong to the RPM packages listed in source-packages.txt in this
+directory. Each package keeps its own license; license files are kept in the
+image, for example under /usr/share/licenses and /usr/share/doc/ceph/COPYING.
+
+Corresponding source for every package is its source RPM, named in
+source-packages.txt:
+- Ceph {release} (source RPM ceph-{release}): https://download.ceph.com/rpm-{release}/el9/SRPMS/
+  and https://github.com/ceph/ceph/tree/{commit}
+- Packages from CentOS: https://mirror.stream.centos.org/9-stream/ (source trees)
+- Packages from the Fedora Project (EPEL): https://dl.fedoraproject.org/pub/epel/9/Everything/source/tree/
+- Other vendors: the source RPM published with the binary package
+The official image above also contains the complete binary packages.
+
+Extracted with https://github.com/JSYoo5B/ceph-testcontainers-images (image/roles).
+"""
 MANIFEST_DIRECTORY = Path("usr/share/ceph-testcontainers")
 METADATA_PROBE_PATHS = (
     "etc/ceph", "var/lib/ceph", "run/ceph", "var/log/ceph", "tmp",
@@ -243,6 +262,20 @@ def validate_executables(materialized, path_members):
                 raise RuntimeError("Materialized executable lost its executable permission: " + path)
 
 
+def source_listing(inventory, packages):
+    """Binary package, version, source RPM and vendor; the source RPMs are the corresponding source."""
+    rows = ["%s\t%s\t%s\t%s" % (name, inventory[name]["version"], inventory[name]["source_rpm"],
+                                 inventory[name]["vendor"]) for name in sorted(packages)]
+    return "# package\tversion\tsource-rpm\tvendor\n" + "\n".join(rows) + "\n"
+
+
+def source_notice(source_image, ceph_version):
+    """Plain-text notice: what the image contains, its licenses and where its source is."""
+    match = re.match(r"ceph version (\S+) \(([0-9a-f]+)\)", ceph_version)
+    release, commit = (match.group(1), match.group(2)) if match else ("unknown", "unknown")
+    return SOURCE_NOTICE.format(source_image=source_image, release=release, commit=commit)
+
+
 def metadata_probes(materialized, probe_paths=METADATA_PROBE_PATHS):
     result = {}
     for path in probe_paths:
@@ -364,6 +397,8 @@ def main():
             "# source-image: " + source_image + "\n" + "\n".join(versions) + "\n",
         )
         (manifest_directory / "image-manifest.json").write_text(json.dumps(metadata, indent=2, sort_keys=True) + "\n")
+        (manifest_directory / "source-packages.txt").write_text(source_listing(inventory, selected[role]))
+        (manifest_directory / "SOURCES.txt").write_text(source_notice(source_image, ceph_version))
         write_archive(manifest_root, output / "manifests" / (role + ".tar"))
 
     plan = {

@@ -37,6 +37,8 @@ osd pool default pgp num = 0
 osd pool default pg autoscale mode = off
 mon allow pool size one = true
 mon allow pool delete = true
+# Host disk usage is not an image property; keep MON_DISK_LOW out of HEALTH_OK.
+mon data avail warn = 5
 ms bind ipv6 = false
 [osd]
 osd objectstore = bluestore

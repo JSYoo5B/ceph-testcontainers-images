@@ -23,7 +23,7 @@ python3 image/roles/build.py --source-image quay.io/ceph/ceph:v20.2.4 --platform
 | --- | --- |
 | `--source-image IMAGE` | Official Ceph image, by tag or digest; required |
 | `--repository NAME` | Output repository, default `ceph-testcontainers` |
-| `--tag PREFIX` | Output tag prefix; defaults to the release reported by `ceph --version` |
+| `--tag PREFIX` | Output tag prefix; defaults to `official-<release>` from `ceph --version` |
 | `--platform PLATFORM` | Target platform; defaults to the source image architecture |
 | `--check quick` | After the build, run the quick image check on the five images |
 | `--check full` | After the build, run the full image check for the mixed role set and for `all` |
@@ -35,7 +35,7 @@ python3 image/roles/build.py --source-image quay.io/ceph/ceph:v20.2.4 --platform
 
 ## Output images
 
-Images are tagged `<repository>:<prefix>-<role>`, for example `ceph-testcontainers:20.2.4-control`. They are loaded into the local Docker engine. Nothing is pushed to a registry, and no multi-platform manifest is created; each run builds one platform.
+Images are tagged `<repository>:official-<release>-<role>`, for example `ceph-testcontainers:official-20.2.4-control`. The `official` prefix marks images whose files all come from the official image. They are loaded into the local Docker engine. Nothing is pushed to a registry, and no multi-platform manifest is created; each run builds one platform.
 
 | Role | Root packages |
 | --- | --- |
@@ -48,6 +48,17 @@ Images are tagged `<repository>:<prefix>-<role>`, for example `ceph-testcontaine
 Every role also receives a shell, core utilities, `hostname`, `gawk`, CA certificates and the base filesystem package. Each role contains the RPM dependency closure of its roots, resolved offline from the source image's package database. Because `ceph-common` is a dependency of every Ceph daemon package, the `ceph`, `rados`, `rbd` and `radosgw-admin` clients and the Python bindings are present in every role. Packages that only operations need, such as the dashboard, disk prediction, cephadm and compilers, are not in any closure.
 
 Each image contains `/usr/share/ceph-testcontainers/image-manifest.json` and `runtime-packages.txt`, which record the role, source image digest, architecture, Ceph version, root packages, package versions and file groups.
+
+## Licenses and source
+
+The extracted files keep the licenses of the packages they come from; Ceph itself is mostly LGPL-2.1 or LGPL-3. Every image carries what a recipient needs:
+
+- the license files of its packages (`%license` files and Ceph's `COPYING`)
+- `/usr/share/ceph-testcontainers/source-packages.txt`: each binary package with its version, source RPM and vendor
+- `/usr/share/ceph-testcontainers/SOURCES.txt`: a notice naming the official source image and where each source RPM is published (download.ceph.com for Ceph, CentOS Stream and EPEL source trees for the rest)
+- OCI labels: `org.opencontainers.image.base.name` (source image digest), `org.opencontainers.image.source` (this repository) and `io.ceph-testcontainers.source-notice`
+
+The smoke test fails if the notice is missing or if any runtime package lacks a source RPM entry. Whoever redistributes the images passes these files on unchanged.
 
 ## Assembly and layers
 

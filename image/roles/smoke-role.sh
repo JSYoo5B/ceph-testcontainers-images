@@ -47,6 +47,16 @@ required_probes = {
 }
 required_probes.update(('/lib64', '/usr/share/doc/ceph/COPYING'))
 require(Path('/usr/share/doc/ceph/COPYING').stat().st_size > 0, 'Ceph COPYING is empty')
+# Licenses and corresponding source must ship with the image.
+notice = (manifest_dir / 'SOURCES.txt').read_text()
+require(source in notice and 'source-packages.txt' in notice, 'Source notice is missing or incomplete')
+sources = {}
+for line in (manifest_dir / 'source-packages.txt').read_text().splitlines():
+    if line and not line.startswith('#'):
+        name, version, source_rpm, _vendor = line.split('\t')
+        require(source_rpm.endswith('.src.rpm'), 'Package without a source RPM: ' + name)
+        sources[name + '-' + version] = source_rpm
+require(set(package_lines[1:]) == set(sources), 'Source listing differs from the runtime package list')
 require(isinstance(probes, dict) and required_probes.issubset(probes),
         'Image manifest lacks required ownership/mode probes')
 for path, expected in sorted(probes.items()):

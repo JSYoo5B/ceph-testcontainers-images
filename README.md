@@ -30,6 +30,7 @@ image/check.py               Checker for any local image
 image/check-runtime.sh       Quick check probe, run inside each image
 image/functional/            Functional scenarios used by the full check
 image/roles/                 Role image extraction from the official image
+image/debian/, image/ubuntu/  Role images from distribution packages
 ```
 
 Unit tests live in `tests/` next to each tool. Reports and logs go to the ignored `artifacts/` directory.
@@ -76,7 +77,23 @@ make role-images        # extract, smoke test and quick check
 make role-images-full   # extract, smoke test and full check
 ```
 
-The output is `ceph-testcontainers:<release>-<role>` for the four roles and `all`. See [Role Images](docs/ROLE_IMAGES.md).
+The output is `ceph-testcontainers:official-<release>-<role>` for the four roles and `all`. See [Role Images](docs/ROLE_IMAGES.md).
+
+## Images from distribution packages
+
+[image/debian](image/debian/Dockerfile) (bookworm-slim) and [image/ubuntu](image/ubuntu/Dockerfile) (24.04) build the same five roles by installing only the needed packages from Ceph's own Debian and Ubuntu repositories at download.ceph.com. They are built with `make debian-images` and `make ubuntu-images` and tagged `<distribution>-<release>-<role>`. The arm64 Ubuntu images set `TCMALLOC_STACKTRACE_METHOD=generic_fp`, because Ceph's Noble daemons crash with SIGILL in the default tcmalloc stack unwinder on some ARM64 hosts; on amd64 the same setting makes them crash, so it is not set there. Like the extracted images, each one records its packages, licenses and source pointers under `/usr/share/ceph-testcontainers/`.
+
+## Published images
+
+Images are published as `ghcr.io/jsyoo5b/ceph-testcontainers-images:<variant>-20.2.4-<role>` for `linux/amd64` and `linux/arm64`, with `<role>` one of `control`, `osd`, `rgw`, `mds` and `all`.
+
+| Variant | Source |
+| --- | --- |
+| `official` | Extracted from the official image with `image/roles/` |
+| `debian` | Debian bookworm-slim with Ceph's Debian packages (`image/debian/`) |
+| `ubuntu` | Ubuntu 24.04 with Ceph's Ubuntu packages (`image/ubuntu/`) |
+
+Every published image passed the quick check on both platforms and the full check on `linux/arm64`. The `-linux-amd64` and `-linux-arm64` tags are the single-platform images that the multi-platform tags point to.
 
 ## Development
 
@@ -86,4 +103,4 @@ The output is `ceph-testcontainers:<release>-<role>` for the four roles and `all
 
 The code and documents in this repository are licensed under the [MIT License](LICENSE).
 
-The checker and the functional scenarios run Ceph only inside containers and include no Ceph code. Role images extracted with `image/roles/` are different: they contain Ceph and distribution packages from the official image, each under its own license (Ceph is mostly LGPL-2.1 or LGPL-3, see its [COPYING](https://github.com/ceph/ceph/blob/v20.2.4/COPYING)). The extraction keeps their license files in every image. Whoever distributes such images must meet those licenses, including making the corresponding source available where required.
+The checker and the functional scenarios run Ceph only inside containers and include no Ceph code. Role images built with this repository are different: they contain Ceph and distribution packages, each under its own license (Ceph is mostly LGPL-2.1 or LGPL-3, see its [COPYING](https://github.com/ceph/ceph/blob/v20.2.4/COPYING)). Images built by `image/roles/`, `image/debian/` and `image/ubuntu/` keep their license files and carry `/usr/share/ceph-testcontainers/SOURCES.txt` with `source-packages.txt`, which name the source package of every installed package and where it is published. Whoever distributes such images must meet those licenses, including making the corresponding source available where required.

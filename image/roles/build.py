@@ -20,6 +20,8 @@ import uuid
 
 ROLES = ("control", "osd", "rgw", "mds", "all")
 HERE = Path(__file__).resolve().parent
+PROJECT_URL = "https://github.com/JSYoo5B/ceph-testcontainers-images"
+NOTICE = "/usr/share/ceph-testcontainers/SOURCES.txt"
 PROJECT = HERE.parent.parent
 
 
@@ -157,6 +159,11 @@ def dockerfile(plan, runtime_env=None):
         'ENV PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin LANG=C.UTF-8',
         'CMD ["/bin/bash"]',
         "LABEL org.opencontainers.image.base.name=" + json.dumps(plan["source_image"]),
+        "LABEL org.opencontainers.image.source=" + json.dumps(PROJECT_URL),
+        "LABEL org.opencontainers.image.description=" + json.dumps(
+            "Ceph role image extracted from the official image; packages keep their own licenses, "
+            "see " + NOTICE + " for licenses and corresponding source"),
+        "LABEL io.ceph-testcontainers.source-notice=" + json.dumps(NOTICE),
     ]
     lines += runtime_env_lines(runtime_env or {})
     for role in ROLES:
@@ -202,7 +209,7 @@ def arguments(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--source-image", required=True, help="Official Ceph image tag or immutable digest")
     parser.add_argument("--repository", default="ceph-testcontainers", help="Local output repository; no push is performed")
-    parser.add_argument("--tag", help="Output tag prefix; defaults to actual Ceph version")
+    parser.add_argument("--tag", help="Output tag prefix; defaults to official-<Ceph release>")
     parser.add_argument("--platform", help="One platform per run, e.g. linux/arm64 or linux/amd64")
     parser.add_argument("--output-dir", type=Path, help="Empty directory for manifests, build/smoke logs and report")
     parser.add_argument("--skip-pull", action="store_true", help="Use an already cached source image")
@@ -285,7 +292,7 @@ def main():
             release = re.match(r"ceph version (\S+)", plan["ceph_version"])
             if not release:
                 raise BuildError("Unexpected Ceph version output: " + plan["ceph_version"])
-            tag = args.tag or release.group(1)
+            tag = args.tag or "official-" + release.group(1)
             if not re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9_.-]{0,119}", tag):
                 raise BuildError("Invalid output tag prefix; specify --tag")
             tags = {role: "%s:%s-%s" % (args.repository, tag, role) for role in ROLES}
