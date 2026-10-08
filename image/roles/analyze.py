@@ -17,7 +17,7 @@ BASE = ("bash", "coreutils-single", "hostname", "gawk", "ca-certificates", "file
 ALL_ROOTS = (
     "ceph-mon", "ceph-mgr", "ceph-osd", "ceph-mds", "ceph-radosgw",
     "ceph-common", "python3-cephfs",
-    "rbd-mirror", "cephfs-mirror",
+    "rbd-mirror", "cephfs-mirror", "cryptsetup", "libradosstriper1",
 )
 PROFILES = {
     "full": ALL_ROOTS,

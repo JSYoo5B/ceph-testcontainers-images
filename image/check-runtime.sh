@@ -13,6 +13,12 @@ check() {
         printf 'CHECK\tpassed\t%s\n' "$name"
     else
         printf 'CHECK\tfailed\t%s\n' "$name"
+        case "$name" in
+            path:*|object-class:*) kind=missing_file ;;
+            library-load:*|class-load:*|version:*) kind=loading_failure ;;
+            *) kind=quick_failure ;;
+        esac
+        printf 'FAILURE\t%s\t%s\n' "$kind" "$name"
         failed=1
     fi
 }
@@ -96,6 +102,67 @@ if "$control"; then
     done
     check path:python3 external_command python3
     check python-bindings python3 -c 'import rados, rbd, cephfs, ceph_argparse, ceph_daemon'
+    check path:cryptsetup external_command cryptsetup
+    if external_command cryptsetup; then
+        check library-load:cryptsetup-executable cryptsetup --version
+    fi
+    # Resolve by linker names, not package names or distribution-specific paths.
+    python3 - <<'PY' || failed=1
+import ctypes
+import ctypes.util
+import os
+import subprocess
+import sys
+failed = False
+def result(name, passed, kind):
+    global failed
+    print('CHECK\t%s\t%s' % ('passed' if passed else 'failed', name))
+    if not passed:
+        failed = True
+        print('FAILURE\t%s\t%s' % (kind, name))
+libraries = {
+    'rbd': ('librbd.so.1', ('rbd_encryption_format', 'rbd_encryption_load')),
+    'cryptsetup': ('libcryptsetup.so.12', ('crypt_init', 'crypt_load', 'crypt_keyslot_change_by_passphrase')),
+    'radosstriper': ('libradosstriper.so.1', ('rados_striper_create', 'rados_striper_write',
+                                         'rados_striper_read', 'rados_striper_remove')),
+}
+for name, (fallback, symbols) in libraries.items():
+    # find_library may need ldconfig or a compiler, neither is a role
+    # requirement. The loader can resolve the supported ABI directly too.
+    soname = ctypes.util.find_library(name) or fallback
+    try:
+        library = ctypes.CDLL(soname, mode=os.RTLD_NOW)
+    except OSError as error:
+        print(str(error))
+        missing = str(error).startswith(soname + ': cannot open shared object file')
+        result('library-present:' + name, not missing, 'missing_file')
+        if not missing:
+            result('library-load:' + name, False, 'loading_failure')
+        continue
+    result('library-present:' + name, True, 'missing_file')
+    try:
+        for symbol in symbols:
+            getattr(library, symbol)
+    except AttributeError as error:
+        print(str(error))
+        result('library-load:' + name, False, 'loading_failure')
+    else:
+        result('library-load:' + name, True, 'loading_failure')
+try:
+    import rados, rbd
+    assert callable(rbd.Image.encryption_format) and callable(rbd.Image.encryption_load)
+    assert callable(rados.WriteOpCtx.execute) and callable(rados.Ioctx.lock_exclusive)
+    assert callable(rados.Ioctx.unlock)
+except (ImportError, AttributeError, AssertionError) as error:
+    print(str(error))
+    result('python-client-features', False, 'loading_failure')
+else:
+    result('python-client-features', True, 'loading_failure')
+help_output = subprocess.run(['rados', '--help'], capture_output=True, text=True)
+result('rados-striper-option', help_output.returncode == 0 and '--striper' in help_output.stdout,
+       'unsupported_feature')
+sys.exit(1 if failed else 0)
+PY
     mgr_modules() {
         module_path=$(ceph-mgr --show-config-value mgr_module_path) || return 1
         python3 - "$module_path" <<'PY'
@@ -130,8 +197,31 @@ if "$osd"; then
     check version:ceph-osd version ceph-osd
     class_dir=$(ceph-osd --show-config-value osd_class_dir) || failed=1
     plugin_dir=$(ceph-osd --show-config-value plugin_dir) || failed=1
-    for class in rbd rgw cephfs; do
+    class_load() {
+        for library in "$class_dir/libcls_$1.so"*; do
+            if test -f "$library"; then
+                # Object classes reference OSD exports: load in ceph-osd itself,
+                # with eager ELF relocation, without Python or a host compiler.
+                status=0
+                LD_BIND_NOW=1 LD_PRELOAD="$library" ceph-osd --version \
+                    > "$work/class-version" 2> "$work/class-error" || status=$?
+                cat "$work/class-version" "$work/class-error"
+                test "$status" -eq 0 || return "$status"
+                # glibc can ignore an invalid/missing preload and still exit 0.
+                # That is a loading failure, even if ceph-osd prints a version.
+                awk 'BEGIN {failed=0}
+                    /cannot be preloaded|cannot open shared object|wrong ELF|invalid ELF|undefined symbol|ERROR: ld.so|Error loading|Error relocating/ {failed=1}
+                    END {exit failed}' "$work/class-error"
+                return $?
+            fi
+        done
+        return 1
+    }
+    for class in rbd rgw cephfs hello lock; do
         check "object-class:$class" plugins "$class_dir" "libcls_$class.so*"
+        if plugins "$class_dir" "libcls_$class.so*"; then
+            check "class-load:$class" class_load "$class"
+        fi
     done
     for group in compressor erasure-code; do
         check "plugins:$group" plugins "$plugin_dir/$group" '*.so*'

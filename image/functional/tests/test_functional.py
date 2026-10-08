@@ -4,6 +4,7 @@ from pathlib import Path
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 HERE = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(HERE))
@@ -64,6 +65,37 @@ class RunnerTests(unittest.TestCase):
     def test_full_check_covers_single_and_multi_cluster_scenarios(self):
         self.assertEqual(set(suite.SCENARIOS), set(suite.SINGLE_FUNCTIONS) | set(suite.MULTI_FUNCTIONS))
         self.assertEqual(len(suite.MULTI_CLUSTER), 4)
+
+    def test_cleanup_engine_failure_is_recorded_without_hiding_bootstrap_failure(self):
+        with tempfile.TemporaryDirectory() as temporary, mock.patch.object(suite, "Docker") as docker, \
+                mock.patch.object(suite, "Cluster") as cluster:
+            cluster.return_value.start.side_effect = suite.ClusterError("bootstrap failure")
+            docker.return_value.cleanup.side_effect = suite.ClusterError("cleanup engine failure")
+            docker.return_value.leftovers.return_value = []
+            result = suite.run({role: "image" for role in suite.ROLES}, ["rbd-encryption"],
+                               Path(temporary), log=lambda _: None)
+        self.assertEqual(result["rbd-encryption"]["failure_stage"], "bootstrap")
+        self.assertEqual(result["cleanup"]["status"], "failed")
+        self.assertEqual(result["cleanup"]["failure_kind"], "cleanup_failure")
+        self.assertTrue(result["cleanup"]["errors"])
+
+
+class HeaderIsolationTests(unittest.TestCase):
+    def test_updates_never_extend_past_header_including_short_last_block(self):
+        client = probe("client_capabilities")
+        before = b"abcdefghij"
+        after = b"AbcdefghiJ"
+        raw_ciphertext = b"ciphertext must stay byte identical"
+        raw = bytearray(before + raw_ciphertext)
+        updates = client.header_updates(before, after, chunk=4)
+        self.assertTrue(updates)
+        for offset, data in updates:
+            self.assertLessEqual(offset + len(data), len(before))
+            raw[offset:offset + len(data)] = data
+        self.assertEqual(raw, after + raw_ciphertext)
+        self.assertEqual(client.header_updates(after, after), [])
+        with self.assertRaises(AssertionError):
+            client.header_updates(before, after + b"unexpected size change")
 
 
 if __name__ == "__main__":

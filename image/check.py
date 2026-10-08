@@ -43,8 +43,13 @@ def arguments(argv=None):
     parser.add_argument("--output-dir", type=Path, help="Fresh report/log directory (default: artifacts/image-check-UUID)")
     parser.add_argument("--full", action="store_true",
                         help="Full check: also run every functional scenario on real clusters")
+    parser.add_argument("--scenario", action="append", choices=suite.SCENARIOS,
+                        help="With --full, run only selected scenarios; records a scoped functional check")
     parser.add_argument("--probe-timeout", type=positive_number, default=120, metavar="SECONDS")
-    return parser.parse_args(argv)
+    args = parser.parse_args(argv)
+    if args.scenario and not args.full:
+        parser.error("--scenario requires --full")
+    return args
 
 
 def image_arguments(values):
@@ -111,12 +116,15 @@ def inspect_image(reference, platform):
 def parse_probe(output):
     checks = []
     versions = {}
+    failures = {}
     for line in output.splitlines():
         fields = line.split("\t", 2)
         if len(fields) != 3:
             continue
         if fields[0] == "CHECK":
             checks.append({"name": fields[2], "status": fields[1]})
+        elif fields[0] == "FAILURE":
+            failures[fields[2]] = fields[1]
         elif fields[0] == "VERSION":
             match = VERSION.search(fields[2])
             if not match:
@@ -126,6 +134,10 @@ def parse_probe(output):
         raise CheckError("Runtime probe returned no checks or versions")
     if len({(version["release"], version["commit"]) for version in versions.values()}) > 1:
         raise CheckError("Ceph binaries within one image have different release/commit values")
+    for item in checks:
+        if item["status"] != "passed":
+            item.update(failure_stage="quick:" + item["name"],
+                        failure_kind=failures.get(item["name"], "quick_failure"))
     return checks, versions
 
 
@@ -145,22 +157,29 @@ def probe_image(role, image, args, output):
         image.update({"checks": checks, "versions": versions, "log": log.name,
                       "status": "passed" if result.returncode == 0 and
                       all(check["status"] == "passed" for check in checks) else "failed"})
+        image["exit_code"] = result.returncode
         if "COMPLETE\t" + role not in result.stdout.splitlines():
             image.update({"status": "failed", "error": "Runtime probe did not finish all checks"})
     except subprocess.TimeoutExpired as error:
-        image.update({"status": "failed", "error": "Runtime probe timed out"})
+        image.update({"status": "failed", "error": "Runtime probe timed out",
+                      "failure_stage": "quick-probe", "failure_kind": "timeout"})
         (output / (role + ".log")).write_bytes((error.stdout or b"") + (error.stderr or b""))
         raise CheckError("Runtime probe timed out: " + role) from error
     except CheckError as error:
-        image.update({"status": "failed", "error": str(error), "log": role + ".log"})
+        image.update({"status": "failed", "error": str(error), "log": role + ".log",
+                      "failure_stage": "quick-probe", "failure_kind": "checker_failure"})
         raise
     finally:
         # No mounts or shared state. Remove even after a killed Docker client.
         try:
             run(["docker", "rm", "--force", container])
+            image["cleanup"] = {"status": "passed", "container": container}
         except CheckError as error:
             if "No such container" not in str(error):
+                image["cleanup"] = {"status": "failed", "container": container, "error": str(error)}
+                image["status"] = "failed"
                 raise
+            image["cleanup"] = {"status": "passed", "container": container, "already_absent": True}
 
 
 def functional_sha256():
@@ -171,8 +190,8 @@ def functional_sha256():
     return digest.hexdigest()
 
 
-def scenarios(name, images, output):
-    results = suite.run(images, suite.SCENARIOS, output / ("scenarios-" + name),
+def scenarios(name, images, output, selected=None):
+    results = suite.run(images, selected or suite.SCENARIOS, output / ("scenarios-" + name),
                         log=lambda line: print("  " + line, flush=True))
     failed = [scenario for scenario, result in results.items() if result["status"] != "passed"]
     status = "failed" if failed else "passed"
@@ -193,7 +212,8 @@ def main(argv=None):
     output.mkdir(parents=True, exist_ok=True)
     if any(output.iterdir()):
         raise CheckError("Output directory must be empty: " + str(output))
-    report = {"schema": 3, "level": "full" if args.full else "quick",
+    report = {"schema": 4, "level": ("functional-selected" if args.scenario else "full") if args.full else "quick",
+              "requested_scenarios": args.scenario or (list(suite.SCENARIOS) if args.full else []),
               "started_at": datetime.now(timezone.utc).isoformat(), "status": "running",
               "preflight": "running", "scenarios": "pending" if sets else "not_requested",
               "images": {}, "functional": {},
@@ -203,8 +223,11 @@ def main(argv=None):
     save(output, report)
     try:
         # Resolve every input before starting any checks, so tags cannot drift.
+        resolved = {}
         for role, reference in references.items():
-            report["images"][role] = inspect_image(reference, args.platform)
+            if reference not in resolved:
+                resolved[reference] = inspect_image(reference, args.platform)
+            report["images"][role] = dict(resolved[reference])
         platforms = {image["platform"] for image in report["images"].values()}
         if len(platforms) != 1:
             raise CheckError("All supplied images must target the same platform")
@@ -227,7 +250,7 @@ def main(argv=None):
             report["functional"][name] = {"status": "running"}
             save(output, report)
             print("Running functional scenarios: " + name, flush=True)
-            report["functional"][name] = scenarios(name, identities, output)
+            report["functional"][name] = scenarios(name, identities, output, args.scenario)
             save(output, report)
         if sets:
             failed = [name for name, result in report["functional"].items() if result["status"] != "passed"]
@@ -236,7 +259,7 @@ def main(argv=None):
                 raise CheckError("Functional scenarios failed for: " + ", ".join(failed))
             report["scenarios"] = "passed"
         report["status"] = "passed"
-    except (CheckError, OSError, ValueError, subprocess.SubprocessError, KeyboardInterrupt) as error:
+    except (CheckError, suite.ClusterError, OSError, ValueError, subprocess.SubprocessError, KeyboardInterrupt) as error:
         report["status"] = "failed"
         report["error"] = str(error) or type(error).__name__
         if report["preflight"] == "running":
@@ -248,6 +271,7 @@ def main(argv=None):
                 result["status"] = "failed"
         print(report["error"], file=sys.stderr)
     finally:
+        report["finished_at"] = datetime.now(timezone.utc).isoformat()
         save(output, report)
         print("Preflight: " + report["preflight"] + "; scenarios: " + report["scenarios"], flush=True)
         print("Report: " + str(output / "check-report.json"), flush=True)

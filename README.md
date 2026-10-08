@@ -24,7 +24,8 @@ Cluster setup always belongs to the testcontainers module, which supplies config
 ## Layout
 
 ```text
-docs/IMAGE_REQUIREMENTS.md   Image requirements and the checker reference
+docs/IMAGE_REQUIREMENTS.md   Runtime requirements by role
+docs/TEST_SCENARIOS.md       Checker usage and test pass criteria
 docs/ROLE_IMAGES.md          Role images extracted from the official image
 image/check.py               Checker for any local image
 image/check-runtime.sh       Quick check probe, run inside each image
@@ -39,13 +40,13 @@ Unit tests live in `tests/` next to each tool. Reports and logs go to the ignore
 
 | Role | Contents |
 | --- | --- |
-| `control` | MON, MGR, CLI and Python clients, RBD and CephFS mirror daemons |
-| `osd` | OSD, BlueStore, object classes and plugins |
+| `control` | MON, MGR, CLI and Python clients, cryptsetup, encrypted RBD and striper clients, RBD and CephFS mirror daemons |
+| `osd` | OSD, BlueStore, object classes including hello/lock and plugins |
 | `rgw` | RGW and its admin CLI |
 | `mds` | CephFS MDS |
 | `all` | Every component of the four roles in one image |
 
-See [Image Requirements](docs/IMAGE_REQUIREMENTS.md) for the exact requirements and where each component is used.
+See [Image Requirements](docs/IMAGE_REQUIREMENTS.md) for the required runtime components and [Test Scenarios](docs/TEST_SCENARIOS.md) for validation.
 
 ## Checking an image
 
@@ -53,7 +54,7 @@ Requires Python 3.9 or later and a Docker engine with API 1.49 or later. The che
 
 | Level | Verifies |
 | --- | --- |
-| Quick (default) | Each image contains the required components |
+| Quick (default) | Required executables, libraries and classes exist and load |
 | Full (`--full`) | The quick check, then every functional scenario on real clusters, including multi-cluster replication |
 
 ```sh
@@ -93,11 +94,14 @@ Images are published as `ghcr.io/jsyoo5b/ceph-testcontainers-images:<variant>-20
 | `debian` | Debian bookworm-slim with Ceph's Debian packages (`image/debian/`) |
 | `ubuntu` | Ubuntu 24.04 with Ceph's Ubuntu packages (`image/ubuntu/`) |
 
-Every published image passed the quick check on both platforms and the full check on `linux/arm64`. The `-linux-amd64` and `-linux-arm64` tags are the single-platform images that the multi-platform tags point to.
+The `-linux-amd64` and `-linux-arm64` tags identify the single-platform
+images referenced by the multi-platform tags. Check the image ID and
+platform you intend to use with the [checker](docs/TEST_SCENARIOS.md).
+A successful report establishes compatibility for its recorded scenarios.
 
 ## Development
 
-`make check` runs the host unit tests of the checker, the functional harness and the role extraction. [The workflow](.github/workflows/test.yml) runs them, then pulls the official image and runs the quick and the full check against it.
+`make check` runs the host unit tests of the checker, the functional harness and the role extraction. [The workflow](.github/workflows/test.yml) checks Debian, Ubuntu and the unmodified official image on native AMD64 and ARM64 runners. Distribution builds check both mixed roles and `all`.
 
 ## License
 

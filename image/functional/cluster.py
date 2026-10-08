@@ -107,6 +107,13 @@ class ClusterError(Exception):
     pass
 
 
+class DockerError(ClusterError):
+    def __init__(self, message, output, returncode):
+        super().__init__(message)
+        self.output = output
+        self.returncode = returncode
+
+
 class Docker:
     """Docker CLI calls labelled with one session, logged to a file."""
 
@@ -127,8 +134,9 @@ class Docker:
         errors = result.stderr if isinstance(result.stderr, str) else result.stderr.decode(errors="replace")
         self.log(command, result.returncode, output + errors, time.monotonic() - started)
         if check and result.returncode:
-            raise ClusterError("Command failed (%d): %s\n%s" % (result.returncode, " ".join(command[:8]),
-                                                                (output + errors)[-2000:]))
+            raise DockerError("Command failed (%d): %s\n%s" % (result.returncode, " ".join(command[:8]),
+                                                               (output + errors)[-2000:]),
+                              output + errors, result.returncode)
         return output
 
     def log(self, command, code, output, seconds):

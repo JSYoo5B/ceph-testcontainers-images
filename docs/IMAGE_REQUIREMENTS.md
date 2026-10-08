@@ -54,13 +54,21 @@ These apply to every role. The official image meets all of them.
 
 | Role | Executables on `PATH` | Additional runtime dependencies |
 | --- | --- | --- |
-| `control` | `ceph-mon`, `ceph-mgr`, `ceph`, `ceph-authtool`, `monmaptool`, `rados`, `rbd`, `rbd-mirror`, `cephfs-mirror`, `radosgw-admin`, `python3` | Python modules `rados`, `rbd`, `cephfs`, `ceph_argparse`, `ceph_daemon`; the release's always-on MGR modules plus `volumes`, `rbd_support` and `mirroring`, each with its Python dependencies |
-| `osd` | `ceph-osd` | BlueStore; `rbd`, `rgw` and `cephfs` object classes; compressor and erasure-code plugins |
+| `control` | `ceph-mon`, `ceph-mgr`, `ceph`, `ceph-authtool`, `monmaptool`, `rados` supporting `--striper`, `rbd`, `cryptsetup`, `rbd-mirror`, `cephfs-mirror`, `radosgw-admin`, `python3` | Python modules `rados`, `rbd`, `cephfs`, `ceph_argparse`, `ceph_daemon`; librbd LUKS1/LUKS2 encryption, libcryptsetup and libradosstriper with their runtime dependencies; the release's always-on MGR modules plus `volumes`, `rbd_support` and `mirroring`, each with its Python dependencies |
+| `osd` | `ceph-osd` | BlueStore; `rbd`, `rgw`, `cephfs`, `hello` and `lock` object classes with their runtime dependencies; compressor and erasure-code plugins |
 | `rgw` | `radosgw`, `radosgw-admin`, `readlink` | Beast HTTP frontend with TLS and the RGW shared libraries |
 | `mds` | `ceph-mds` | MDS shared libraries |
 | `all` | Union of the four roles | Union of the four roles |
 
 Python, the CLI tools of other roles, compilers and development headers are not required in `osd`, `rgw` or `mds`.
+
+`all` includes every control and OSD requirement. `cryptsetup` must be an executable
+on `PATH`: libcryptsetup alone cannot perform the external passphrase-change
+command. The `hello` and `lock` classes belong to OSD; their clients belong to
+control. Striped I/O uses libradosstriper and `lock`, without a separate
+`cls_striper`. Package names and distribution-specific library paths are not
+part of the contract. The system linker must resolve the required libraries
+and their dependencies; Ceph's effective `osd_class_dir` selects the classes.
 
 ## Where each component is used
 
@@ -76,8 +84,9 @@ The table lists what a testcontainers module does with each component. Rows mark
 | `ceph-authtool` | `control` | Generating and reading the admin, daemon and client keyrings |
 | `ceph-mgr` | `control` | Active and standby MGRs, health and placement group readiness |
 | `ceph` with `ceph_argparse`, `ceph_daemon`, Python `rados` | `control` | Every cluster command the module issues; the `ceph` CLI imports these modules |
-| `rados` | `control` | RADOS object I/O, pool inspection and CephFS data pool checks |
+| `rados` and libradosstriper | `control` | RADOS object I/O, striped put/get/rm, pool inspection and CephFS data pool checks |
 | `rbd` | `control` | RBD images, snapshots, clones, namespaces, backup export and import, and RBD mirroring configuration |
+| Python `rados`/`rbd`, librbd encryption, `cryptsetup` | `control` | Userspace encrypted RBD creation/read and external LUKS passphrase changes on regular-file raw exports; RADOS compound class calls and locking |
 | Python `cephfs` | `control` | Userspace CephFS I/O helpers, such as directory pinning and clone identity checks |
 | `python3` | `control` | RGW HTTP and TLS readiness probes, S3, RBD and CephFS client helpers |
 | MGR always-on modules | `control` | Required for `HEALTH_OK`; a missing module or dependency raises a health error |
@@ -88,6 +97,7 @@ The table lists what a testcontainers module does with each component. Rows mark
 | `cephfs-mirror` | `control` | CephFS snapshot mirroring daemon, started in its own container when CephFS mirroring between clusters is requested |
 | `radosgw-admin` | `control` | RGW multisite realm, zonegroup, zone, period and sync policy management, executed from a client container |
 | `ceph-osd` with object classes and plugins | `osd` | OSDs; RBD, RGW and CephFS operations call the object classes inside the OSD, and pools load the compressor and erasure-code plugins |
+| OSD `hello` and `lock` object classes | `osd` | Built-in class requests and striper locking, with each class’s runtime dependencies |
 | `radosgw` | `rgw` | RGW gateways for S3, Swift and STS |
 | `radosgw-admin` | `rgw` | RGW users, keys, buckets and placement created from the gateway container |
 | `readlink` | `rgw` | Confirming that the gateway owns the listening socket on host networks and TLS listeners |
@@ -95,65 +105,13 @@ The table lists what a testcontainers module does with each component. Rows mark
 
 Daemons that are not requested are not started. An image with `rbd-mirror` does not start a mirror daemon in a single cluster, and an `all` image used for OSDs does not start MGR or RGW processes.
 
-## Checking an image
+## Validation
 
-[image/check.py](../image/check.py) checks whether given local images meet these requirements, so a custom-built image can be verified before tests use it. It needs Python 3.9 or later and a Docker CLI and engine, and no build metadata from this repository. `--platform` requires Docker API 1.49 or later. The checker never builds or pulls images.
+[image/check.py](../image/check.py) verifies these requirements for any local
+image. Quick checks verify required executable, library and class presence
+and loading. Functional checks exercise real cluster operations. Missing
+requirements fail validation; file presence or a successful `--version`
+does not establish functional compatibility.
 
-There are two levels:
-
-| Level | Command | Verifies |
-| --- | --- | --- |
-| Quick (default) | `python3 image/check.py --image ...` | Each image contains the required components |
-| Full | `python3 image/check.py --image ... --full` | The quick check, then every functional scenario on real clusters |
-
-```sh
-# Quick check of one image
-python3 image/check.py --image all=my-company/ceph:dev
-
-# Full check of role images
-python3 image/check.py \
-  --image control=my-company/ceph-control:dev \
-  --image osd=my-company/ceph-osd:dev \
-  --image rgw=my-company/ceph-rgw:dev \
-  --image mds=my-company/ceph-mds:dev \
-  --full
-```
-
-| Option | Behavior |
-| --- | --- |
-| `--image ROLE=REF` | Image for a role; repeatable. An `all` image may also be checked as `control` only |
-| `--full` | Run the full check; requires `all` or all four role images |
-| `--platform PLATFORM` | Select `linux/arm64` or `linux/amd64` from a multi-platform local image |
-| `--output-dir DIR` | Empty report directory, default `artifacts/image-check-<uuid>` |
-| `--probe-timeout SECONDS` | Quick check timeout per image, default 120 |
-
-The tag of each image is resolved once to its image ID, and every later step uses that ID. All images in one run must share a platform. Containers use the local default platform, so the full check requires single-platform local images.
-
-### Quick check
-
-The quick check runs one disposable container per image with no network and no volumes. It checks the utilities, writable paths, `hostname -i`, `sleep infinity`, executable versions, Python imports, keyring and monmap creation, MGR module files and OSD object classes and plugins. MGR and OSD paths are read with `--show-config-value`. The quick check finds missing executables and many missing libraries, but it does not prove that every plugin loads or that a cluster works.
-
-### Full check
-
-The full check runs the functional scenarios in [image/functional](../image/functional/). They bootstrap clusters from the supplied images through the Docker CLI, the way a testcontainers module does, and exercise real data paths. When both `all` and the four role images are given, the scenarios run once for the mixed role set and once for `all`.
-
-| Scenario | Clusters | Verifies |
-| --- | --- | --- |
-| `cluster-lifecycle` | 1 | Bootstrap of MON, MGR and two OSDs; RADOS object I/O; OSD restart, addition and removal with data intact; `HEALTH_OK` |
-| `rbd` | 1 | RBD image I/O through the Python binding; snapshot, protect, clone, flatten and parent removal |
-| `cephfs` | 1 | MDS and filesystem; file write, fsync, rename and unlink across sessions; MGR `volumes` subvolume |
-| `rgw-s3` | 1 | RGW and `radosgw-admin` users; SigV4 bucket and object operations; rejection of wrong and anonymous credentials |
-| `rbd-backup` | 2 | `rbd export-diff` and `import-diff`, full and incremental, verified by content hash |
-| `rbd-snapshot-mirror` | 2 | Peer bootstrap and `rbd-mirror` snapshot mirroring over two update rounds |
-| `cephfs-snapshot-mirror` | 2 | MGR `mirroring` peer bootstrap and `cephfs-mirror` replication of a directory snapshot |
-| `rgw-multisite` | 2 | Realm, zonegroup and zones, period commits, realm pull and object replication to the secondary zone |
-
-Single-cluster scenarios share one cluster; each multi-cluster scenario starts its own pair. Clusters run on private Docker networks, and only the containers that talk to the peer cluster are attached to both networks. Every container and network carries a session label and is removed when the run ends; leftovers fail the run.
-
-`python3 image/functional/run.py --image ROLE=REF [--scenario NAME]` runs selected scenarios directly, for example while developing an image.
-
-### Report
-
-Each run writes `check-report.json`, one quick check log per role and, for the full check, a directory per image set with the Docker command log, per-scenario results and container logs of failed scenarios. The report records the check level, input references, resolved image IDs and registry digests, platform, image environment, Ceph release and commit, the hashes of the checker, the probe and the functional scenarios, and the status of `preflight` and `scenarios` (`passed`, `failed`, `not_run` or `not_requested`). The exit code is 0 on success, 1 on a failed check and 2 on invalid input.
-
-A passing report applies to the checked image IDs and platform. It is not a claim about other platforms or about module features outside the listed scenarios.
+See [Test Scenarios](TEST_SCENARIOS.md) for checker commands, scenario steps,
+pass criteria, validation scope and result interpretation.

@@ -11,7 +11,7 @@ import subprocess
 ROOT = Path("/runtime-rootfs")
 PACKAGES = (
     "ceph-mon", "ceph-mgr", "ceph-osd", "ceph-mds", "ceph-radosgw",
-    "ceph-common", "python3-cephfs", "rbd-mirror", "cephfs-mirror",
+    "ceph-common", "python3-cephfs", "rbd-mirror", "cephfs-mirror", "cryptsetup", "libradosstriper1",
     "bash", "coreutils-single", "hostname",
     "gawk", "ca-certificates", "filesystem",
 )

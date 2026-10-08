@@ -21,7 +21,15 @@ jobs:
   # The official image must pass both the quick and the full check.
   official-image:
     needs: unit
-    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - architecture: amd64
+            runner: ubuntu-24.04
+          - architecture: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 60
     env:
       IMAGE: quay.io/ceph/ceph:v20.2.4@sha256:6bb1c8a42fbc0bf87938946990b65174466997bc11c31eb5a323225a779fd8f9
@@ -35,8 +43,75 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: image-check
+          name: official-${{ matrix.architecture }}-check
           path: |
             ${{ runner.temp }}/quick/
             ${{ runner.temp }}/full/
+          if-no-files-found: warn
+
+  extracted-images:
+    needs: unit
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - architecture: amd64
+            runner: ubuntu-24.04
+          - architecture: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    env:
+      IMAGE: quay.io/ceph/ceph:v20.2.4@sha256:6bb1c8a42fbc0bf87938946990b65174466997bc11c31eb5a323225a779fd8f9
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build and check mixed roles and all
+        run: |
+          python3 image/roles/build.py --source-image "$IMAGE" \
+            --repository ceph-check --platform linux/${{ matrix.architecture }} \
+            --check full --output-dir "$RUNNER_TEMP/extracted"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: extracted-${{ matrix.architecture }}-check
+          path: |
+            ${{ runner.temp }}/extracted/*.json
+            ${{ runner.temp }}/extracted/*.log
+            ${{ runner.temp }}/extracted/image-check/
+          if-no-files-found: warn
+
+  distribution-images:
+    needs: unit
+    strategy:
+      fail-fast: false
+      matrix:
+        distribution: [debian, ubuntu]
+        architecture: [amd64, arm64]
+        include:
+          - architecture: amd64
+            runner: ubuntu-24.04
+          - architecture: arm64
+            runner: ubuntu-24.04-arm
+    # Architecture is a separate axis: native runners avoid emulation-specific
+    # daemon failures becoming distribution compatibility claims.
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build all five roles
+        run: make "${{ matrix.distribution }}-images" PLATFORM="linux/${{ matrix.architecture }}" IMAGE_REPOSITORY=ceph-check
+      - name: Check mixed roles and all
+        run: |
+          python3 image/check.py \
+            --image control=ceph-check:${{ matrix.distribution }}-20.2.4-control \
+            --image osd=ceph-check:${{ matrix.distribution }}-20.2.4-osd \
+            --image rgw=ceph-check:${{ matrix.distribution }}-20.2.4-rgw \
+            --image mds=ceph-check:${{ matrix.distribution }}-20.2.4-mds \
+            --image all=ceph-check:${{ matrix.distribution }}-20.2.4-all \
+            --platform linux/${{ matrix.architecture }} --full --output-dir "$RUNNER_TEMP/distribution"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ${{ matrix.distribution }}-${{ matrix.architecture }}-check
+          path: ${{ runner.temp }}/distribution/
           if-no-files-found: warn

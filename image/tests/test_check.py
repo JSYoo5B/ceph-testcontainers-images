@@ -138,6 +138,31 @@ class ImageContractTests(unittest.TestCase):
                 check.main(["--image", "all=image", "--output-dir", temporary])
             self.assertEqual(report.read_text(), "previous evidence")
 
+    def test_missing_and_loading_failures_remain_distinct(self):
+        checks, _ = check.parse_probe(
+            "CHECK\tfailed\tpath:cryptsetup\nFAILURE\tmissing_file\tpath:cryptsetup\n"
+            "CHECK\tfailed\tclass-load:hello\nFAILURE\tloading_failure\tclass-load:hello\n")
+        self.assertEqual([item["failure_kind"] for item in checks], ["missing_file", "loading_failure"])
+        self.assertEqual(checks[1]["failure_stage"], "quick:class-load:hello")
+
+    def test_missing_supported_dependency_fails_without_running_functional(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            def probe(role, image, args, output):
+                image.update(status="failed", checks=[{"name": "path:cryptsetup", "status": "failed",
+                    "failure_kind": "missing_file"}], versions={})
+            with mock.patch.object(check.shutil, "which", return_value="docker"), \
+                    mock.patch.object(check, "inspect_image", return_value={"platform": "linux/arm64", "reference": "image"}), \
+                    mock.patch.object(check, "probe_image", side_effect=probe), \
+                    mock.patch.object(check.suite, "run") as functional, \
+                    contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                code = check.main(["--image", "all=image", "--full", "--scenario", "rbd-encryption",
+                                   "--output-dir", temporary])
+            functional.assert_not_called()
+            report = json.loads((Path(temporary) / "check-report.json").read_text())
+        self.assertEqual(code, 1)
+        self.assertEqual(report["level"], "functional-selected")
+        self.assertEqual(report["scenarios"], "not_run")
+
 
 if __name__ == "__main__":
     unittest.main()

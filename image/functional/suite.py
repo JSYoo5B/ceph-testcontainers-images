@@ -7,10 +7,11 @@ import time
 import traceback
 import uuid
 
-from cluster import RGW_PORT, Cluster, ClusterError, Docker, wait
+from cluster import RGW_PORT, Cluster, ClusterError, Docker, DockerError, wait
 
 ROLES = ("control", "osd", "rgw", "mds")
-SINGLE_CLUSTER = ("cluster-lifecycle", "rbd", "cephfs", "rgw-s3")
+CLIENT_CAPABILITIES = ("rbd-encryption", "rados-object-class", "rados-striper")
+SINGLE_CLUSTER = ("cluster-lifecycle", "rbd", "cephfs", "rgw-s3") + CLIENT_CAPABILITIES
 MULTI_CLUSTER = ("rbd-backup", "rbd-snapshot-mirror", "cephfs-snapshot-mirror", "rgw-multisite")
 SCENARIOS = SINGLE_CLUSTER + MULTI_CLUSTER
 HERE = Path(__file__).resolve().parent
@@ -214,7 +215,35 @@ def rgw_multisite(primary, secondary, workdir):
         str(1 << 20)), timeout=420, interval=10)
 
 
-SINGLE_FUNCTIONS = {"cluster-lifecycle": cluster_lifecycle, "rbd": rbd, "cephfs": cephfs, "rgw-s3": rgw_s3}
+class ProbeFailure(ClusterError):
+    def __init__(self, diagnostic):
+        self.diagnostic = diagnostic
+        super().__init__(diagnostic["failure_stage"] + ": " + diagnostic["error_type"])
+
+
+def client_capability(cluster, name):
+    pool = "tc-" + name
+    cluster.client("ceph", "osd", "pool", "create", pool)
+    cluster.client("ceph", "osd", "pool", "application", "enable", pool,
+                   "rbd" if name == "rbd-encryption" else "rados")
+    if name == "rbd-encryption":
+        cluster.client("rbd", "pool", "init", pool)
+    try:
+        output = cluster.python("client_capabilities.py", name, pool, timeout=420)
+    except DockerError as error:
+        for line in error.output.splitlines():
+            if line.startswith("PROBE_FAILURE\t"):
+                raise ProbeFailure(json.loads(line.partition("\t")[2])) from error
+        raise
+    for line in output.splitlines():
+        if line.startswith("PROBE_RESULT\t"):
+            return json.loads(line.partition("\t")[2])
+    raise ClusterError("client capability probe returned no proof")
+
+
+SINGLE_FUNCTIONS = {"cluster-lifecycle": cluster_lifecycle, "rbd": rbd, "cephfs": cephfs, "rgw-s3": rgw_s3,
+                   **{name: (lambda cluster, name=name: client_capability(cluster, name))
+                      for name in CLIENT_CAPABILITIES}}
 MULTI_FUNCTIONS = {"rbd-backup": rbd_backup, "rbd-snapshot-mirror": rbd_snapshot_mirror,
                    "cephfs-snapshot-mirror": cephfs_snapshot_mirror, "rgw-multisite": rgw_multisite}
 
@@ -236,20 +265,35 @@ def run(images, scenarios, output, log=print):
     output.mkdir(parents=True, exist_ok=True)
     docker = Docker(uuid.uuid4().hex, output / "docker.log")
     results = {}
+    cleanup_errors = []
+
+    def cleanup():
+        try:
+            docker.cleanup()
+        except Exception as error:
+            cleanup_errors.append(str(error)[-2000:])
 
     def attempt(name, clusters, body):
         log("Scenario " + name)
         started = time.monotonic()
         try:
-            body()
+            evidence = body()
             results[name] = {"status": "passed"}
+            if evidence is not None:
+                results[name]["proof"] = evidence
         except Exception as error:  # Record and continue with the next scenario.
             results[name] = {"status": "failed", "error": str(error)[-3000:]}
+            results[name].update(failure_stage="scenario", failure_kind="functional_failure")
+            if isinstance(error, ProbeFailure):
+                results[name].update(error.diagnostic)
             (output / (name + ".trace")).write_text(traceback.format_exc())
             directory = output / (name + "-logs")
             directory.mkdir(exist_ok=True)
             for cluster in clusters:
-                cluster.logs(directory)
+                try:
+                    cluster.logs(directory)
+                except Exception as log_error:
+                    results[name].setdefault("log_errors", []).append(str(log_error)[-1000:])
         results[name]["seconds"] = round(time.monotonic() - started, 1)
         log("  " + results[name]["status"] + " (%ss)" % results[name]["seconds"])
 
@@ -260,13 +304,18 @@ def run(images, scenarios, output, log=print):
             try:
                 cluster.start()
             except Exception as error:
-                cluster.logs(output)
                 for name in single:
-                    results[name] = {"status": "failed", "error": "bootstrap: " + str(error)[-3000:]}
+                    results[name] = {"status": "failed", "error": "bootstrap: " + str(error)[-3000:],
+                                     "failure_stage": "bootstrap", "failure_kind": "functional_failure"}
+                try:
+                    cluster.logs(output)
+                except Exception as log_error:
+                    for name in single:
+                        results[name]["log_errors"] = [str(log_error)[-1000:]]
             else:
                 for name in single:
                     attempt(name, [cluster], lambda name=name: SINGLE_FUNCTIONS[name](cluster))
-            docker.cleanup()
+            cleanup()
         with tempfile.TemporaryDirectory(prefix="ceph-functional-") as temporary:
             for name in (name for name in MULTI_CLUSTER if name in scenarios):
                 pair = [Cluster(docker, name.split("-")[0] + "-a", images),
@@ -277,10 +326,17 @@ def run(images, scenarios, output, log=print):
                         cluster.start()
                     MULTI_FUNCTIONS[name](pair[0], pair[1], Path(temporary))
                 attempt(name, pair, body)
-                docker.cleanup()
+                cleanup()
     finally:
-        docker.cleanup()
-        leftovers = docker.leftovers()
-        if leftovers:
-            results["cleanup"] = {"status": "failed", "error": "Leftover resources: " + " ".join(leftovers)}
+        cleanup()
+        try:
+            leftovers = docker.leftovers()
+        except Exception as error:
+            leftovers = []
+            cleanup_errors.append("Cannot verify leftovers: " + str(error)[-2000:])
+        if leftovers or cleanup_errors:
+            results["cleanup"] = {"status": "failed", "leftovers": leftovers, "errors": cleanup_errors,
+                                  "failure_stage": "cleanup", "failure_kind": "cleanup_failure"}
+        else:
+            results["cleanup"] = {"status": "passed", "session": docker.session, "leftovers": []}
     return results

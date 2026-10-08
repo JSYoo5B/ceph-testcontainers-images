@@ -39,13 +39,19 @@ Images are tagged `<repository>:official-<release>-<role>`, for example `ceph-te
 
 | Role | Root packages |
 | --- | --- |
-| `control` | `ceph-mon`, `ceph-mgr`, `ceph-common`, `python3-cephfs`, `rbd-mirror`, `cephfs-mirror` |
+| `control` | `ceph-mon`, `ceph-mgr`, `ceph-common`, `python3-cephfs`, `rbd-mirror`, `cephfs-mirror`, `cryptsetup`, `libradosstriper1` |
 | `osd` | `ceph-osd` |
 | `rgw` | `ceph-radosgw` |
 | `mds` | `ceph-mds` |
 | `all` | Union of the four roles |
 
 Every role also receives a shell, core utilities, `hostname`, `gawk`, CA certificates and the base filesystem package. Each role contains the RPM dependency closure of its roots, resolved offline from the source image's package database. Because `ceph-common` is a dependency of every Ceph daemon package, the `ceph`, `rados`, `rbd` and `radosgw-admin` clients and the Python bindings are present in every role. Packages that only operations need, such as the dashboard, disk prediction, cephadm and compilers, are not in any closure.
+
+Cryptsetup's executable and dependency closure are retained in control/all;
+the striper client is an explicit root there. OSD's package closure includes
+the hello and lock classes. These package names describe this RPM builder,
+not the portable requirements for custom images. The generic checker verifies
+functionality and loading without depending on RPM metadata.
 
 Each image contains `/usr/share/ceph-testcontainers/image-manifest.json` and `runtime-packages.txt`, which record the role, source image digest, architecture, Ceph version, root packages, package versions and file groups.
 

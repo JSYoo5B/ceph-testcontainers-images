@@ -4,7 +4,6 @@
 Example: python3 image/functional/run.py --image all=quay.io/ceph/ceph:v20.2.4
 """
 import argparse
-import json
 from pathlib import Path
 import sys
 import uuid
@@ -35,10 +34,17 @@ def main(argv=None):
     parser.add_argument("--output-dir", type=Path, help="Log directory (default: artifacts/functional-UUID)")
     args = parser.parse_args(argv)
     output = (args.output_dir or Path("artifacts") / ("functional-" + uuid.uuid4().hex[:8])).resolve()
-    results = suite.run(images_from(args.image), args.scenario or list(suite.SCENARIOS), output)
-    (output / "results.json").write_text(json.dumps(results, indent=2, sort_keys=True) + "\n")
-    print("Results: " + str(output / "results.json"))
-    return 0 if all(result["status"] == "passed" for result in results.values()) else 1
+    # Reuse identity, version, quick prerequisite and cleanup reporting instead
+    # of leaving standalone runs with mutable tags and incomplete evidence.
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+    import check as checker
+    references = images_from(args.image)
+    forwarded = ["--full", "--output-dir", str(output)]
+    for role, reference in references.items():
+        forwarded += ["--image", role + "=" + reference]
+    for name in args.scenario or []:
+        forwarded += ["--scenario", name]
+    return checker.main(forwarded)
 
 
 if __name__ == "__main__":
