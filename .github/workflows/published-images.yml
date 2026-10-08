@@ -1,0 +1,90 @@
+name: published images
+
+on:
+  workflow_dispatch:
+    inputs:
+      images:
+        description: 'JSON digest map: variant -> architecture -> role -> sha256 digest'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  packages: read
+
+jobs:
+  unit:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.9'
+      - run: make check
+
+  published-images:
+    needs: unit
+    strategy:
+      fail-fast: false
+      matrix:
+        variant: [official, debian, ubuntu]
+        architecture: [amd64, arm64]
+        include:
+          - architecture: amd64
+            runner: ubuntu-24.04
+          - architecture: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - name: Pull published digests and check mixed roles and all
+        env:
+          PUBLISHED_IMAGES: ${{ inputs.images }}
+          IMAGE_VARIANT: ${{ matrix.variant }}
+          IMAGE_ARCHITECTURE: ${{ matrix.architecture }}
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+          import re
+          import subprocess
+          import sys
+
+          images = json.loads(os.environ['PUBLISHED_IMAGES'])
+          variants = {'official', 'debian', 'ubuntu'}
+          architectures = {'amd64', 'arm64'}
+          roles = ('control', 'osd', 'rgw', 'mds', 'all')
+          if set(images) != variants:
+              raise ValueError('Provide all three image variants')
+          for variant in variants:
+              if set(images[variant]) != architectures:
+                  raise ValueError('Provide both architectures for every variant')
+              for architecture in architectures:
+                  entries = images[variant][architecture]
+                  if set(entries) != set(roles):
+                      raise ValueError('Provide all five roles for every platform')
+                  if any(not isinstance(digest, str) or not re.fullmatch(r'sha256:[0-9a-f]{64}', digest)
+                         for digest in entries.values()):
+                      raise ValueError('Image references must be immutable sha256 digests')
+          output = Path(os.environ['RUNNER_TEMP'])
+          (output / 'published-digests.json').write_text(json.dumps(images, indent=2) + '\n')
+          platform = 'linux/' + os.environ['IMAGE_ARCHITECTURE']
+          entries = images[os.environ['IMAGE_VARIANT']][os.environ['IMAGE_ARCHITECTURE']]
+          command = [sys.executable, 'image/check.py', '--platform', platform,
+                     '--full', '--output-dir', str(output / 'published-check')]
+          for role in roles:
+              reference = 'ghcr.io/jsyoo5b/ceph-testcontainers-images@' + entries[role]
+              subprocess.run(['docker', 'pull', '--platform', platform, reference], check=True)
+              command.extend(['--image', role + '=' + reference])
+          subprocess.run(command, check=True)
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: published-${{ matrix.variant }}-${{ matrix.architecture }}-check
+          path: |
+            ${{ runner.temp }}/published-digests.json
+            ${{ runner.temp }}/published-check/
+          if-no-files-found: warn

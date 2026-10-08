@@ -88,6 +88,8 @@ The output is `ceph-testcontainers:official-<release>-<role>` for the four roles
 
 Images are published as `ghcr.io/jsyoo5b/ceph-testcontainers-images:<variant>-20.2.4-<role>` for `linux/amd64` and `linux/arm64`, with `<role>` one of `control`, `osd`, `rgw`, `mds` and `all`.
 
+After uploading images, the [published images workflow](.github/workflows/published-images.yml) checks the uploaded platform digests on native AMD64 and ARM64 runners. It runs the full functional suite for both the four-role combination and `all` for each variant. Supply the digest map as `variant -> architecture -> role -> sha256 digest` through the workflow's `images` input.
+
 | Variant | Source |
 | --- | --- |
 | `official` | Extracted from the official image with `image/roles/` |
