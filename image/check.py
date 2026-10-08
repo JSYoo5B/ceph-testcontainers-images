@@ -103,7 +103,13 @@ def inspect_image(reference, platform):
         raise CheckError("Docker inspection did not return an immutable image ID")
     metadata = original
     if platform:
-        metadata = image_metadata(["docker", "image", "inspect", "--platform", platform, identity])
+        try:
+            metadata = image_metadata(["docker", "image", "inspect", "--platform", platform, identity])
+        except CheckError as error:
+            # Docker 28's classic image store exposes only the loaded platform
+            # and has no inspect --platform option. Still enforce its platform.
+            if "unknown flag: --platform" not in str(error):
+                raise
     actual = metadata["Os"] + "/" + metadata["Architecture"]
     if actual not in ("linux/arm64", "linux/amd64") or (platform and actual != platform):
         raise CheckError("Unsupported or mismatched image platform: " + actual)

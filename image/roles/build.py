@@ -65,10 +65,19 @@ def save_json(path, value):
 
 
 def inspect_image(image, platform=None):
-    args = ["docker", "image", "inspect"]
+    original = json.loads(run(["docker", "image", "inspect", image], capture=True))[0]
+    inspected = original
     if platform:
-        args += ["--platform", platform]
-    return json.loads(run(args + [image], capture=True))[0]
+        try:
+            inspected = json.loads(run(["docker", "image", "inspect", "--platform", platform,
+                                         original["Id"]], capture=True))[0]
+        except BuildError as error:
+            if "unknown flag: --platform" not in str(error):
+                raise
+        actual = inspected["Os"] + "/" + inspected["Architecture"]
+        if actual != platform:
+            raise BuildError("Image platform differs from requested platform: " + actual)
+    return inspected
 
 
 def pull_image(image, args, log):

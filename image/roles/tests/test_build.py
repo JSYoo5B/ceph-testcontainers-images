@@ -30,6 +30,24 @@ class SourceInputTests(unittest.TestCase):
             with self.subTest(value=value), self.assertRaises(build.BuildError):
                 build.archive_path(value, "groups")
 
+    def test_docker28_inspection_enforces_requested_platform(self):
+        original = {"Id": "sha256:fixed", "Os": "linux", "Architecture": "arm64"}
+        for requested, succeeds in (("linux/arm64", True), ("linux/amd64", False)):
+            with self.subTest(platform=requested), mock.patch.object(build, "run", side_effect=[
+                    json.dumps([original]), build.BuildError("unknown flag: --platform")]):
+                if succeeds:
+                    self.assertEqual(build.inspect_image("mutable:tag", requested), original)
+                else:
+                    with self.assertRaisesRegex(build.BuildError, "platform differs"):
+                        build.inspect_image("mutable:tag", requested)
+
+    def test_platform_selection_is_by_fixed_id_and_other_failures_are_preserved(self):
+        original = {"Id": "sha256:fixed", "Os": "linux", "Architecture": "arm64"}
+        with mock.patch.object(build, "run", side_effect=[json.dumps([original]),
+                build.BuildError("missing manifest")]) as run, self.assertRaisesRegex(build.BuildError, "missing"):
+            build.inspect_image("mutable:tag", "linux/arm64")
+        self.assertEqual(run.call_args_list[1].args[0][-1], "sha256:fixed")
+
 
 def common_only_plan():
     return {

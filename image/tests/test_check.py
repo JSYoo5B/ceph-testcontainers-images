@@ -47,6 +47,23 @@ class ImageContractTests(unittest.TestCase):
                     self.assertRaises(check.CheckError):
                 check.inspect_image("image", None)
 
+    def test_docker28_fallback_still_rejects_platform_mismatch(self):
+        original = {"Id": "sha256:" + "1" * 64, "Os": "linux", "Architecture": "arm64"}
+        for requested, succeeds in (("linux/arm64", True), ("linux/amd64", False)):
+            with self.subTest(platform=requested), mock.patch.object(check, "run", side_effect=[
+                    json.dumps([original]), check.CheckError("unknown flag: --platform")]):
+                if succeeds:
+                    self.assertEqual(check.inspect_image("image", requested)["platform"], requested)
+                else:
+                    with self.assertRaisesRegex(check.CheckError, "mismatched"):
+                        check.inspect_image("image", requested)
+
+    def test_platform_inspection_errors_other_than_unsupported_flag_are_not_hidden(self):
+        original = {"Id": "sha256:" + "1" * 64, "Os": "linux", "Architecture": "arm64"}
+        with mock.patch.object(check, "run", side_effect=[json.dumps([original]),
+                check.CheckError("missing platform manifest")]), self.assertRaisesRegex(check.CheckError, "missing"):
+            check.inspect_image("image", "linux/arm64")
+
     def test_control_import_and_binary_failures_remain_in_report(self):
         checks, versions = check.parse_probe("CHECK\tfailed\tversion:ceph-mon\nCHECK\tfailed\tpython-bindings\n")
         self.assertEqual([item["status"] for item in checks], ["failed", "failed"])

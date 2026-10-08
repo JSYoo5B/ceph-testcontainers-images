@@ -4,6 +4,15 @@ on:
   push:
   pull_request:
   workflow_dispatch:
+    inputs:
+      publish:
+        description: 'Publish the exact CI-tested images and overwrite the release tags'
+        type: boolean
+        default: false
+
+concurrency:
+  group: checker-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: false
 
 permissions:
   contents: read
@@ -51,6 +60,9 @@ jobs:
 
   extracted-images:
     needs: unit
+    permissions:
+      contents: read
+      packages: write
     strategy:
       fail-fast: false
       matrix:
@@ -70,6 +82,25 @@ jobs:
           python3 image/roles/build.py --source-image "$IMAGE" \
             --repository ceph-check --platform linux/${{ matrix.architecture }} \
             --check full --output-dir "$RUNNER_TEMP/extracted"
+      - uses: docker/login-action@v3
+        if: inputs.publish
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Upload the exact tested images
+        if: inputs.publish
+        run: |
+          python3 image/publish.py stage --report "$RUNNER_TEMP/extracted/image-check/check-report.json" \
+            --variant official --architecture ${{ matrix.architecture }} \
+            --revision "$GITHUB_SHA" --run-id "$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" \
+            --output "$RUNNER_TEMP/extracted/candidate.json"
+      - uses: actions/upload-artifact@v4
+        if: inputs.publish
+        with:
+          name: candidate-official-${{ matrix.architecture }}
+          path: ${{ runner.temp }}/extracted/candidate.json
+          if-no-files-found: error
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -82,6 +113,9 @@ jobs:
 
   distribution-images:
     needs: unit
+    permissions:
+      contents: read
+      packages: write
     strategy:
       fail-fast: false
       matrix:
@@ -109,9 +143,72 @@ jobs:
             --image mds=ceph-check:${{ matrix.distribution }}-20.2.4-mds \
             --image all=ceph-check:${{ matrix.distribution }}-20.2.4-all \
             --platform linux/${{ matrix.architecture }} --full --output-dir "$RUNNER_TEMP/distribution"
+      - uses: docker/login-action@v3
+        if: inputs.publish
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Upload the exact tested images
+        if: inputs.publish
+        run: |
+          python3 image/publish.py stage --report "$RUNNER_TEMP/distribution/check-report.json" \
+            --variant ${{ matrix.distribution }} --architecture ${{ matrix.architecture }} \
+            --revision "$GITHUB_SHA" --run-id "$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" \
+            --output "$RUNNER_TEMP/distribution/candidate.json"
+      - uses: actions/upload-artifact@v4
+        if: inputs.publish
+        with:
+          name: candidate-${{ matrix.distribution }}-${{ matrix.architecture }}
+          path: ${{ runner.temp }}/distribution/candidate.json
+          if-no-files-found: error
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: ${{ matrix.distribution }}-${{ matrix.architecture }}-check
           path: ${{ runner.temp }}/distribution/
           if-no-files-found: warn
+
+  promote:
+    if: inputs.publish
+    needs: [official-image, extracted-images, distribution-images]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      images: ${{ steps.promote.outputs.images }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: candidate-*
+          path: ${{ runner.temp }}/candidates
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Overwrite release tags with the tested digests
+        id: promote
+        run: |
+          python3 image/publish.py promote --candidates "$RUNNER_TEMP/candidates" \
+            --revision "$GITHUB_SHA" --run-id "$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" \
+            --output "$RUNNER_TEMP/promotion.json" --github-output "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: image-promotion
+          path: ${{ runner.temp }}/promotion.json
+          if-no-files-found: warn
+
+  verify-published:
+    if: inputs.publish
+    needs: promote
+    permissions:
+      contents: read
+      packages: read
+    uses: ./.github/workflows/published-images.yml
+    with:
+      images: ${{ needs.promote.outputs.images }}

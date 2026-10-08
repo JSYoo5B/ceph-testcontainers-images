@@ -29,6 +29,7 @@ docs/TEST_SCENARIOS.md       Checker usage and test pass criteria
 docs/ROLE_IMAGES.md          Role images extracted from the official image
 image/check.py               Checker for any local image
 image/check-runtime.sh       Quick check probe, run inside each image
+image/publish.py             Publish CI-tested images and promote release tags
 image/functional/            Functional scenarios used by the full check
 image/roles/                 Role image extraction from the official image
 image/debian/, image/ubuntu/  Role images from distribution packages
@@ -88,7 +89,9 @@ The output is `ceph-testcontainers:official-<release>-<role>` for the four roles
 
 Images are published as `ghcr.io/jsyoo5b/ceph-testcontainers-images:<variant>-20.2.4-<role>` for `linux/amd64` and `linux/arm64`, with `<role>` one of `control`, `osd`, `rgw`, `mds` and `all`.
 
-After uploading images, the [published images workflow](.github/workflows/published-images.yml) checks the uploaded platform digests on native AMD64 and ARM64 runners. It runs the full functional suite for both the four-role combination and `all` for each variant. Supply the digest map as `variant -> architecture -> role -> sha256 digest` through the workflow's `images` input.
+To publish a release, run the [checker workflow](.github/workflows/test.yml) with its `publish` input enabled. It builds all five roles for each variant on native AMD64 and ARM64 runners and runs quick checks and the full functional suite for both the four-role combination and `all`. Each passing job uploads the exact tested image IDs under CI candidate tags, without rebuilding. Only after all six build/check jobs and both unmodified Quay comparisons pass does the promotion job overwrite the 30 platform tags and 15 two-platform release tags with those digests. Failed or skipped checks block promotion.
+
+The release then calls the [published images workflow](.github/workflows/published-images.yml) to pull those immutable platform digests from GHCR and run the full suite again. To check an existing publication separately, supply its digest map as `variant -> architecture -> role -> sha256 digest` through that workflow's `images` input. Reports record the tested local image IDs, registry digests, Ceph versions, platforms and cleanup results; promotion also records the previous release-tag digests.
 
 | Variant | Source |
 | --- | --- |

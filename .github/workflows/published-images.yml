@@ -1,6 +1,11 @@
 name: published images
 
 on:
+  workflow_call:
+    inputs:
+      images:
+        required: true
+        type: string
   workflow_dispatch:
     inputs:
       images:
