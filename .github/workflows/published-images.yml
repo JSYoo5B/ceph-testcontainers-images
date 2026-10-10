@@ -9,7 +9,7 @@ on:
   workflow_dispatch:
     inputs:
       images:
-        description: 'JSON digest map: variant -> architecture -> role -> sha256 digest'
+        description: 'JSON digest map: release -> variant -> architecture -> role -> sha256 digest'
         required: true
         type: string
 
@@ -27,11 +27,33 @@ jobs:
           python-version: '3.9'
       - run: make check
 
-  published-images:
+  releases:
     needs: unit
+    runs-on: ubuntu-24.04
+    outputs:
+      list: ${{ steps.list.outputs.list }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: list
+        env:
+          PUBLISHED_IMAGES: ${{ inputs.images }}
+        run: |
+          python3 - >> "$GITHUB_OUTPUT" <<'PY'
+          import json, os, sys
+          sys.path.insert(0, 'image')
+          import releases
+          images = json.loads(os.environ['PUBLISHED_IMAGES'])
+          if not images or not set(images) <= set(releases.RELEASES):
+              raise ValueError('Provide digests only for releases listed in image/releases.py')
+          print('list=' + json.dumps(sorted(images)))
+          PY
+
+  published-images:
+    needs: releases
     strategy:
       fail-fast: false
       matrix:
+        release: ${{ fromJSON(needs.releases.outputs.list) }}
         variant: [official, debian, ubuntu]
         architecture: [amd64, arm64]
         include:
@@ -46,6 +68,7 @@ jobs:
       - name: Pull published digests and check mixed roles and all
         env:
           PUBLISHED_IMAGES: ${{ inputs.images }}
+          IMAGE_RELEASE: ${{ matrix.release }}
           IMAGE_VARIANT: ${{ matrix.variant }}
           IMAGE_ARCHITECTURE: ${{ matrix.architecture }}
         run: |
@@ -57,7 +80,7 @@ jobs:
           import subprocess
           import sys
 
-          images = json.loads(os.environ['PUBLISHED_IMAGES'])
+          images = json.loads(os.environ['PUBLISHED_IMAGES'])[os.environ['IMAGE_RELEASE']]
           variants = {'official', 'debian', 'ubuntu'}
           architectures = {'amd64', 'arm64'}
           roles = ('control', 'osd', 'rgw', 'mds', 'all')
@@ -88,7 +111,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: published-${{ matrix.variant }}-${{ matrix.architecture }}-check
+          name: published-${{ matrix.release }}-${{ matrix.variant }}-${{ matrix.architecture }}-check
           path: |
             ${{ runner.temp }}/published-digests.json
             ${{ runner.temp }}/published-check/

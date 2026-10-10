@@ -1,23 +1,30 @@
-# Minimal Ceph role images on Ubuntu 24.04 from the Ceph project's packages. Each target
+# Minimal Ceph role images on Ubuntu from the Ceph project's packages. Each target
 # installs only the packages its role needs (docs/IMAGE_REQUIREMENTS.md).
-ARG UBUNTU_BASE=ubuntu:24.04@sha256:534baea6a22c03a63003dbc8dbe78fe34bc0d7e595d9a9dc9834884ff530eb55
+# Release-specific inputs come from image/releases.py (make ubuntu-images); the
+# defaults are the default release.
+ARG BASE_IMAGE=ubuntu:24.04@sha256:534baea6a22c03a63003dbc8dbe78fe34bc0d7e595d9a9dc9834884ff530eb55
+ARG BASE_NAME=ubuntu:24.04
 
-# Ceph's Noble packages crash with SIGILL in tcmalloc's default stack unwinder on
+# Ceph's Ubuntu packages (first seen on Noble) crash with SIGILL in tcmalloc's default stack unwinder on
 # some ARM64 hosts (pointer authentication); frame-pointer unwinding avoids it.
 # The same setting makes the amd64 daemons crash, so it is set for arm64 only.
-FROM ${UBUNTU_BASE} AS base-amd64
-FROM ${UBUNTU_BASE} AS base-arm64
+FROM ${BASE_IMAGE} AS base-amd64
+FROM ${BASE_IMAGE} AS base-arm64
 ENV TCMALLOC_STACKTRACE_METHOD=generic_fp
 
 FROM base-${TARGETARCH} AS common
+ARG BASE_NAME
+ARG CEPH_RELEASE=20.2.4
+ARG CEPH_SUITE=noble
 ARG CEPH_PACKAGE_VERSION=20.2.4-1noble
-ENV CEPH_PACKAGE_VERSION=${CEPH_PACKAGE_VERSION} DEBIAN_FRONTEND=noninteractive
+ENV CEPH_RELEASE=${CEPH_RELEASE} CEPH_SUITE=${CEPH_SUITE} CEPH_PACKAGE_VERSION=${CEPH_PACKAGE_VERSION} \
+    DEBIAN_FRONTEND=noninteractive
 ADD --chmod=644 --checksum=sha256:46207b03a3645e7d6f83790dc6c0fddb6bd08fd5a21843845cb1f294d96d8c3e \
     https://download.ceph.com/keys/release.asc /etc/apt/keyrings/ceph.asc
 COPY write-sources.sh /usr/local/lib/ceph-testcontainers/write-sources.sh
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates \
-    && echo "deb [signed-by=/etc/apt/keyrings/ceph.asc] https://download.ceph.com/debian-20.2.4 noble main" \
+    && echo "deb [signed-by=/etc/apt/keyrings/ceph.asc] https://download.ceph.com/debian-${CEPH_RELEASE} ${CEPH_SUITE} main" \
         > /etc/apt/sources.list.d/ceph.list \
     && apt-get update \
     && apt-get install -y --no-install-recommends "ceph-common=${CEPH_PACKAGE_VERSION}" \
@@ -26,7 +33,7 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 LABEL org.opencontainers.image.source="https://github.com/JSYoo5B/ceph-testcontainers-images" \
       org.opencontainers.image.description="Ceph role image built on Ubuntu from Ceph packages; see /usr/share/ceph-testcontainers/SOURCES.txt for licenses and corresponding source" \
-      org.opencontainers.image.base.name="ubuntu:24.04" \
+      org.opencontainers.image.base.name="${BASE_NAME}" \
       io.ceph-testcontainers.source-notice="/usr/share/ceph-testcontainers/SOURCES.txt"
 
 FROM common AS control

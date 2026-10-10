@@ -8,7 +8,7 @@ mkdir -p "$directory"
     printf '# package\tversion\tsource-package\tsource-version\n'
     dpkg-query -W -f='${Package}\t${Version}\t${source:Package}\t${source:Version}\n' | sort
 } > "$directory/source-packages.txt"
-cat > "$directory/SOURCES.txt" <<'NOTICE'
+cat > "$directory/SOURCES.txt" <<NOTICE
 Ceph testcontainers Debian image: licenses and corresponding source
 
 This image is built from unmodified Debian packages listed in
@@ -17,7 +17,7 @@ Each package keeps its own license; its copyright file is kept under
 /usr/share/doc/<package>/copyright.
 
 Corresponding source for a package is its Debian source package:
-- Ceph packages: https://download.ceph.com/debian-20.2.4/ (bookworm, deb-src)
+- Ceph packages: https://download.ceph.com/debian-${CEPH_RELEASE}/ (${CEPH_SUITE}, deb-src)
   and https://github.com/ceph/ceph
 - Debian packages: https://deb.debian.org/debian/ and https://snapshot.debian.org/
   (apt-get source <source-package>=<source-version>)

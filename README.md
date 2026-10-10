@@ -10,6 +10,15 @@ Ceph testcontainers modules use the official Ceph image by default:
 quay.io/ceph/ceph:v20.2.4@sha256:6bb1c8a42fbc0bf87938946990b65174466997bc11c31eb5a323225a779fd8f9
 ```
 
+This repository checks and publishes images for each Ceph release listed in [image/releases.py](image/releases.py):
+
+| Release | Official image | Debian | Ubuntu |
+| --- | --- | --- | --- |
+| 20.2.4 (Tentacle, default) | `quay.io/ceph/ceph:v20.2.4` | bookworm | 24.04 (noble) |
+| 19.2.5 (Squid) | `quay.io/ceph/ceph:v19.2.5` | bookworm | 22.04 (jammy) |
+
+That file pins every release-specific input: the official image digest, the distribution base image digests, the download.ceph.com suite and the exact package version. download.ceph.com has no Noble build of Squid, so its Ubuntu images use Jammy. Squid 19.2.6 is not listed: its `radosgw-admin` signs `realm pull` requests that the same release's RGW rejects, so RGW multisite cannot start.
+
 Two needs can call for a different image:
 
 - Size: the official image ships components that tests never use, and every container pulls all of them.
@@ -30,6 +39,7 @@ docs/ROLE_IMAGES.md          Role images extracted from the official image
 image/check.py               Checker for any local image
 image/check-runtime.sh       Quick check probe, run inside each image
 image/publish.py             Publish CI-tested images and promote release tags
+image/releases.py            Checked releases and their pinned inputs
 image/functional/            Functional scenarios used by the full check
 image/roles/                 Role image extraction from the official image
 image/debian/, image/ubuntu/  Role images from distribution packages
@@ -83,17 +93,17 @@ The output is `ceph-testcontainers:official-<release>-<role>` for the four roles
 
 ## Images from distribution packages
 
-[image/debian](image/debian/Dockerfile) (bookworm-slim) and [image/ubuntu](image/ubuntu/Dockerfile) (24.04) build the same five roles by installing only the needed packages from Ceph's own Debian and Ubuntu repositories at download.ceph.com. They are built with `make debian-images` and `make ubuntu-images` and tagged `<distribution>-<release>-<role>`. The arm64 Ubuntu images set `TCMALLOC_STACKTRACE_METHOD=generic_fp`, because Ceph's Noble daemons crash with SIGILL in the default tcmalloc stack unwinder on some ARM64 hosts; on amd64 the same setting makes them crash, so it is not set there. Like the extracted images, each one records its packages, licenses and source pointers under `/usr/share/ceph-testcontainers/`.
+[image/debian](image/debian/Dockerfile) (bookworm-slim) and [image/ubuntu](image/ubuntu/Dockerfile) build the same five roles by installing only the needed packages from Ceph's own Debian and Ubuntu repositories at download.ceph.com. They are built with `make debian-images` and `make ubuntu-images`, which take `CEPH_RELEASE` (default `20.2.4`), and tagged `<distribution>-<release>-<role>`. The arm64 Ubuntu images set `TCMALLOC_STACKTRACE_METHOD=generic_fp`, because Ceph's Noble daemons crash with SIGILL in the default tcmalloc stack unwinder on some ARM64 hosts; on amd64 the same setting makes them crash, so it is not set there. Like the extracted images, each one records its packages, licenses and source pointers under `/usr/share/ceph-testcontainers/`.
 
 ## Published images
 
-Images are published as `ghcr.io/jsyoo5b/ceph-testcontainers-images:<variant>-20.2.4-<role>` for `linux/amd64` and `linux/arm64`, with `<role>` one of `control`, `osd`, `rgw`, `mds` and `all`.
+Images are published as `ghcr.io/jsyoo5b/ceph-testcontainers-images:<variant>-<release>-<role>` for `linux/amd64` and `linux/arm64`, with `<release>` one of the releases above and `<role>` one of `control`, `osd`, `rgw`, `mds` and `all`.
 
 To publish a release, run the [checker workflow](.github/workflows/test.yml) with its `publish` input enabled. For an existing GHCR package, grant this repository **Write** access under **Manage Actions access** in the package settings; the workflow's `packages: write` permission also needs that [package access](https://docs.github.com/en/packages/learn-github-packages/configuring-a-packages-access-control-and-visibility).
 
-The workflow builds all five roles for each variant on native AMD64 and ARM64 runners and runs quick checks and the full functional suite for both the four-role combination and `all`. Each passing job uploads the exact tested image IDs under CI candidate tags, without rebuilding. Only after all six build/check jobs and both unmodified Quay comparisons pass does the promotion job overwrite the 30 platform tags and 15 two-platform release tags with those digests. Failed or skipped checks block promotion.
+The workflow builds all five roles for each variant on native AMD64 and ARM64 runners and runs quick checks and the full functional suite for both the four-role combination and `all`. Each passing job uploads the exact tested image IDs under CI candidate tags, without rebuilding. Every release runs the same jobs. Only after all build/check jobs and unmodified Quay comparisons of every release pass does the promotion job overwrite, for each release, the 30 platform tags and 15 two-platform release tags with those digests. Failed or skipped checks block promotion.
 
-The release then calls the [published images workflow](.github/workflows/published-images.yml) to pull those immutable platform digests from GHCR and run the full suite again. To check an existing publication separately, supply its digest map as `variant -> architecture -> role -> sha256 digest` through that workflow's `images` input. Reports record the tested local image IDs, registry digests, Ceph versions, platforms and cleanup results; promotion also records the previous release-tag digests.
+The release then calls the [published images workflow](.github/workflows/published-images.yml) to pull those immutable platform digests from GHCR and run the full suite again. To check an existing publication separately, supply its digest map as `release -> variant -> architecture -> role -> sha256 digest` through that workflow's `images` input. Reports record the tested local image IDs, registry digests, Ceph versions, platforms and cleanup results; promotion also records the previous release-tag digests.
 
 | Variant | Source |
 | --- | --- |

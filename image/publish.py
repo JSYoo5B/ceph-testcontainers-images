@@ -11,11 +11,11 @@ import subprocess
 import sys
 
 import check
+import releases
 
 REGISTRY = "ghcr.io/jsyoo5b/ceph-testcontainers-images"
 VARIANTS = ("official", "debian", "ubuntu")
 ARCHITECTURES = ("amd64", "arm64")
-RELEASE = "20.2.4"
 DIGEST = re.compile(r"sha256:[0-9a-f]{64}")
 
 
@@ -51,12 +51,22 @@ def raw_manifest(reference):
     return json.loads(run(["docker", "buildx", "imagetools", "inspect", "--raw", reference]))
 
 
-def release_tag(variant, role, architecture=None):
-    return REGISTRY + ":" + variant + "-" + RELEASE + "-" + role + (
+def release_tag(release, variant, role, architecture=None):
+    return REGISTRY + ":" + variant + "-" + release + "-" + role + (
         "-linux-" + architecture if architecture else "")
 
 
-def validate_report(report, architecture):
+def previous_manifest(tag):
+    """The manifest a release tag points to, or None before its first publication."""
+    try:
+        return manifest(tag)
+    except PublishError as error:
+        if "not found" in str(error) or "manifest unknown" in str(error):
+            return None
+        raise
+
+
+def validate_report(report, architecture, release):
     require(report.get("status") == "passed" and report.get("level") == "full",
             "Publishing requires a passing full check")
     require(report.get("preflight") == "passed" and report.get("scenarios") == "passed",
@@ -67,8 +77,8 @@ def validate_report(report, architecture):
         require(image.get("status") == "passed" and image.get("platform") == "linux/" + architecture,
                 "Every image must pass on the requested platform")
         require(image.get("cleanup", {}).get("status") == "passed", "Quick cleanup must pass")
-        require(image.get("versions") and all(v["release"] == RELEASE for v in image["versions"].values()),
-                "Every image must use the published Ceph release")
+        require(image.get("versions") and all(v["release"] == release for v in image["versions"].values()),
+                "Every image must use the published Ceph release " + release)
     for topology, result in report["functional"].items():
         require(result.get("status") == "passed", "Functional topology failed: " + topology)
         scenarios = result.get("scenarios", {})
@@ -103,7 +113,7 @@ def verify_image(entry):
 def stage(args):
     report_bytes = args.report.read_bytes()
     report = json.loads(report_bytes)
-    validate_report(report, args.architecture)
+    validate_report(report, args.architecture, args.release)
     require(re.fullmatch(r"[0-9a-f]{40}", args.revision) is not None, "Revision must be a full commit SHA")
     require(re.fullmatch(r"[0-9]+-[0-9]+", args.run_id) is not None, "Run identity must include run and attempt")
     prepared = {}
@@ -119,12 +129,12 @@ def stage(args):
         prepared[role] = {"role": role, "architecture": args.architecture,
                           "image_id": checked["image_id"], "config_digest": config_digest,
                           "rootfs_diff_ids": local["RootFS"]["Layers"]}
-    result = {"schema": 1, "variant": args.variant, "architecture": args.architecture,
+    result = {"schema": 1, "release": args.release, "variant": args.variant, "architecture": args.architecture,
               "revision": args.revision, "run_id": args.run_id, "status": "uploading",
               "report_sha256": hashlib.sha256(report_bytes).hexdigest(), "images": {}}
     save(args.output, result)
     for role, entry in prepared.items():
-        tag = REGISTRY + ":ci-" + args.run_id + "-" + args.variant + "-" + RELEASE + "-" + role + "-linux-" + args.architecture
+        tag = REGISTRY + ":ci-" + args.run_id + "-" + args.variant + "-" + args.release + "-" + role + "-linux-" + args.architecture
         run(["docker", "tag", entry["image_id"], tag])
         (args.output.parent / ("push-" + role + ".log")).write_text(run(["docker", "push", tag]))
         entry.update(digest=manifest(tag)["digest"], candidate_tag=tag)
@@ -137,7 +147,7 @@ def stage(args):
     save(args.output, result)
 
 
-def collect_candidates(directory, revision, run_id):
+def collect_candidates(directory, revision, run_id, release):
     result = {}
     for path in sorted(directory.rglob("candidate.json")):
         candidate = json.loads(path.read_text())
@@ -145,6 +155,7 @@ def collect_candidates(directory, revision, run_id):
         require(key not in result, "Duplicate candidate platform")
         require(candidate.get("status") == "passed" and candidate.get("revision") == revision
                 and candidate.get("run_id") == run_id, "Candidates must pass in the same CI run and revision")
+        require(candidate.get("release") == release, "Candidates must be built for release " + release)
         require(set(candidate.get("images", {})) == set(check.ROLES), "Incomplete candidate roles")
         for role, entry in candidate["images"].items():
             require(entry.get("role") == role and entry.get("architecture") == key[1], "Candidate role/platform mismatch")
@@ -156,20 +167,20 @@ def collect_candidates(directory, revision, run_id):
 
 
 def promote(args):
-    candidates = collect_candidates(args.candidates, args.revision, args.run_id)
+    candidates = collect_candidates(args.candidates, args.revision, args.run_id, args.release)
     entries = [entry for candidate in candidates.values() for entry in candidate["images"].values()]
     with ThreadPoolExecutor(max_workers=6) as pool:
         list(pool.map(verify_image, entries))
-    tags = [release_tag(v, r, a) for v in VARIANTS for r in check.ROLES for a in (*ARCHITECTURES, None)]
+    tags = [release_tag(args.release, v, r, a) for v in VARIANTS for r in check.ROLES for a in (*ARCHITECTURES, None)]
     with ThreadPoolExecutor(max_workers=6) as pool:
-        previous = dict(zip(tags, pool.map(manifest, tags)))
-    result = {"status": "promoting", "revision": args.revision, "run_id": args.run_id,
+        previous = dict(zip(tags, pool.map(previous_manifest, tags)))
+    result = {"status": "promoting", "release": args.release, "revision": args.revision, "run_id": args.run_id,
               "previous": previous, "platforms": {}, "indexes": {}}
     save(args.output, result)
     digests = {v: {a: {} for a in ARCHITECTURES} for v in VARIANTS}
     for (variant, architecture), candidate in candidates.items():
         for role, entry in candidate["images"].items():
-            tag = release_tag(variant, role, architecture)
+            tag = release_tag(args.release, variant, role, architecture)
             run(["docker", "buildx", "imagetools", "create", "--prefer-index=false", "--tag", tag,
                  REGISTRY + "@" + entry["digest"]])
             require(manifest(tag)["digest"] == entry["digest"], "Platform tag differs from tested candidate")
@@ -178,7 +189,7 @@ def promote(args):
             save(args.output, result)
     for variant in VARIANTS:
         for role in check.ROLES:
-            tag = release_tag(variant, role)
+            tag = release_tag(args.release, variant, role)
             expected = {("linux", a): digests[variant][a][role] for a in ARCHITECTURES}
             run(["docker", "buildx", "imagetools", "create", "--tag", tag] +
                 [REGISTRY + "@" + digest for digest in expected.values()])
@@ -206,6 +217,7 @@ def main():
     promote_parser.add_argument("--candidates", type=Path, required=True)
     promote_parser.add_argument("--github-output", type=Path)
     for command in (upload, promote_parser):
+        command.add_argument("--release", choices=tuple(releases.RELEASES), default=releases.DEFAULT)
         command.add_argument("--revision", required=True)
         command.add_argument("--run-id", required=True)
         command.add_argument("--output", type=Path, required=True)

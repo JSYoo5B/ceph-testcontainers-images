@@ -27,12 +27,25 @@ jobs:
           python-version: '3.9'
       - run: make check
 
+  # image/releases.py is the only list of checked and published releases.
+  releases:
+    needs: unit
+    runs-on: ubuntu-24.04
+    outputs:
+      list: ${{ steps.list.outputs.list }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: list
+        run: echo "list=$(python3 image/releases.py list | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read().split()))')" >> "$GITHUB_OUTPUT"
+
   # The official image must pass both the quick and the full check.
   official-image:
-    needs: unit
+    needs: releases
     strategy:
       fail-fast: false
       matrix:
+        release: ${{ fromJSON(needs.releases.outputs.list) }}
+        architecture: [amd64, arm64]
         include:
           - architecture: amd64
             runner: ubuntu-24.04
@@ -40,10 +53,10 @@ jobs:
             runner: ubuntu-24.04-arm
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 60
-    env:
-      IMAGE: quay.io/ceph/ceph:v20.2.4@sha256:6bb1c8a42fbc0bf87938946990b65174466997bc11c31eb5a323225a779fd8f9
     steps:
       - uses: actions/checkout@v4
+      - name: Select the official image
+        run: echo "IMAGE=$(python3 image/releases.py official ${{ matrix.release }})" >> "$GITHUB_ENV"
       - run: docker pull "$IMAGE"
       - name: Quick check
         run: python3 image/check.py --image "all=$IMAGE" --output-dir "$RUNNER_TEMP/quick"
@@ -52,20 +65,22 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: official-${{ matrix.architecture }}-check
+          name: official-${{ matrix.release }}-${{ matrix.architecture }}-check
           path: |
             ${{ runner.temp }}/quick/
             ${{ runner.temp }}/full/
           if-no-files-found: warn
 
   extracted-images:
-    needs: unit
+    needs: releases
     permissions:
       contents: read
       packages: write
     strategy:
       fail-fast: false
       matrix:
+        release: ${{ fromJSON(needs.releases.outputs.list) }}
+        architecture: [amd64, arm64]
         include:
           - architecture: amd64
             runner: ubuntu-24.04
@@ -73,10 +88,10 @@ jobs:
             runner: ubuntu-24.04-arm
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 90
-    env:
-      IMAGE: quay.io/ceph/ceph:v20.2.4@sha256:6bb1c8a42fbc0bf87938946990b65174466997bc11c31eb5a323225a779fd8f9
     steps:
       - uses: actions/checkout@v4
+      - name: Select the official image
+        run: echo "IMAGE=$(python3 image/releases.py official ${{ matrix.release }})" >> "$GITHUB_ENV"
       - name: Build and check mixed roles and all
         run: |
           python3 image/roles/build.py --source-image "$IMAGE" \
@@ -92,19 +107,19 @@ jobs:
         if: inputs.publish
         run: |
           python3 image/publish.py stage --report "$RUNNER_TEMP/extracted/image-check/check-report.json" \
-            --variant official --architecture ${{ matrix.architecture }} \
+            --release ${{ matrix.release }} --variant official --architecture ${{ matrix.architecture }} \
             --revision "$GITHUB_SHA" --run-id "$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" \
             --output "$RUNNER_TEMP/extracted/candidate.json"
       - uses: actions/upload-artifact@v4
         if: inputs.publish
         with:
-          name: candidate-official-${{ matrix.architecture }}
+          name: candidate-${{ matrix.release }}-official-${{ matrix.architecture }}
           path: ${{ runner.temp }}/extracted/candidate.json
           if-no-files-found: error
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: extracted-${{ matrix.architecture }}-check
+          name: extracted-${{ matrix.release }}-${{ matrix.architecture }}-check
           path: |
             ${{ runner.temp }}/extracted/*.json
             ${{ runner.temp }}/extracted/*.log
@@ -112,13 +127,14 @@ jobs:
           if-no-files-found: warn
 
   distribution-images:
-    needs: unit
+    needs: releases
     permissions:
       contents: read
       packages: write
     strategy:
       fail-fast: false
       matrix:
+        release: ${{ fromJSON(needs.releases.outputs.list) }}
         distribution: [debian, ubuntu]
         architecture: [amd64, arm64]
         include:
@@ -133,15 +149,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Build all five roles
-        run: make "${{ matrix.distribution }}-images" PLATFORM="linux/${{ matrix.architecture }}" IMAGE_REPOSITORY=ceph-check
+        run: make "${{ matrix.distribution }}-images" CEPH_RELEASE=${{ matrix.release }} PLATFORM="linux/${{ matrix.architecture }}" IMAGE_REPOSITORY=ceph-check
       - name: Check mixed roles and all
         run: |
           python3 image/check.py \
-            --image control=ceph-check:${{ matrix.distribution }}-20.2.4-control \
-            --image osd=ceph-check:${{ matrix.distribution }}-20.2.4-osd \
-            --image rgw=ceph-check:${{ matrix.distribution }}-20.2.4-rgw \
-            --image mds=ceph-check:${{ matrix.distribution }}-20.2.4-mds \
-            --image all=ceph-check:${{ matrix.distribution }}-20.2.4-all \
+            --image control=ceph-check:${{ matrix.distribution }}-${{ matrix.release }}-control \
+            --image osd=ceph-check:${{ matrix.distribution }}-${{ matrix.release }}-osd \
+            --image rgw=ceph-check:${{ matrix.distribution }}-${{ matrix.release }}-rgw \
+            --image mds=ceph-check:${{ matrix.distribution }}-${{ matrix.release }}-mds \
+            --image all=ceph-check:${{ matrix.distribution }}-${{ matrix.release }}-all \
             --platform linux/${{ matrix.architecture }} --full --output-dir "$RUNNER_TEMP/distribution"
       - uses: docker/login-action@v3
         if: inputs.publish
@@ -153,19 +169,19 @@ jobs:
         if: inputs.publish
         run: |
           python3 image/publish.py stage --report "$RUNNER_TEMP/distribution/check-report.json" \
-            --variant ${{ matrix.distribution }} --architecture ${{ matrix.architecture }} \
+            --release ${{ matrix.release }} --variant ${{ matrix.distribution }} --architecture ${{ matrix.architecture }} \
             --revision "$GITHUB_SHA" --run-id "$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" \
             --output "$RUNNER_TEMP/distribution/candidate.json"
       - uses: actions/upload-artifact@v4
         if: inputs.publish
         with:
-          name: candidate-${{ matrix.distribution }}-${{ matrix.architecture }}
+          name: candidate-${{ matrix.release }}-${{ matrix.distribution }}-${{ matrix.architecture }}
           path: ${{ runner.temp }}/distribution/candidate.json
           if-no-files-found: error
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: ${{ matrix.distribution }}-${{ matrix.architecture }}-check
+          name: ${{ matrix.distribution }}-${{ matrix.release }}-${{ matrix.architecture }}-check
           path: ${{ runner.temp }}/distribution/
           if-no-files-found: warn
 
@@ -190,17 +206,28 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+      # Every release, variant and architecture passed before this job starts.
+      # Each release is promoted from its own complete candidate set.
       - name: Overwrite release tags with the tested digests
         id: promote
         run: |
-          python3 image/publish.py promote --candidates "$RUNNER_TEMP/candidates" \
-            --revision "$GITHUB_SHA" --run-id "$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" \
-            --output "$RUNNER_TEMP/promotion.json" --github-output "$GITHUB_OUTPUT"
+          for release in $(python3 image/releases.py list); do
+            mkdir -p "$RUNNER_TEMP/by-release/$release"
+            cp -R "$RUNNER_TEMP/candidates/candidate-$release-"* "$RUNNER_TEMP/by-release/$release/"
+            python3 image/publish.py promote --release "$release" --candidates "$RUNNER_TEMP/by-release/$release" \
+              --revision "$GITHUB_SHA" --run-id "$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" \
+              --output "$RUNNER_TEMP/promotion/$release.json"
+          done
+          python3 - "$RUNNER_TEMP/promotion" >> "$GITHUB_OUTPUT" <<'PY'
+          import json, pathlib, sys
+          images = {path.stem: json.loads(path.read_text())["images"] for path in sorted(pathlib.Path(sys.argv[1]).glob("*.json"))}
+          print("images=" + json.dumps(images, separators=(",", ":")))
+          PY
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: image-promotion
-          path: ${{ runner.temp }}/promotion.json
+          path: ${{ runner.temp }}/promotion/
           if-no-files-found: warn
 
   verify-published:

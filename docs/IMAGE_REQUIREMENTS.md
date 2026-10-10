@@ -8,6 +8,8 @@ The official Ceph image is the default for Ceph testcontainers modules, and ever
 quay.io/ceph/ceph:v20.2.4@sha256:6bb1c8a42fbc0bf87938946990b65174466997bc11c31eb5a323225a779fd8f9
 ```
 
+The same requirements apply to every release in [image/releases.py](../image/releases.py); the official image of each listed release must meet them unmodified.
+
 Other images are used when the official image is too large for the tests at hand, or when tests must run against a custom Ceph build. This document defines what such an image must provide. Any image that meets these requirements can replace the official image, and [image/check.py](../image/check.py) verifies a given image against them.
 
 The requirements include every component that tests depend on and exclude components that only operations need. The official image also ships, for example:
