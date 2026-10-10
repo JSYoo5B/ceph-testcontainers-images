@@ -181,3 +181,23 @@ class PublicationTests(unittest.TestCase):
             publish.previous_manifest("ghcr.io/x")
         self.assertEqual(publish.release_tag("19.2.5", "ubuntu", "osd", "arm64"),
                          publish.REGISTRY + ":ubuntu-19.2.5-osd-linux-arm64")
+
+
+    def test_health_reports_release_tags_whose_platform_images_were_deleted(self):
+        present = {publish.REGISTRY + "@" + digest(n) for n in (1, 2)}
+        def raw(reference):
+            if "@" in reference:
+                if reference not in present:
+                    raise publish.PublishError("ERROR: " + reference + ": not found")
+                return {"config": {}}
+            return {"manifests": [{"platform": {"os": "linux", "architecture": "amd64"}, "digest": digest(1)},
+                                  {"platform": {"os": "linux", "architecture": "arm64"}, "digest": digest(2)}]}
+        args = SimpleNamespace(releases=[RELEASE])
+        with mock.patch.object(publish, "raw_manifest", side_effect=raw), \
+                mock.patch("sys.stdout"), mock.patch("sys.stderr"):
+            publish.health(args)
+        present.discard(publish.REGISTRY + "@" + digest(2))
+        with mock.patch.object(publish, "raw_manifest", side_effect=raw), mock.patch("sys.stdout"), \
+                mock.patch("sys.stderr") as stderr, self.assertRaises(publish.PublishError):
+            publish.health(args)
+        self.assertIn("linux/arm64 image", "".join(str(call) for call in stderr.write.call_args_list))

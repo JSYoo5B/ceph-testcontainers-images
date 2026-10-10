@@ -1,0 +1,27 @@
+name: published image health
+
+# A release tag lists two platform images. Deleting a platform tag or an
+# untagged platform version leaves a release tag that still resolves but can
+# no longer be pulled, which consumers only notice when their CI fails.
+on:
+  schedule:
+    - cron: '23 3 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: read
+
+jobs:
+  health:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Every release tag still resolves to both platform images
+        run: python3 image/publish.py health

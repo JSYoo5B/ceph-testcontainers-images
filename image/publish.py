@@ -206,6 +206,37 @@ def promote(args):
             output.write("images=" + json.dumps(digests, separators=(",", ":")) + "\n")
 
 
+def health(args):
+    """Every release tag must list both platforms, and each platform image must
+    still exist; deleting a platform tag leaves a release tag that cannot pull."""
+    problems = []
+    checked = 0
+    for release in args.releases:
+        for variant in VARIANTS:
+            for role in check.ROLES:
+                tag = release_tag(release, variant, role)
+                try:
+                    index = raw_manifest(tag)
+                except PublishError as error:
+                    problems.append(tag + ": release tag unreadable: " + str(error).splitlines()[0])
+                    continue
+                platforms = {(m.get("platform", {}).get("os"), m.get("platform", {}).get("architecture")): m.get("digest")
+                             for m in index.get("manifests", [])}
+                if set(platforms) != {("linux", a) for a in ARCHITECTURES}:
+                    problems.append(tag + ": release tag does not list exactly linux/amd64 and linux/arm64")
+                    continue
+                for (_, architecture), digest in sorted(platforms.items()):
+                    checked += 1
+                    try:
+                        raw_manifest(REGISTRY + "@" + digest)
+                    except PublishError:
+                        problems.append(tag + ": linux/" + architecture + " image " + digest + " is missing")
+    for problem in problems:
+        print(problem, file=sys.stderr)
+    print("Published platform images: %d present, %d problems" % (checked - sum("is missing" in p for p in problems), len(problems)))
+    require(not problems, "Published release tags are incomplete")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
@@ -221,7 +252,13 @@ def main():
         command.add_argument("--revision", required=True)
         command.add_argument("--run-id", required=True)
         command.add_argument("--output", type=Path, required=True)
+    health_parser = commands.add_parser("health", help="Check that every published platform image still exists")
+    health_parser.add_argument("--release", dest="releases", action="append", choices=tuple(releases.RELEASES))
     args = parser.parse_args()
+    if args.command == "health":
+        args.releases = args.releases or list(releases.RELEASES)
+        health(args)
+        return
     (stage if args.command == "stage" else promote)(args)
 
 

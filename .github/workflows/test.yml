@@ -1,10 +1,20 @@
 name: checker
 
+# Pull requests and main pushes run unit tests and quick requirement checks.
+# A manual run selects a release, runs the full functional suite and, with
+# publish, promotes that release's tags from the exact tested images.
 on:
   push:
+    branches: [main]
+    paths-ignore: ['**.md', 'docs/**', 'LICENSE', '.idea/**']
   pull_request:
+    paths-ignore: ['**.md', 'docs/**', 'LICENSE', '.idea/**']
   workflow_dispatch:
     inputs:
+      release:
+        description: 'Ceph release from image/releases.py, or all'
+        type: string
+        default: all
       publish:
         description: 'Publish the exact CI-tested images and overwrite the release tags'
         type: boolean
@@ -33,12 +43,27 @@ jobs:
     runs-on: ubuntu-24.04
     outputs:
       list: ${{ steps.list.outputs.list }}
+      level: ${{ steps.list.outputs.level }}
     steps:
       - uses: actions/checkout@v4
       - id: list
-        run: echo "list=$(python3 image/releases.py list | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read().split()))')" >> "$GITHUB_OUTPUT"
+        env:
+          REQUESTED_RELEASE: ${{ inputs.release || 'all' }}
+          EVENT: ${{ github.event_name }}
+        run: |
+          python3 - >> "$GITHUB_OUTPUT" <<'PY'
+          import json, os, sys
+          sys.path.insert(0, 'image')
+          import releases
+          requested = os.environ['REQUESTED_RELEASE']
+          if requested != 'all' and requested not in releases.RELEASES:
+              raise SystemExit('Unknown release ' + requested + '; known: ' + ', '.join(releases.RELEASES))
+          selected = list(releases.RELEASES) if requested == 'all' else [requested]
+          print('list=' + json.dumps(selected))
+          print('level=' + ('full' if os.environ['EVENT'] == 'workflow_dispatch' else 'quick'))
+          PY
 
-  # The official image must pass both the quick and the full check.
+  # The official image must pass the quick check, and the full check before publishing.
   official-image:
     needs: releases
     strategy:
@@ -61,6 +86,7 @@ jobs:
       - name: Quick check
         run: python3 image/check.py --image "all=$IMAGE" --output-dir "$RUNNER_TEMP/quick"
       - name: Full check
+        if: needs.releases.outputs.level == 'full'
         run: python3 image/check.py --image "all=$IMAGE" --full --output-dir "$RUNNER_TEMP/full"
       - uses: actions/upload-artifact@v4
         if: always()
@@ -96,7 +122,7 @@ jobs:
         run: |
           python3 image/roles/build.py --source-image "$IMAGE" \
             --repository ceph-check --platform linux/${{ matrix.architecture }} \
-            --check full --output-dir "$RUNNER_TEMP/extracted"
+            --check ${{ needs.releases.outputs.level }} --output-dir "$RUNNER_TEMP/extracted"
       - uses: docker/login-action@v3
         if: inputs.publish
         with:
@@ -158,7 +184,8 @@ jobs:
             --image rgw=ceph-check:${{ matrix.distribution }}-${{ matrix.release }}-rgw \
             --image mds=ceph-check:${{ matrix.distribution }}-${{ matrix.release }}-mds \
             --image all=ceph-check:${{ matrix.distribution }}-${{ matrix.release }}-all \
-            --platform linux/${{ matrix.architecture }} --full --output-dir "$RUNNER_TEMP/distribution"
+            --platform linux/${{ matrix.architecture }} ${{ needs.releases.outputs.level == 'full' && '--full' || '' }} \
+            --output-dir "$RUNNER_TEMP/distribution"
       - uses: docker/login-action@v3
         if: inputs.publish
         with:
@@ -187,7 +214,7 @@ jobs:
 
   promote:
     if: inputs.publish
-    needs: [official-image, extracted-images, distribution-images]
+    needs: [releases, official-image, extracted-images, distribution-images]
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     permissions:
@@ -206,12 +233,14 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      # Every release, variant and architecture passed before this job starts.
-      # Each release is promoted from its own complete candidate set.
+      # Every selected release, variant and architecture passed before this
+      # job starts. Each release is promoted from its own complete candidates.
       - name: Overwrite release tags with the tested digests
         id: promote
+        env:
+          SELECTED_RELEASES: ${{ needs.releases.outputs.list }}
         run: |
-          for release in $(python3 image/releases.py list); do
+          for release in $(echo "$SELECTED_RELEASES" | python3 -c 'import json,sys; print(" ".join(json.load(sys.stdin)))'); do
             mkdir -p "$RUNNER_TEMP/by-release/$release"
             cp -R "$RUNNER_TEMP/candidates/candidate-$release-"* "$RUNNER_TEMP/by-release/$release/"
             python3 image/publish.py promote --release "$release" --candidates "$RUNNER_TEMP/by-release/$release" \
