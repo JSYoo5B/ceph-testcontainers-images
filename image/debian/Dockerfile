@@ -10,6 +10,8 @@ ARG BASE_NAME
 ARG CEPH_RELEASE=20.2.4
 ARG CEPH_SUITE=bookworm
 ARG CEPH_PACKAGE_VERSION=20.2.4-1bookworm
+ARG CEPH_MGR_PACKAGES=
+ENV CEPH_MGR_PACKAGES=${CEPH_MGR_PACKAGES}
 ENV CEPH_RELEASE=${CEPH_RELEASE} CEPH_SUITE=${CEPH_SUITE} CEPH_PACKAGE_VERSION=${CEPH_PACKAGE_VERSION} \
     DEBIAN_FRONTEND=noninteractive
 ADD --chmod=644 --checksum=sha256:46207b03a3645e7d6f83790dc6c0fddb6bd08fd5a21843845cb1f294d96d8c3e \
@@ -31,7 +33,7 @@ LABEL org.opencontainers.image.source="https://github.com/JSYoo5B/ceph-testconta
 
 FROM common AS control
 RUN apt-get update && apt-get install -y --no-install-recommends "ceph-mon=${CEPH_PACKAGE_VERSION}" \
-        "ceph-mgr=${CEPH_PACKAGE_VERSION}" "rbd-mirror=${CEPH_PACKAGE_VERSION}" \
+        "ceph-mgr=${CEPH_PACKAGE_VERSION}" ${CEPH_MGR_PACKAGES} "rbd-mirror=${CEPH_PACKAGE_VERSION}" \
         "cephfs-mirror=${CEPH_PACKAGE_VERSION}" cryptsetup-bin \
         "libradosstriper1=${CEPH_PACKAGE_VERSION}" \
     && rm -rf /var/lib/apt/lists/* && sh /usr/local/lib/ceph-testcontainers/write-sources.sh
@@ -54,7 +56,7 @@ LABEL io.ceph-testcontainers.role="mds"
 
 FROM common AS all
 RUN apt-get update && apt-get install -y --no-install-recommends "ceph-mon=${CEPH_PACKAGE_VERSION}" \
-        "ceph-mgr=${CEPH_PACKAGE_VERSION}" "rbd-mirror=${CEPH_PACKAGE_VERSION}" \
+        "ceph-mgr=${CEPH_PACKAGE_VERSION}" ${CEPH_MGR_PACKAGES} "rbd-mirror=${CEPH_PACKAGE_VERSION}" \
         "cephfs-mirror=${CEPH_PACKAGE_VERSION}" "ceph-osd=${CEPH_PACKAGE_VERSION}" \
         "radosgw=${CEPH_PACKAGE_VERSION}" "ceph-mds=${CEPH_PACKAGE_VERSION}" cryptsetup-bin \
         "libradosstriper1=${CEPH_PACKAGE_VERSION}" \

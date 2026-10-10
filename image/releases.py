@@ -19,12 +19,14 @@ RELEASES = {
             "base_name": "debian:bookworm-slim",
             "suite": "bookworm",
             "package": "20.2.4-1bookworm",
+            "mgr_packages": "",
         },
         "ubuntu": {
             "base": "ubuntu:24.04@sha256:534baea6a22c03a63003dbc8dbe78fe34bc0d7e595d9a9dc9834884ff530eb55",
             "base_name": "ubuntu:24.04",
             "suite": "noble",
             "package": "20.2.4-1noble",
+            "mgr_packages": "",
         },
     },
     # 19.2.6 is skipped: its radosgw-admin signs realm pull requests that the
@@ -38,6 +40,9 @@ RELEASES = {
             "base_name": "debian:bookworm-slim",
             "suite": "bookworm",
             "package": "19.2.5-1bookworm",
+            # Squid's MGR volumes module imports distutils.util, which these
+            # distributions ship separately; Tentacle dropped the import.
+            "mgr_packages": "python3-distutils",
         },
         # download.ceph.com has no Noble build of Squid; Jammy is the newest.
         "ubuntu": {
@@ -45,6 +50,7 @@ RELEASES = {
             "base_name": "ubuntu:22.04",
             "suite": "jammy",
             "package": "19.2.5-1jammy",
+            "mgr_packages": "python3-distutils",
         },
     },
 }
@@ -64,7 +70,8 @@ def build_args(name, distribution):
         raise KeyError("Unknown distribution " + repr(distribution))
     values = release(name)[distribution]
     return {"BASE_IMAGE": values["base"], "BASE_NAME": values["base_name"], "CEPH_RELEASE": name,
-            "CEPH_SUITE": values["suite"], "CEPH_PACKAGE_VERSION": values["package"]}
+            "CEPH_SUITE": values["suite"], "CEPH_PACKAGE_VERSION": values["package"],
+            "CEPH_MGR_PACKAGES": values["mgr_packages"]}
 
 
 def main(argv=None):
@@ -82,7 +89,7 @@ def main(argv=None):
     elif args.command == "official":
         print(release(args.release)["official"])
     else:
-        print(" ".join("--build-arg " + key + "=" + value for key, value in build_args(args.release, args.distribution).items()))
+        print(" ".join("--build-arg " + key + "=" + value for key, value in build_args(args.release, args.distribution).items() if value))
     return 0
 
 
