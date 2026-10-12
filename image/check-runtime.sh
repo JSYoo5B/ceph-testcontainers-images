@@ -96,6 +96,34 @@ version() {
     }
     printf 'VERSION\t%s\t%s\n' "$binary" "$(cat "$work/version")"
 }
+# pgrep -f reports exactly a live process found by its command line, and
+# nothing once that process has exited and been reaped.
+pgrep_inspection() {
+    sentinel=ceph-image-check-pgrep-$$
+    rm -f "$work/pgrep-ready"
+    python3 -c 'import sys, time; open(sys.argv[1], "w").close(); time.sleep(60)' \
+        "$work/pgrep-ready" "$sentinel" &
+    child=$!
+    tries=0
+    while ! test -e "$work/pgrep-ready" && test "$tries" -lt 10; do
+        sleep 1
+        tries=$((tries + 1))
+    done
+    found=$(pgrep -f -- "$sentinel")
+    status=$?
+    kill "$child" 2>/dev/null
+    wait "$child" 2>/dev/null
+    if test "$status" -ne 0 || test "$found" != "$child"; then
+        printf 'pgrep -f found [%s] with exit %s while process %s ran\n' "$found" "$status" "$child"
+        return 1
+    fi
+    found=$(pgrep -f -- "$sentinel")
+    status=$?
+    if test "$status" -ne 1 || test -n "$found"; then
+        printf 'pgrep -f found [%s] with exit %s after process %s exited\n' "$found" "$status" "$child"
+        return 1
+    fi
+}
 if "$control"; then
     for binary in ceph-mon ceph-mgr ceph ceph-authtool monmaptool rados rbd; do
         check "version:$binary" version "$binary"
@@ -105,6 +133,10 @@ if "$control"; then
     check path:cryptsetup external_command cryptsetup
     if external_command cryptsetup; then
         check library-load:cryptsetup-executable cryptsetup --version
+    fi
+    check path:pgrep external_command pgrep
+    if external_command pgrep; then
+        check process-inspection:pgrep pgrep_inspection
     fi
     # Resolve by linker names, not package names or distribution-specific paths.
     python3 - <<'PY' || failed=1

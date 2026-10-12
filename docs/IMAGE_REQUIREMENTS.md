@@ -56,13 +56,13 @@ These apply to every role. The official image meets all of them.
 
 | Role | Executables on `PATH` | Additional runtime dependencies |
 | --- | --- | --- |
-| `control` | `ceph-mon`, `ceph-mgr`, `ceph`, `ceph-authtool`, `monmaptool`, `rados` supporting `--striper`, `rbd`, `cryptsetup`, `rbd-mirror`, `cephfs-mirror`, `radosgw-admin`, `python3` | Python modules `rados`, `rbd`, `cephfs`, `ceph_argparse`, `ceph_daemon`; librbd LUKS1/LUKS2 encryption, libcryptsetup and libradosstriper with their runtime dependencies; the release's always-on MGR modules plus `volumes`, `rbd_support` and `mirroring`, each with its Python dependencies |
+| `control` | `ceph-mon`, `ceph-mgr`, `ceph`, `ceph-authtool`, `monmaptool`, `rados` supporting `--striper`, `rbd`, `cryptsetup`, `rbd-mirror`, `cephfs-mirror`, `radosgw-admin`, `python3`, `pgrep` | Python modules `rados`, `rbd`, `cephfs`, `ceph_argparse`, `ceph_daemon`; librbd LUKS1/LUKS2 encryption, libcryptsetup and libradosstriper with their runtime dependencies; the release's always-on MGR modules plus `volumes`, `rbd_support` and `mirroring`, each with its Python dependencies |
 | `osd` | `ceph-osd` | BlueStore; `rbd`, `rgw`, `cephfs`, `hello` and `lock` object classes with their runtime dependencies; compressor and erasure-code plugins |
 | `rgw` | `radosgw`, `radosgw-admin`, `readlink` | Beast HTTP frontend with TLS and the RGW shared libraries |
 | `mds` | `ceph-mds` | MDS shared libraries |
 | `all` | Union of the four roles | Union of the four roles |
 
-Python, the CLI tools of other roles, compilers and development headers are not required in `osd`, `rgw` or `mds`.
+Python, `pgrep`, the CLI tools of other roles, compilers and development headers are not required in `osd`, `rgw` or `mds`.
 
 `all` includes every control and OSD requirement. `cryptsetup` must be an executable
 on `PATH`: libcryptsetup alone cannot perform the external passphrase-change
@@ -91,6 +91,7 @@ The table lists what a testcontainers module does with each component. Rows mark
 | Python `rados`/`rbd`, librbd encryption, `cryptsetup` | `control` | Userspace encrypted RBD creation/read and external LUKS passphrase changes on regular-file raw exports; RADOS compound class calls and locking |
 | Python `cephfs` | `control` | Userspace CephFS I/O helpers, such as directory pinning and clone identity checks |
 | `python3` | `control` | RGW HTTP and TLS readiness probes, S3, RBD and CephFS client helpers |
+| `pgrep` | `control` | Process inspection in the control container: `pgrep -f` finds a running command by its command line, for example to confirm that a canceled `ceph` command no longer runs |
 | MGR always-on modules | `control` | Required for `HEALTH_OK`; a missing module or dependency raises a health error |
 | MGR `volumes` | `control` | CephFS filesystems, subvolumes, snapshots, clones, data pools and quiesce |
 | MGR `rbd_support` with Python `rbd` | `control` | RBD background tasks and mirror snapshot schedules |

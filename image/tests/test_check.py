@@ -3,6 +3,7 @@ import io
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -180,6 +181,50 @@ class ImageContractTests(unittest.TestCase):
         self.assertEqual(report["level"], "functional-selected")
         self.assertEqual(report["scenarios"], "not_run")
 
+
+class ProcessInspectionProbeTests(unittest.TestCase):
+    """Runs the probe's pgrep_inspection function against stub pgrep commands."""
+
+    def run_inspection(self, stub):
+        script = (check.HERE / "check-runtime.sh").read_text()
+        start = script.index("pgrep_inspection() {")
+        function = script[start:script.index("\n}\n", start) + 3]
+        with tempfile.TemporaryDirectory() as temporary:
+            bin_dir = Path(temporary) / "bin"
+            bin_dir.mkdir()
+            if stub is not None:
+                pgrep = bin_dir / "pgrep"
+                pgrep.write_text("#!/bin/sh\n" + stub)
+                pgrep.chmod(0o755)
+            environment = dict(os.environ, PATH=str(bin_dir) + os.pathsep + os.environ["PATH"],
+                               STUB_STATE=temporary, NATIVE_PGREP=self.native_pgrep or "false")
+            return subprocess.run(["/bin/sh", "-c", "work=$1\n" + function + "\npgrep_inspection", "sh", temporary],
+                                  env=environment, capture_output=True, text=True, timeout=60)
+
+    def setUp(self):
+        self.native_pgrep = shutil.which("pgrep")
+
+    def test_native_pgrep_finds_the_process_and_then_nothing(self):
+        if self.native_pgrep is None:
+            self.skipTest("the host has no pgrep")
+        result = self.run_inspection(None)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_wrong_answers_fail(self):
+        stubs = {
+            "never finds the process": ("exit 1\n", "while process"),
+            "reports another process": ("echo 1\n", "while process"),
+            "still reports the process after it exited": (
+                'if test -e "$STUB_STATE/called"; then echo 4242; exit 0; fi\n'
+                'touch "$STUB_STATE/called"\nexec "$NATIVE_PGREP" "$@"\n', "after process"),
+        }
+        for name, (stub, failure) in stubs.items():
+            with self.subTest(name):
+                if failure == "after process" and self.native_pgrep is None:
+                    self.skipTest("the host has no pgrep")
+                result = self.run_inspection(stub)
+                self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertIn(failure, result.stdout)
 
 if __name__ == "__main__":
     unittest.main()

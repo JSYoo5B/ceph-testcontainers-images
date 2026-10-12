@@ -26,7 +26,7 @@ ROLES = ("control", "osd", "rgw", "mds")
 ROOT_PACKAGES = {
     "control": (
         "ceph-mon", "ceph-mgr", "ceph-common", "python3-cephfs",
-        "rbd-mirror", "cephfs-mirror", "cryptsetup", "libradosstriper1",
+        "rbd-mirror", "cephfs-mirror", "cryptsetup", "libradosstriper1", "procps-ng",
     ),
     "osd": ("ceph-osd",),
     "rgw": ("ceph-radosgw",),
@@ -36,7 +36,7 @@ REQUIRED_EXECUTABLES = {
     "control": (
         "/usr/bin/ceph", "/usr/bin/ceph-mon", "/usr/bin/ceph-mgr",
         "/usr/bin/rados", "/usr/bin/rbd", "/usr/bin/ceph-authtool", "/usr/bin/monmaptool",
-        "/usr/bin/rbd-mirror", "/usr/bin/cephfs-mirror", "/usr/sbin/cryptsetup",
+        "/usr/bin/rbd-mirror", "/usr/bin/cephfs-mirror", "/usr/sbin/cryptsetup", "/usr/bin/pgrep",
     ),
     "osd": ("/usr/bin/ceph-osd",),
     "rgw": ("/usr/bin/radosgw", "/usr/bin/radosgw-admin"),
