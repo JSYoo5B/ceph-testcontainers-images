@@ -1,0 +1,82 @@
+name: published extension
+
+# Checks published extension helpers by digest, as consumers pull them: the
+# contract, the kernel feature and a delay inside a container of every
+# release's official and OSD role image (docs/EXTENSIONS.md).
+on:
+  workflow_call:
+    inputs:
+      images:
+        required: true
+        type: string
+  workflow_dispatch:
+    inputs:
+      images:
+        description: 'JSON digest map: extension -> architecture -> sha256 digest'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  packages: read
+
+jobs:
+  published-extension:
+    strategy:
+      fail-fast: false
+      matrix:
+        architecture: [amd64, arm64]
+        include:
+          - architecture: amd64
+            runner: ubuntu-24.04
+          - architecture: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.9'
+      - run: make extension-test
+      - name: Pull the published digest and check it in Ceph targets
+        env:
+          PUBLISHED_IMAGES: ${{ inputs.images }}
+          IMAGE_ARCHITECTURE: ${{ matrix.architecture }}
+        run: |
+          reference="$(python3 - <<'PY'
+          import json, os, re, sys
+          sys.path.insert(0, 'image')
+          import extension_check
+          images = json.loads(os.environ['PUBLISHED_IMAGES'])
+          if set(images) != set(extension_check.EXTENSIONS):
+              raise ValueError('Provide a digest map for every extension')
+          for extension, platforms in images.items():
+              if set(platforms) != {'amd64', 'arm64'}:
+                  raise ValueError('Provide both architectures for ' + extension)
+              if any(not re.fullmatch(r'sha256:[0-9a-f]{64}', str(digest)) for digest in platforms.values()):
+                  raise ValueError('Image references must be immutable sha256 digests')
+          print('ghcr.io/jsyoo5b/ceph-testcontainers-images@' + images['netem'][os.environ['IMAGE_ARCHITECTURE']])
+          PY
+          )"
+          platform="linux/$IMAGE_ARCHITECTURE"
+          docker pull --platform "$platform" "$reference"
+          targets=()
+          for release in $(python3 image/releases.py list); do
+            for target in "$(python3 image/releases.py official "$release")" \
+                "ghcr.io/jsyoo5b/ceph-testcontainers-images:official-$release-osd"; do
+              docker pull --platform "$platform" "$target"
+              targets+=(--target "$target")
+            done
+          done
+          echo "$PUBLISHED_IMAGES" > "$RUNNER_TEMP/published-extension-digests.json"
+          python3 image/extension_check.py --extension netem --image "$reference" --platform "$platform" \
+            --functional "${targets[@]}" --output-dir "$RUNNER_TEMP/published-extension"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: published-extension-${{ matrix.architecture }}-check
+          path: |
+            ${{ runner.temp }}/published-extension-digests.json
+            ${{ runner.temp }}/published-extension/
+          if-no-files-found: warn

@@ -201,3 +201,4 @@ class PublicationTests(unittest.TestCase):
                 mock.patch("sys.stderr") as stderr, self.assertRaises(publish.PublishError):
             publish.health(args)
         self.assertIn("linux/arm64 image", "".join(str(call) for call in stderr.write.call_args_list))
+

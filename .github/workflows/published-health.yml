@@ -25,3 +25,6 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
       - name: Every release tag still resolves to both platform images
         run: python3 image/publish.py health
+      - name: Every extension helper tag still resolves to both platform images
+        if: always()
+        run: python3 image/publish.py extension-health

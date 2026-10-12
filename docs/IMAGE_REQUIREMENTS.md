@@ -2,13 +2,15 @@
 
 ## Purpose
 
-The official Ceph image is the default for Ceph testcontainers modules, and every module feature must work with it unmodified:
+The official Ceph image is the default for Ceph testcontainers modules, and every baseline module feature must work with it unmodified:
 
 ```text
 quay.io/ceph/ceph:v20.2.4@sha256:6bb1c8a42fbc0bf87938946990b65174466997bc11c31eb5a323225a779fd8f9
 ```
 
 The same requirements apply to every release in [image/releases.py](../image/releases.py); the official image of each listed release must meet them unmodified.
+
+Opt-in extension features, which a caller selects explicitly, may use an additional extension image with tools that the official image does not ship. They never change these requirements; see [Extension Images](EXTENSIONS.md).
 
 Other images are used when the official image is too large for the tests at hand, or when tests must run against a custom Ceph build. This document defines what such an image must provide. Any image that meets these requirements can replace the official image, and [image/check.py](../image/check.py) verifies a given image against them.
 

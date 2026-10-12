@@ -36,8 +36,11 @@ Cluster setup always belongs to the testcontainers module, which supplies config
 docs/IMAGE_REQUIREMENTS.md   Runtime requirements by role
 docs/TEST_SCENARIOS.md       Checker usage and test pass criteria
 docs/ROLE_IMAGES.md          Role images extracted from the official image
+docs/EXTENSIONS.md           Opt-in extension images and their contracts
 image/check.py               Checker for any local image
 image/check-runtime.sh       Quick check probe, run inside each image
+image/extension_check.py     Checker for opt-in extension images
+image/extensions/            Extension images and their probes
 image/publish.py             Publish CI-tested images and promote release tags
 image/releases.py            Checked releases and their pinned inputs
 image/functional/            Functional scenarios used by the full check
@@ -95,6 +98,17 @@ The output is `ceph-testcontainers:official-<release>-<role>` for the four roles
 
 [image/debian](image/debian/Dockerfile) (bookworm-slim) and [image/ubuntu](image/ubuntu/Dockerfile) build the same five roles by installing only the needed packages from Ceph's own Debian and Ubuntu repositories at download.ceph.com. They are built with `make debian-images` and `make ubuntu-images`, which take `CEPH_RELEASE` (default `20.2.4`), and tagged `<distribution>-<release>-<role>`. The arm64 Ubuntu images set `TCMALLOC_STACKTRACE_METHOD=generic_fp`, because Ceph's Noble daemons crash with SIGILL in the default tcmalloc stack unwinder on some ARM64 hosts; on amd64 the same setting makes them crash, so it is not set there. Like the extracted images, each one records its packages, licenses and source pointers under `/usr/share/ceph-testcontainers/`.
 
+## Extension images
+
+Some module features need tools that the official image does not ship, such as `tc` for kernel packet delay. They are opt-in: the caller selects an extension image for that feature, and baseline features never need one. [Extension Images](docs/EXTENSIONS.md) defines each extension's contract and how to check an image against it.
+
+```sh
+make extension-images   # build the netem helper
+make extension-check    # check it, including a delay inside an official-image container
+```
+
+The netem helper is published as `ghcr.io/jsyoo5b/ceph-testcontainers-images:extension-netem-v1` for `linux/amd64` and `linux/arm64`. It is checked and published apart from the release images below, and neither blocks the other.
+
 ## Published images
 
 Images are published as `ghcr.io/jsyoo5b/ceph-testcontainers-images:<variant>-<release>-<role>` for `linux/amd64` and `linux/arm64`, with `<release>` one of the releases above and `<role>` one of `control`, `osd`, `rgw`, `mds` and `all`.
@@ -107,7 +121,7 @@ The workflow builds all five roles for each variant on native AMD64 and ARM64 ru
 
 The release then calls the [published images workflow](.github/workflows/published-images.yml) to pull those immutable platform digests from GHCR and run the full suite again. To check an existing publication separately, supply its digest map as `release -> variant -> architecture -> role -> sha256 digest` through that workflow's `images` input. Reports record the tested local image IDs, registry digests, Ceph versions, platforms and cleanup results; promotion also records the previous release-tag digests.
 
-Each release tag is an index of two platform images that also carry their own `-linux-amd64` and `-linux-arm64` tags. Deleting those platform tags, or their untagged versions, leaves a release tag that resolves but cannot be pulled. The weekly [published image health workflow](.github/workflows/published-health.yml) runs `python3 image/publish.py health` to catch that; run it after cleaning up GHCR package versions.
+Each release tag is an index of two platform images that also carry their own `-linux-amd64` and `-linux-arm64` tags. Deleting those platform tags, or their untagged versions, leaves a release tag that resolves but cannot be pulled. The weekly [published image health workflow](.github/workflows/published-health.yml) runs `python3 image/publish.py health`, and `extension-health` for the extension helper tags, to catch that; run it after cleaning up GHCR package versions.
 
 | Variant | Source |
 | --- | --- |
@@ -122,10 +136,10 @@ A successful report establishes compatibility for its recorded scenarios.
 
 ## Development
 
-`make check` runs the host unit tests of the checker, the functional harness and the role extraction. [The workflow](.github/workflows/test.yml) checks Debian, Ubuntu and the unmodified official image on native AMD64 and ARM64 runners. Distribution builds check both mixed roles and `all`.
+`make check` runs the host unit tests of the checkers, the publisher, the functional harness and the role extraction. The release jobs depend only on `make base-check`; the extension jobs run `make extension-test`, so that neither blocks the other. [The workflow](.github/workflows/test.yml) checks Debian, Ubuntu and the unmodified official image on native AMD64 and ARM64 runners. Distribution builds check both mixed roles and `all`.
 
 ## License
 
 The code and documents in this repository are licensed under the [MIT License](LICENSE).
 
-The checker and the functional scenarios run Ceph only inside containers and include no Ceph code. Role images built with this repository are different: they contain Ceph and distribution packages, each under its own license (Ceph is mostly LGPL-2.1 or LGPL-3, see its [COPYING](https://github.com/ceph/ceph/blob/v20.2.4/COPYING)). Images built by `image/roles/`, `image/debian/` and `image/ubuntu/` keep their license files and carry `/usr/share/ceph-testcontainers/SOURCES.txt` with `source-packages.txt`, which name the source package of every installed package and where it is published. Whoever distributes such images must meet those licenses, including making the corresponding source available where required.
+The checkers and the functional scenarios run Ceph only inside containers and include no Ceph code. The netem helper contains no Ceph component; its packages keep their licenses as described in [Extension Images](docs/EXTENSIONS.md). Role images built with this repository are different: they contain Ceph and distribution packages, each under its own license (Ceph is mostly LGPL-2.1 or LGPL-3, see its [COPYING](https://github.com/ceph/ceph/blob/v20.2.4/COPYING)). Images built by `image/roles/`, `image/debian/` and `image/ubuntu/` keep their license files and carry `/usr/share/ceph-testcontainers/SOURCES.txt` with `source-packages.txt`, which name the source package of every installed package and where it is published. Whoever distributes such images must meet those licenses, including making the corresponding source available where required.

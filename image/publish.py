@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Publish the exact images that passed CI; promote only a complete release."""
+"""Publish the exact images that passed CI; promote only a complete release or
+an extension helper checked on both platforms."""
 import argparse
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
@@ -106,8 +107,10 @@ def verify_image(entry):
             "Uploaded image platform differs from the tested image")
     require(config.get("rootfs", {}).get("diff_ids") == entry["rootfs_diff_ids"],
             "Uploaded layers differ from the tested image")
-    require(config.get("config", {}).get("Labels", {}).get("io.ceph-testcontainers.role") == entry["role"],
-            "Uploaded image has the wrong role")
+    label, value = (("io.ceph-testcontainers.extension", entry["extension"]) if "extension" in entry
+                    else ("io.ceph-testcontainers.role", entry["role"]))
+    require(config.get("config", {}).get("Labels", {}).get(label) == value,
+            "Uploaded image has the wrong role or extension")
 
 
 def stage(args):
@@ -206,35 +209,179 @@ def promote(args):
             output.write("images=" + json.dumps(digests, separators=(",", ":")) + "\n")
 
 
+def extensions():
+    """The extension checker, imported only for extension commands, so that a
+    defect in it cannot stop the publication of release images."""
+    import extension_check
+    return extension_check
+
+
+def extension_tag(extension, architecture=None):
+    """The tag of an extension helper; the contract version is part of it."""
+    return REGISTRY + ":extension-" + extension + "-v" + extensions().EXTENSIONS[extension]["contract"] + (
+        "-linux-" + architecture if architecture else "")
+
+
+def extension_targets():
+    """The targets every published helper must pass: the official image and the
+    published OSD role image of every release."""
+    return {reference for release, value in releases.RELEASES.items()
+            for reference in (value["official"], release_tag(release, "official", "osd"))}
+
+
+def validate_extension_report(report, extension, architecture):
+    extension_check = extensions()
+    require(extension in extension_check.EXTENSIONS, "Unknown extension " + repr(extension))
+    contract = extension_check.EXTENSIONS[extension]["contract"]
+    require(report.get("status") == "passed" and report.get("level") == "functional",
+            "Publishing an extension requires a passing functional check")
+    require(report.get("extension") == extension and report.get("contract") == contract,
+            "The report checked a different extension or contract")
+    require(report.get("checker_sha256") == extension_check.checker_sha256(),
+            "Extension report must come from the current checker and probe")
+    image = report.get("image", {})
+    require(image.get("status") == "passed" and image.get("platform") == "linux/" + architecture,
+            "The helper must pass on the requested platform")
+    require(image.get("cleanup", {}).get("status") == "passed", "Quick cleanup must pass")
+    labels = image.get("labels", {})
+    require(labels.get("io.ceph-testcontainers.extension") == extension and
+            labels.get("io.ceph-testcontainers.extension.contract") == contract,
+            "A published helper must declare its extension and contract")
+    kernel = report.get("kernel", {})
+    require(kernel.get("status") == "passed" and kernel.get("cleanup", {}).get("status") == "passed",
+            "The kernel check must pass and clean up")
+    targets = report.get("targets", {})
+    require(extension_targets() <= set(targets),
+            "The official and the published OSD role image of every release must be checked targets")
+    for result in targets.values():
+        require(result.get("status") == "passed" and result.get("cleanup", {}).get("status") == "passed"
+                and not result["cleanup"].get("leftovers"), "Every target scenario must pass and clean up")
+
+
+def stage_extension(args):
+    report_bytes = args.report.read_bytes()
+    report = json.loads(report_bytes)
+    validate_extension_report(report, args.extension, args.architecture)
+    require(re.fullmatch(r"[0-9a-f]{40}", args.revision) is not None, "Revision must be a full commit SHA")
+    require(re.fullmatch(r"[0-9]+-[0-9]+", args.run_id) is not None, "Run identity must include run and attempt")
+    checked = report["image"]
+    local = json.loads(run(["docker", "image", "inspect", checked["image_id"]]))[0]
+    require(local["Id"] == checked["image_id"] and local["Os"] + "/" + local["Architecture"] == checked["platform"],
+            "Local image identity/platform differs from the tested result")
+    require(local.get("Config", {}).get("Labels", {}).get("io.ceph-testcontainers.extension") == args.extension,
+            "Local image extension differs from the checked extension")
+    config_digest = local.get("Descriptor", {}).get("annotations", {}).get("config.digest", local["Id"])
+    require(DIGEST.fullmatch(config_digest) is not None, "Missing tested image config digest")
+    entry = {"extension": args.extension, "architecture": args.architecture, "image_id": checked["image_id"],
+             "config_digest": config_digest, "rootfs_diff_ids": local["RootFS"]["Layers"]}
+    result = {"schema": 1, "extension": args.extension, "contract": report["contract"],
+              "architecture": args.architecture, "revision": args.revision, "run_id": args.run_id,
+              "status": "uploading", "report_sha256": hashlib.sha256(report_bytes).hexdigest(),
+              "targets": sorted(report["targets"]), "environment": report.get("environment"),
+              "kernel": report["kernel"].get("kernel")}
+    save(args.output, result)
+    tag = REGISTRY + ":ci-" + args.run_id + "-" + extension_tag(args.extension, args.architecture).split(":", 1)[1]
+    run(["docker", "tag", entry["image_id"], tag])
+    (args.output.parent / "push-extension.log").write_text(run(["docker", "push", tag]))
+    entry.update(digest=manifest(tag)["digest"], candidate_tag=tag)
+    require(DIGEST.fullmatch(entry["digest"]) is not None, "Invalid uploaded manifest digest")
+    verify_image(entry)
+    result.update(image=entry, status="passed")
+    save(args.output, result)
+    print("Uploaded tested helper: " + tag + "@" + entry["digest"], flush=True)
+
+
+def collect_extension_candidates(directory, revision, run_id):
+    result = {}
+    for path in sorted(directory.rglob("extension-candidate.json")):
+        candidate = json.loads(path.read_text())
+        key = (candidate.get("extension"), candidate.get("architecture"))
+        require(key not in result, "Duplicate extension candidate platform")
+        require(candidate.get("status") == "passed" and candidate.get("revision") == revision
+                and candidate.get("run_id") == run_id, "Candidates must pass in the same CI run and revision")
+        entry = candidate.get("image", {})
+        require(entry.get("extension") == key[0] and entry.get("architecture") == key[1],
+                "Candidate extension/platform mismatch")
+        require(all(isinstance(entry.get(field), str) and DIGEST.fullmatch(entry[field])
+                    for field in ("digest", "config_digest", "image_id")), "Invalid candidate identity")
+        result[key] = candidate
+    require(set(result) == {(e, a) for e in extensions().EXTENSIONS for a in ARCHITECTURES},
+            "Every extension must pass on both platforms")
+    return result
+
+
+def promote_extension(args):
+    candidates = collect_extension_candidates(args.candidates, args.revision, args.run_id)
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        list(pool.map(verify_image, [candidate["image"] for candidate in candidates.values()]))
+    names = extensions().EXTENSIONS
+    tags = [extension_tag(e, a) for e in names for a in (*ARCHITECTURES, None)]
+    result = {"status": "promoting", "revision": args.revision, "run_id": args.run_id,
+              "previous": {tag: previous_manifest(tag) for tag in tags}, "platforms": {}, "indexes": {}}
+    save(args.output, result)
+    digests = {extension: {} for extension in names}
+    for (extension, architecture), candidate in sorted(candidates.items()):
+        tag = extension_tag(extension, architecture)
+        run(["docker", "buildx", "imagetools", "create", "--prefer-index=false", "--tag", tag,
+             REGISTRY + "@" + candidate["image"]["digest"]])
+        require(manifest(tag)["digest"] == candidate["image"]["digest"], "Platform tag differs from tested candidate")
+        digests[extension][architecture] = candidate["image"]["digest"]
+        result["platforms"][tag] = candidate["image"]
+        save(args.output, result)
+    for extension in names:
+        tag = extension_tag(extension)
+        expected = {("linux", a): digests[extension][a] for a in ARCHITECTURES}
+        run(["docker", "buildx", "imagetools", "create", "--tag", tag] +
+            [REGISTRY + "@" + digest for digest in expected.values()])
+        raw = raw_manifest(tag)
+        observed = {(m["platform"]["os"], m["platform"]["architecture"]): m["digest"] for m in raw.get("manifests", [])}
+        require(len(raw.get("manifests", [])) == 2 and observed == expected, "Index differs from tested platforms")
+        result["indexes"][tag] = manifest(tag)
+        save(args.output, result)
+        print("Promoted tested helper platforms: " + tag, flush=True)
+    result.update(status="passed", images=digests, finished_at=datetime.now(timezone.utc).isoformat())
+    save(args.output, result)
+    if args.github_output:
+        with args.github_output.open("a") as output:
+            output.write("images=" + json.dumps(digests, separators=(",", ":")) + "\n")
+
+
 def health(args):
     """Every release tag must list both platforms, and each platform image must
     still exist; deleting a platform tag leaves a release tag that cannot pull."""
+    check_tags([release_tag(release, variant, role)
+                for release in args.releases for variant in VARIANTS for role in check.ROLES])
+
+
+def extension_health(args):
+    """The same for every extension helper tag."""
+    check_tags([extension_tag(extension) for extension in extensions().EXTENSIONS])
+
+
+def check_tags(tags):
     problems = []
     checked = 0
-    for release in args.releases:
-        for variant in VARIANTS:
-            for role in check.ROLES:
-                tag = release_tag(release, variant, role)
-                try:
-                    index = raw_manifest(tag)
-                except PublishError as error:
-                    problems.append(tag + ": release tag unreadable: " + str(error).splitlines()[0])
-                    continue
-                platforms = {(m.get("platform", {}).get("os"), m.get("platform", {}).get("architecture")): m.get("digest")
-                             for m in index.get("manifests", [])}
-                if set(platforms) != {("linux", a) for a in ARCHITECTURES}:
-                    problems.append(tag + ": release tag does not list exactly linux/amd64 and linux/arm64")
-                    continue
-                for (_, architecture), digest in sorted(platforms.items()):
-                    checked += 1
-                    try:
-                        raw_manifest(REGISTRY + "@" + digest)
-                    except PublishError:
-                        problems.append(tag + ": linux/" + architecture + " image " + digest + " is missing")
+    for tag in tags:
+        try:
+            index = raw_manifest(tag)
+        except PublishError as error:
+            problems.append(tag + ": tag unreadable: " + str(error).splitlines()[0])
+            continue
+        platforms = {(m.get("platform", {}).get("os"), m.get("platform", {}).get("architecture")): m.get("digest")
+                     for m in index.get("manifests", [])}
+        if set(platforms) != {("linux", a) for a in ARCHITECTURES}:
+            problems.append(tag + ": tag does not list exactly linux/amd64 and linux/arm64")
+            continue
+        for (_, architecture), digest in sorted(platforms.items()):
+            checked += 1
+            try:
+                raw_manifest(REGISTRY + "@" + digest)
+            except PublishError:
+                problems.append(tag + ": linux/" + architecture + " image " + digest + " is missing")
     for problem in problems:
         print(problem, file=sys.stderr)
     print("Published platform images: %d present, %d problems" % (checked - sum("is missing" in p for p in problems), len(problems)))
-    require(not problems, "Published release tags are incomplete")
+    require(not problems, "Published tags are incomplete")
 
 
 def main():
@@ -252,14 +399,30 @@ def main():
         command.add_argument("--revision", required=True)
         command.add_argument("--run-id", required=True)
         command.add_argument("--output", type=Path, required=True)
+    stage_helper = commands.add_parser("stage-extension", help="Upload a functionally checked extension helper")
+    stage_helper.add_argument("--report", type=Path, required=True)
+    stage_helper.add_argument("--extension", required=True)
+    stage_helper.add_argument("--architecture", choices=ARCHITECTURES, required=True)
+    promote_helper = commands.add_parser("promote-extension", help="Promote every extension from both platforms")
+    promote_helper.add_argument("--candidates", type=Path, required=True)
+    promote_helper.add_argument("--github-output", type=Path)
+    for command in (stage_helper, promote_helper):
+        command.add_argument("--revision", required=True)
+        command.add_argument("--run-id", required=True)
+        command.add_argument("--output", type=Path, required=True)
     health_parser = commands.add_parser("health", help="Check that every published platform image still exists")
     health_parser.add_argument("--release", dest="releases", action="append", choices=tuple(releases.RELEASES))
+    commands.add_parser("extension-health", help="Check that every published helper platform image still exists")
     args = parser.parse_args()
     if args.command == "health":
         args.releases = args.releases or list(releases.RELEASES)
         health(args)
         return
-    (stage if args.command == "stage" else promote)(args)
+    if args.command == "extension-health":
+        extension_health(args)
+        return
+    {"stage": stage, "promote": promote, "stage-extension": stage_extension,
+     "promote-extension": promote_extension}[args.command](args)
 
 
 if __name__ == "__main__":

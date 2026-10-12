@@ -1,4 +1,4 @@
-.PHONY: check checker-test functional-test roles-test image-check official-check role-images role-images-full debian-images ubuntu-images
+.PHONY: check base-check extension-test checker-test functional-test roles-test image-check official-check role-images role-images-full debian-images ubuntu-images extension-images extension-check
 
 # Release inputs live in image/releases.py; CEPH_RELEASE selects one of them.
 CEPH_RELEASE ?= 20.2.4
@@ -6,8 +6,14 @@ OFFICIAL_IMAGE ?= $(shell python3 image/releases.py official $(CEPH_RELEASE))
 CEPH_SOURCE_IMAGE ?= $(OFFICIAL_IMAGE)
 ROLE_REPOSITORY ?= ceph-testcontainers
 
-# Host unit tests only; no Docker.
-check: checker-test functional-test roles-test
+# Host unit tests only; no Docker. Release images depend only on base-check,
+# so that an extension defect never blocks them.
+check: base-check extension-test
+
+base-check: checker-test functional-test roles-test
+
+extension-test:
+	python3 -m unittest discover -s image/extensions/tests -v
 
 checker-test:
 	python3 -m unittest discover -s image/tests -v
@@ -44,3 +50,16 @@ debian-images ubuntu-images: %-images:
 		docker buildx build --load --platform "$(PLATFORM)" --provenance=false --target $$role $$build_args \
 			-t "$(IMAGE_REPOSITORY):$*-$(CEPH_RELEASE)-$$role" image/$* || exit 1; \
 	done
+
+# Opt-in extension helpers, built and checked apart from the role images
+# (docs/EXTENSIONS.md). The check needs NET_ADMIN for its own helper containers.
+EXTENSION_IMAGE ?= $(IMAGE_REPOSITORY):extension-netem
+
+extension-images:
+	docker buildx build --load --platform "$(PLATFORM)" --provenance=false \
+		-t "$(IMAGE_REPOSITORY):extension-netem" image/extensions/netem
+
+# Example: make extension-check EXTENSION_IMAGE=my-registry/netem-helper:dev
+extension-check:
+	python3 image/extension_check.py --extension netem --image "$(EXTENSION_IMAGE)" \
+		--functional --target "$(OFFICIAL_IMAGE)"
