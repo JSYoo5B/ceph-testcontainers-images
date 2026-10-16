@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 import sys
 import unittest
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 import extension_check
@@ -44,6 +45,86 @@ QDISCS = ('[{"kind":"prio","handle":"7e00:","root":true,"refcnt":5,"options":{"b
           '"overlimits":0,"requeues":0,"backlog":0,"qlen":0},{"kind":"netem","handle":"7e10:","parent":"7e00:3",'
           '"options":{"limit":1000,"delay":{"delay":0.12,"jitter":0,"correlation":0},"ecn":false,"gap":0},'
           '"bytes":0,"packets":0,"drops":0,"overlimits":0,"requeues":0,"backlog":0,"qlen":0}]')
+
+
+BUSY = QDISCS.replace('"backlog":0,"qlen":0}]', '"backlog":1514,"qlen":1}]')
+
+
+class Clock:
+    """A monotonic clock that only Docker reads and sleeps advance."""
+
+    def __init__(self):
+        self.now = 100.0
+
+    def monotonic(self):
+        return self.now
+
+    def sleep(self, seconds):
+        self.now += seconds
+
+
+class DrainTests(unittest.TestCase):
+    """drained() against a controlled clock; each read is (seconds, output),
+    or (seconds, None) for a read that Docker abandons at its timeout."""
+
+    def run_drain(self, reads):
+        clock, timeouts = Clock(), []
+        reads = list(reads)
+
+        def docker(*command, timeout=120, check_exit=True):
+            timeouts.append(timeout)
+            seconds, output = reads.pop(0)
+            if output is None:
+                clock.now += timeout
+                raise extension_check.CheckError("Docker command timed out", "timeout")
+            clock.now += seconds
+            return 0, output
+
+        with mock.patch.object(extension_check, "docker", docker), \
+                mock.patch.object(extension_check.time, "monotonic", clock.monotonic), \
+                mock.patch.object(extension_check.time, "sleep", clock.sleep):
+            return extension_check.drained("shaper", "eth0"), timeouts
+
+    def test_an_empty_queue_within_the_budget_is_drained(self):
+        drain, timeouts = self.run_drain([(0.1, BUSY), (0.1, QDISCS)])
+        self.assertEqual(drain["status"], "drained")
+        self.assertEqual(drain["elapsed_ms"], 250.0)
+        self.assertEqual(timeouts[0], 2.0)
+
+    def test_an_empty_queue_observed_after_the_budget_is_not_drained(self):
+        drain, _ = self.run_drain([(3.0, QDISCS)])
+        self.assertEqual(drain["status"], "drain_pending")
+        self.assertEqual(drain["reason"], "observed_after_deadline")
+        self.assertEqual(drain["elapsed_ms"], 3000.0)
+
+    def test_a_read_that_times_out_is_not_drained(self):
+        drain, timeouts = self.run_drain([(0.1, BUSY), (0, None)])
+        self.assertEqual(drain["status"], "drain_pending")
+        self.assertEqual(drain["reason"], "read_timeout")
+        self.assertEqual(drain["counters"]["backlog"], 1514)
+        self.assertEqual([round(timeout, 3) for timeout in timeouts], [2.0, 1.85])
+        self.assertEqual(drain["elapsed_ms"], 2000.0)
+
+    def test_a_queue_busy_until_the_budget_is_not_drained(self):
+        drain, timeouts = self.run_drain([(0.25, BUSY)] * 20)
+        self.assertEqual(drain["status"], "drain_pending")
+        self.assertEqual(drain["counters"]["qlen"], 1)
+        self.assertLessEqual(drain["elapsed_ms"], 2050.0)
+        # Each later read is bounded by what remains of the budget, and no
+        # read starts after it.
+        self.assertEqual([round(timeout, 3) for timeout in timeouts], [2.0, 1.7, 1.4, 1.1, 0.8, 0.5, 0.2])
+
+    def test_loss_follows_only_a_drained_queue(self):
+        calls = []
+        with mock.patch.object(extension_check, "tc", lambda *command, **_: calls.append(command)):
+            for drain in ({"status": "drain_pending", "reason": "read_timeout"},
+                          {"status": "drain_pending", "reason": "observed_after_deadline"}):
+                with self.subTest(drain["reason"]), self.assertRaises(extension_check.CheckError):
+                    extension_check.apply_loss("shaper", "eth0", drain)
+            self.assertEqual(calls, [])
+            extension_check.apply_loss("shaper", "eth0", {"status": "drained"})
+        self.assertEqual(calls, [("shaper", "qdisc", "change", "dev", "eth0", "parent", "7e00:3", "handle", "7e10:",
+                                  "netem", "loss", "100%")])
 
 
 class SelectorTests(unittest.TestCase):

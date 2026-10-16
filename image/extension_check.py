@@ -38,6 +38,7 @@ SELECTED_PORT, OTHER_PORT, REVERSE_PORT = 7000, 7001, 6999
 SELECTOR_SAMPLES, CONTROL_SAMPLES = 5, 3
 LOSS_TIMEOUT = 0.8
 DRAIN_BUDGET = 2.0
+DRAIN_POLL = 0.05
 
 # Answers every connection with RESPONSE bytes; runs in the target namespace.
 SERVER = """import socket
@@ -251,8 +252,8 @@ def classify(output):
     return "runtime_failure"
 
 
-def tc(container, *command):
-    code, output = docker("exec", container, "tc", *command, check_exit=False)
+def tc(container, *command, timeout=120):
+    code, output = docker("exec", container, "tc", *command, timeout=timeout, check_exit=False)
     if code:
         raise CheckError("tc " + " ".join(command) + " failed: " + output.strip(), classify(output))
     return output
@@ -546,17 +547,42 @@ def requests(container, host, port, count, timeout, label, output):
 
 def drained(shaper, interface):
     """Waits until the owned child holds no packet, within DRAIN_BUDGET. A
-    completed read does not show that the qdisc is empty."""
+    completed read does not show that the qdisc is empty, and an empty queue
+    observed after the deadline does not show that it drained in time. Every
+    read gets only what remains of the budget."""
     started = time.monotonic()
+    deadline = started + DRAIN_BUDGET
+    counters, reason = None, "budget_exhausted"
     while True:
-        state = selector_qdiscs(tc(shaper, "-j", "-s", "qdisc", "show", "dev", interface))
-        counters = state["counters"]
-        elapsed = round((time.monotonic() - started) * 1000, 1)
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        try:
+            raw = tc(shaper, "-j", "-s", "qdisc", "show", "dev", interface, timeout=remaining)
+        except CheckError as error:
+            if error.kind != "timeout":
+                raise
+            reason = "read_timeout"
+            break
+        observed = time.monotonic()
+        counters = selector_qdiscs(raw)["counters"]
+        if observed > deadline:
+            reason = "observed_after_deadline"
+            break
         if counters["backlog"] == 0 and counters["qlen"] == 0:
-            return {"status": "drained", "elapsed_ms": elapsed, "counters": counters}
-        if elapsed > DRAIN_BUDGET * 1000:
-            return {"status": "drain_pending", "elapsed_ms": elapsed, "counters": counters}
-        time.sleep(0.05)
+            return {"status": "drained", "elapsed_ms": round((observed - started) * 1000, 1), "counters": counters}
+        time.sleep(max(0.0, min(DRAIN_POLL, deadline - time.monotonic())))
+    # The last counters read, if any; an unobserved queue is not empty.
+    return {"status": "drain_pending", "reason": reason,
+            "elapsed_ms": round((time.monotonic() - started) * 1000, 1), "counters": counters}
+
+
+def apply_loss(shaper, device, drain):
+    """Changes the owned child to 100% loss, only after it drained in time."""
+    if drain["status"] != "drained":
+        raise CheckError("The owned child did not drain within %.1f s (%s)" % (DRAIN_BUDGET, drain.get("reason")),
+                         "runtime_failure")
+    tc(shaper, "qdisc", "change", "dev", device, "parent", BAND, "handle", CHILD, "netem", "loss", "100%")
 
 
 def selector_scenario(helper, target, run, profile, delay, output):
@@ -643,9 +669,7 @@ def selector_scenario(helper, target, run, profile, delay, output):
         result["delayed"] = measure_path("selected", "delayed", SELECTOR_SAMPLES)
         result["after_delayed"] = selector_qdiscs(tc(names["shaper"], "-j", "-s", "qdisc", "show", "dev", device))
         result["drain"] = drained(names["shaper"], device)
-        if result["drain"]["status"] != "drained":
-            raise CheckError("The owned child did not drain within %.1f s" % DRAIN_BUDGET, "runtime_failure")
-        tc(names["shaper"], "qdisc", "change", "dev", device, "parent", BAND, "handle", CHILD, "netem", "loss", "100%")
+        apply_loss(names["shaper"], device, result["drain"])
         result["lost"] = measure_path("selected", "loss", 1, LOSS_TIMEOUT)
         result["controls_lost"] = controls("loss")
         result["after_loss"] = selector_qdiscs(tc(names["shaper"], "-j", "-s", "qdisc", "show", "dev", device))
