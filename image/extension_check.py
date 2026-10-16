@@ -5,15 +5,19 @@ The quick check (default) runs the extension's probe in the image without any
 capability or network. The functional check (--functional) also checks this
 Docker engine: the kernel feature with NET_ADMIN in a disposable namespace,
 then a delay that the helper applies, changes and removes inside the network
-namespace of a container from each --target image.
+namespace of a container from each --target image. Each --selector adds a
+candidate selector profile, outside the contract: a delay and a loss that only
+the selected peer, family and port of a target's egress get.
 """
 import argparse
 from datetime import datetime, timezone
 import hashlib
+import ipaddress
 import json
 from pathlib import Path
 import subprocess
 import sys
+import time
 import uuid
 
 import check
@@ -25,6 +29,15 @@ HANDLE = "c7e1:"
 PORT = 7000
 RESPONSE = 1024
 SAMPLES = 9
+
+# Candidate selector profiles (docs/EXTENSIONS.md): not part of any contract.
+SELECTORS = {"ipv4-tcp-u32": {"family": 4, "protocol": "ip", "pref": 10, "handle": "800::1"},
+             "ipv6-tcp-u32": {"family": 6, "protocol": "ipv6", "pref": 10, "handle": "800::1"}}
+ROOT, CHILD, BAND = "7e00:", "7e10:", "7e00:3"
+SELECTED_PORT, OTHER_PORT, REVERSE_PORT = 7000, 7001, 6999
+SELECTOR_SAMPLES, CONTROL_SAMPLES = 5, 3
+LOSS_TIMEOUT = 0.8
+DRAIN_BUDGET = 2.0
 
 # Answers every connection with RESPONSE bytes; runs in the target namespace.
 SERVER = """import socket
@@ -40,6 +53,57 @@ while True:
     finally:
         c.close()
 """ % (PORT, RESPONSE)
+
+# Answers every connection on each port given, over IPv4 and IPv6.
+PEER_SERVER = """import socket, sys, threading
+def serve(port):
+    s = socket.socket(socket.AF_INET6)
+    s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    s.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 0)
+    s.bind(("::", port))
+    s.listen(64)
+    while True:
+        c, _ = s.accept()
+        try:
+            c.recv(64)
+            c.sendall(b"x" * %d)
+        finally:
+            c.close()
+threads = [threading.Thread(target=serve, args=(int(port),)) for port in sys.argv[1:]]
+for thread in threads:
+    thread.start()
+for thread in threads:
+    thread.join()
+""" % RESPONSE
+
+# Times fresh requests and reports each outcome; a timeout is a result.
+SELECT_CLIENT = """import json, socket, sys, time
+host, port, count, size, timeout = sys.argv[1], int(sys.argv[2]), int(sys.argv[3]), int(sys.argv[4]), float(sys.argv[5])
+outcomes, times = [], []
+for _ in range(count):
+    start = time.monotonic()
+    try:
+        with socket.create_connection((host, port), timeout=timeout) as c:
+            c.sendall(b"ping\\n")
+            data = b""
+            while len(data) < size:
+                chunk = c.recv(4096)
+                if not chunk:
+                    break
+                data += chunk
+        outcome = "answered" if len(data) == size else "short"
+    except socket.timeout:
+        outcome = "timeout"
+    except OSError as error:
+        outcome = "error: " + str(error)
+    elapsed = (time.monotonic() - start) * 1000
+    outcomes.append(outcome)
+    if outcome == "answered":
+        times.append(elapsed)
+times.sort()
+print(json.dumps({"count": count, "answered": len(times), "outcomes": sorted(set(outcomes)),
+                  "median_ms": times[len(times) // 2] if times else None, "elapsed_ms": elapsed}))
+"""
 
 # Helper-side reads that need only the contract's python3.
 NAMESPACE = 'import os; print(os.readlink("/proc/self/ns/net"))'
@@ -98,6 +162,8 @@ def arguments(argv=None):
                         help="Also check the kernel feature and a delay inside each target's namespace")
     parser.add_argument("--target", action="append", default=[], metavar="REF",
                         help="With --functional, a Ceph image whose container namespace the helper joins; repeat")
+    parser.add_argument("--selector", action="append", default=[], choices=tuple(SELECTORS),
+                        help="With --functional, also check a candidate selector profile in each target; repeat")
     parser.add_argument("--delay-ms", type=check.positive_number, default=200, metavar="MS")
     parser.add_argument("--output-dir", type=Path, help="Fresh report directory (default: artifacts/extension-check-UUID)")
     parser.add_argument("--probe-timeout", type=check.positive_number, default=120, metavar="SECONDS")
@@ -106,6 +172,8 @@ def arguments(argv=None):
         parser.error("--target requires --functional")
     if args.functional and not args.target:
         parser.error("--functional requires at least one --target")
+    if args.selector and not args.functional:
+        parser.error("--selector requires --functional")
     if args.image.startswith("-") or any(target.startswith("-") for target in args.target):
         parser.error("image references cannot start with -")
     return args
@@ -364,6 +432,290 @@ def restart(names, interface, delay, common):
             "new_root": root_qdisc(fresh, interface["name"]).get("kind")}
 
 
+class Pairs(list):
+    """A JSON object as its (key, value) pairs in order. tc prints one u32
+    key per repeated "match" member, which a dict would reduce to the last."""
+
+    def get(self, key, default=None):
+        for name, value in self:
+            if name == key:
+                return value
+        return default
+
+    def every(self, key):
+        return [value for name, value in self if name == key]
+
+
+def u32_keys(family, peer, port):
+    """The keys that tc prints for a destination, TCP and destination port
+    selector, in order: (offset, value, mask, offmask). tc packs each match
+    into a word-aligned key, so an IPv6 next header and port appear at
+    offsets 4 and 40, not 6 and 42."""
+    if family == 4:
+        keys = [(16, int(ipaddress.IPv4Address(peer)), 0xffffffff), (8, 0x00060000, 0x00ff0000)]
+        port_offset = 20
+    else:
+        address = int(ipaddress.IPv6Address(peer))
+        keys = [(24 + 4 * index, (address >> (96 - 32 * index)) & 0xffffffff, 0xffffffff) for index in range(4)]
+        keys.append((4, 0x00000600, 0x0000ff00))
+        port_offset = 40
+    keys.append((port_offset, port, 0x0000ffff))
+    return [{"off": off, "value": "%08x" % value, "mask": "%08x" % mask, "offmask": ""} for off, value, mask in keys]
+
+
+def selector_leaf(raw, profile, peer, port):
+    """The owned selector of a filter dump, checked against the requested
+    one. The dump of the owned root may hold the leaf and its u32 table and
+    header entries; anything else is foreign state."""
+    settings = SELECTORS[profile]
+    leaves = []
+    for entry in json.loads(raw, object_pairs_hook=Pairs):
+        if (entry.get("kind"), entry.get("protocol"), entry.get("pref"), entry.get("parent")) != \
+                ("u32", settings["protocol"], settings["pref"], ROOT):
+            raise CheckError("A filter that the check does not own: " + json.dumps(entry), "runtime_failure")
+        options = entry.get("options")
+        if options is None or options.get("fh", "").endswith(":"):
+            continue
+        leaves.append(options)
+    if len(leaves) != 1:
+        raise CheckError("Expected one selector leaf, found %d" % len(leaves), "runtime_failure")
+    options = leaves[0]
+    keys = []
+    for match in options.every("match"):
+        try:
+            keys.append({"off": match.get("off"), "value": "%08x" % int(match.get("value"), 16),
+                         "mask": "%08x" % int(match.get("mask"), 16), "offmask": match.get("offmask")})
+        except (TypeError, ValueError) as error:
+            raise CheckError("A u32 key that cannot be read: " + json.dumps(match), "runtime_failure") from error
+    leaf = {"handle": options.get("fh"), "flowid": options.get("flowid"), "keys": keys}
+    expected = u32_keys(settings["family"], peer, port)
+    problems = []
+    if leaf["handle"] != settings["handle"]:
+        problems.append("handle %s" % leaf["handle"])
+    if leaf["flowid"] != BAND:
+        problems.append("flowid %s" % leaf["flowid"])
+    if keys != expected:
+        problems.append("keys %s, requested %s" % (json.dumps(keys), json.dumps(expected)))
+    if problems:
+        raise CheckError("The selector is not the requested one: " + "; ".join(problems), "runtime_failure")
+    return leaf
+
+
+def remaining_filters(entries, settings):
+    """What the owned preference holds after its leaf was removed: nothing,
+    or its u32 table entries. A leaf or another filter is foreign state."""
+    kept = []
+    for entry in entries:
+        options = entry.get("options")
+        owned = (entry.get("kind"), entry.get("protocol"), entry.get("pref"), entry.get("parent")) == \
+            ("u32", settings["protocol"], settings["pref"], ROOT)
+        if not owned or (options is not None and not options.get("fh", "").endswith(":")):
+            raise CheckError("A filter remains after the leaf was removed: " + json.dumps(entry), "runtime_failure")
+        kept.append("table" if options is None else options.get("fh"))
+    return kept
+
+
+def selector_qdiscs(raw):
+    """The owned prio root and netem child of a qdisc dump, with counters."""
+    root = child = None
+    for qdisc in json.loads(raw):
+        if qdisc.get("root"):
+            root = qdisc
+        elif qdisc.get("handle") == CHILD:
+            child = qdisc
+    options = (root or {}).get("options", {})
+    if (root or {}).get("kind") != "prio" or root.get("handle") != ROOT or options.get("bands") != 3 \
+            or options.get("priomap") != [0] * 16:
+        raise CheckError("The root qdisc is not the owned prio qdisc: " + json.dumps(root), "runtime_failure")
+    if (child or {}).get("kind") != "netem" or child.get("parent") != BAND:
+        raise CheckError("The owned netem child is missing: " + json.dumps(child), "runtime_failure")
+    delay = child.get("options", {}).get("delay", {})
+    return {"delay_ms": round(delay.get("delay", 0) * 1000, 3), "loss": child.get("options", {}).get("loss-random"),
+            "counters": {key: child.get(key) for key in ("packets", "bytes", "drops", "backlog", "qlen")}}
+
+
+def requests(container, host, port, count, timeout, label, output):
+    code, text = docker("exec", container, "python3", "-c", SELECT_CLIENT, host, str(port), str(count), str(RESPONSE),
+                        str(timeout), check_exit=False, timeout=count * timeout + 60)
+    with (output / "timings.log").open("a") as log:
+        log.write(label + ": " + text)
+    if code:
+        raise CheckError("The request client failed (" + label + "): " + text.strip(), "runtime_failure")
+    return json.loads(text.strip().splitlines()[-1])
+
+
+def drained(shaper, interface):
+    """Waits until the owned child holds no packet, within DRAIN_BUDGET. A
+    completed read does not show that the qdisc is empty."""
+    started = time.monotonic()
+    while True:
+        state = selector_qdiscs(tc(shaper, "-j", "-s", "qdisc", "show", "dev", interface))
+        counters = state["counters"]
+        elapsed = round((time.monotonic() - started) * 1000, 1)
+        if counters["backlog"] == 0 and counters["qlen"] == 0:
+            return {"status": "drained", "elapsed_ms": elapsed, "counters": counters}
+        if elapsed > DRAIN_BUDGET * 1000:
+            return {"status": "drain_pending", "elapsed_ms": elapsed, "counters": counters}
+        time.sleep(0.05)
+
+
+def selector_scenario(helper, target, run, profile, delay, output):
+    """Delay, then drop, only the selected peer, family and port of the
+    target's egress, and keep the other paths unaffected."""
+    settings = SELECTORS[profile]
+    family = settings["family"]
+    label = LABEL + "=" + run
+    network = "ceph-extension-check-" + run
+    names = {role: network + "-" + role for role in ("target", "shaper", "driver", "peer-b", "peer-c")}
+    result = {"profile": profile, "reference": target["reference"], "image_id": target["image_id"], "status": "running"}
+    output.mkdir()
+    common = ["--detach", "--label", label, "--pull=never", "--user=0:0", "--platform", helper["platform"]]
+    servers = ["--entrypoint=python3", helper["image_id"], "-c", PEER_SERVER]
+    try:
+        docker("network", "create", "--internal", "--ipv6", "--label", label, network)
+        docker("run", "--detach", "--label", label, "--pull=never", "--platform", target["platform"], "--name", names["target"],
+               "--network", network, "--entrypoint=sleep", target["image_id"], "infinity")
+        shared = "container:" + names["target"]
+        docker("run", *common, "--name", names["shaper"], "--network", shared, "--cap-drop=ALL",
+               "--cap-add=NET_ADMIN", "--entrypoint=sleep", helper["image_id"], "infinity")
+        docker("run", *common, "--name", names["driver"], "--network", shared, "--cap-drop=ALL", *servers, str(REVERSE_PORT))
+        for peer in ("peer-b", "peer-c"):
+            docker("run", *common, "--name", names[peer], "--network", network, "--cap-drop=ALL", *servers,
+                   str(SELECTED_PORT), str(OTHER_PORT))
+        endpoints = {}
+        for role in ("target", "peer-b", "peer-c"):
+            inspect = json.loads(docker("container", "inspect", names[role])[1])[0]
+            endpoint = inspect["NetworkSettings"]["Networks"][network]
+            endpoints[role] = {4: endpoint["IPAddress"], 6: endpoint["GlobalIPv6Address"], "mac": endpoint["MacAddress"],
+                               "sandbox_id": inspect["NetworkSettings"]["SandboxID"]}
+            if not endpoints[role][4] or not endpoints[role][6]:
+                raise CheckError("The network gave %s no IPv4 or no IPv6 address" % role, "runtime_failure")
+        result["sandbox_id"] = endpoints["target"]["sandbox_id"]
+        namespaces = {docker("exec", names[role], "python3", "-c", NAMESPACE)[1].strip() for role in ("shaper", "driver")}
+        if len(namespaces) != 1:
+            raise CheckError("The helpers did not join one namespace: " + ", ".join(sorted(namespaces)))
+        addresses = json.loads(docker("exec", names["shaper"], "ip", "-j", "address", "show")[1])
+        interface = target_interface(addresses, endpoints["target"][family], endpoints["target"]["mac"])
+        device = interface["name"]
+        other = 6 if family == 4 else 4
+        peer = endpoints["peer-b"][family]
+        result.update(interface=interface, selected={"peer": peer, "port": SELECTED_PORT, "family": family})
+        paths = {"selected": (names["driver"], peer, SELECTED_PORT),
+                 "same_peer_other_family": (names["driver"], endpoints["peer-b"][other], SELECTED_PORT),
+                 "same_peer_other_port": (names["driver"], peer, OTHER_PORT),
+                 "third_peer": (names["driver"], endpoints["peer-c"][family], SELECTED_PORT),
+                 "reverse": (names["peer-b"], endpoints["target"][family], REVERSE_PORT)}
+        for name, (client, host, port) in paths.items():
+            code, text = docker("exec", client, "python3", "-c", READY, host, str(port), check_exit=False)
+            if code:
+                raise CheckError("No answer on the %s path: %s" % (name, text.strip()), "runtime_failure")
+
+        def measure_path(name, phase, count=CONTROL_SAMPLES, timeout=10):
+            client, host, port = paths[name]
+            return requests(client, host, port, count, timeout, phase + " " + name, output)
+
+        def controls(phase):
+            return {name: measure_path(name, phase) for name in paths if name != "selected"}
+
+        result["root_before"] = root_qdisc(names["shaper"], device)
+        result["baseline"] = measure_path("selected", "baseline", SELECTOR_SAMPLES)
+        # The root and its child first: until the filter exists, everything
+        # takes the unshaped band.
+        tc(names["shaper"], "qdisc", "add", "dev", device, "root", "handle", ROOT, "prio", "bands", "3",
+           "priomap", *["0"] * 16)
+        tc(names["shaper"], "qdisc", "add", "dev", device, "parent", BAND, "handle", CHILD, "netem",
+           "delay", "%dms" % delay)
+        match = "ip" if family == 4 else "ip6"
+        tc(names["shaper"], "filter", "add", "dev", device, "protocol", settings["protocol"], "parent", ROOT,
+           "pref", str(settings["pref"]), "handle", settings["handle"], "u32",
+           "match", match, "dst", "%s/%d" % (peer, 32 if family == 4 else 128),
+           "match", match, "protocol", "6", "0xff", "match", match, "dport", str(SELECTED_PORT), "0xffff",
+           "flowid", BAND)
+        # Without a parent, tc prints each entry's parent, protocol and
+        # preference, and every egress filter of the device.
+        raw = tc(names["shaper"], "-j", "filter", "show", "dev", device)
+        (output / "filter.json").write_text(raw)
+        result["selector"] = selector_leaf(raw, profile, peer, SELECTED_PORT)
+        result["applied"] = selector_qdiscs(tc(names["shaper"], "-j", "-s", "qdisc", "show", "dev", device))
+        # Controls run before selected traffic, so the child must count none.
+        result["controls_delayed"] = controls("delayed")
+        result["after_controls"] = selector_qdiscs(tc(names["shaper"], "-j", "-s", "qdisc", "show", "dev", device))
+        result["delayed"] = measure_path("selected", "delayed", SELECTOR_SAMPLES)
+        result["after_delayed"] = selector_qdiscs(tc(names["shaper"], "-j", "-s", "qdisc", "show", "dev", device))
+        result["drain"] = drained(names["shaper"], device)
+        if result["drain"]["status"] != "drained":
+            raise CheckError("The owned child did not drain within %.1f s" % DRAIN_BUDGET, "runtime_failure")
+        tc(names["shaper"], "qdisc", "change", "dev", device, "parent", BAND, "handle", CHILD, "netem", "loss", "100%")
+        result["lost"] = measure_path("selected", "loss", 1, LOSS_TIMEOUT)
+        result["controls_lost"] = controls("loss")
+        result["after_loss"] = selector_qdiscs(tc(names["shaper"], "-j", "-s", "qdisc", "show", "dev", device))
+        # The selection stops first, then the owned qdiscs go. Removing the
+        # last leaf can remove its whole filter chain; only a u32 table that
+        # outlived the leaf is removed by preference.
+        tc(names["shaper"], "filter", "del", "dev", device, "parent", ROOT, "protocol", settings["protocol"],
+           "pref", str(settings["pref"]), "handle", settings["handle"], "u32")
+        remaining = json.loads(tc(names["shaper"], "-j", "filter", "show", "dev", device), object_pairs_hook=Pairs)
+        result["after_leaf_removal"] = remaining_filters(remaining, settings)
+        if result["after_leaf_removal"]:
+            tc(names["shaper"], "filter", "del", "dev", device, "parent", ROOT, "protocol", settings["protocol"],
+               "pref", str(settings["pref"]))
+        tc(names["shaper"], "qdisc", "del", "dev", device, "root", "handle", ROOT)
+        result["root_after"] = root_qdisc(names["shaper"], device)
+        result["filters_after"] = json.loads(tc(names["shaper"], "-j", "filter", "show", "dev", device))
+        result["restored"] = measure_path("selected", "restored", SELECTOR_SAMPLES)
+        problems = selector_problems(result, delay)
+        if problems:
+            raise CheckError("; ".join(problems), "runtime_failure")
+        result["status"] = "passed"
+    except (check.CheckError, KeyError, ValueError) as error:
+        result.update(status="failed", error=str(error), failure_kind=getattr(error, "kind", "checker_failure"))
+    finally:
+        result["cleanup"] = cleanup(label, output)
+        if result["cleanup"]["status"] != "passed":
+            result["status"] = "failed"
+        (output / "result.json").write_text(json.dumps(result, indent=2) + "\n")
+    return result
+
+
+def selector_problems(result, delay):
+    """What a selector scenario's observations do not show."""
+    problems = []
+    fast = delay / 4
+
+    def median(observation):
+        return observation["median_ms"] if observation["answered"] == observation["count"] else None
+
+    for phase in ("baseline", "restored"):
+        value = median(result[phase])
+        if value is None or value >= fast:
+            problems.append("selected path %s: %s" % (phase, json.dumps(result[phase])))
+    for phase in ("controls_delayed", "controls_lost"):
+        for name, observation in result[phase].items():
+            value = median(observation)
+            if value is None or value >= fast:
+                problems.append("%s %s: %s" % (phase, name, json.dumps(observation)))
+    if result["applied"]["delay_ms"] != delay:
+        problems.append("applied delay %r" % result["applied"]["delay_ms"])
+    if result["after_controls"]["counters"]["packets"] != 0:
+        problems.append("the child counted %r packets of control traffic" % result["after_controls"]["counters"]["packets"])
+    value = median(result["delayed"])
+    if value is None or value < delay:
+        problems.append("selected path delayed: %s" % json.dumps(result["delayed"]))
+    if not result["after_delayed"]["counters"]["packets"]:
+        problems.append("the child counted no selected packets")
+    if result["lost"]["outcomes"] != ["timeout"]:
+        problems.append("selected path under loss: %s" % json.dumps(result["lost"]))
+    if not result["after_loss"]["counters"]["drops"]:
+        problems.append("the child dropped nothing under loss")
+    before, after = result["root_before"], result["root_after"]
+    if (after.get("kind"), after.get("handle")) != (before.get("kind"), before.get("handle")):
+        problems.append("root qdisc %s %s after removal, %s %s before" % (after.get("kind"), after.get("handle"),
+                                                                         before.get("kind"), before.get("handle")))
+    if result["filters_after"]:
+        problems.append("filters remain: " + json.dumps(result["filters_after"]))
+    return problems
+
+
 def run_cleanup(errors, *command):
     """One cleanup command; its failure is recorded, not raised."""
     try:
@@ -465,6 +817,19 @@ def main(argv=None):
             failed = [reference for reference, result in report["targets"].items() if result["status"] != "passed"]
             if failed:
                 raise CheckError("The delay scenario failed for: " + ", ".join(failed), "runtime_failure")
+            for profile in args.selector:
+                report.setdefault("selectors", {})[profile] = {}
+                for reference in args.target:
+                    target = check.inspect_image(reference, args.platform)
+                    print("Checking the " + profile + " selector in a container of " + reference, flush=True)
+                    run = uuid.uuid4().hex[:12]
+                    report["selectors"][profile][reference] = selector_scenario(
+                        image, target, run, profile, args.delay_ms, output / ("selector-" + run))
+                    save(output, report)
+            failed = [profile + " " + reference for profile, results in report.get("selectors", {}).items()
+                      for reference, result in results.items() if result["status"] != "passed"]
+            if failed:
+                raise CheckError("The selector scenario failed for: " + ", ".join(failed), "runtime_failure")
         report["status"] = "passed"
     except (check.CheckError, OSError, ValueError, subprocess.SubprocessError, KeyboardInterrupt) as error:
         report.update(status="failed", error=str(error) or type(error).__name__,

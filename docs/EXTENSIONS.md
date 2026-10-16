@@ -79,6 +79,40 @@ The delay scenario uses a private bridge network:
 
 `extension-report.json` records the image identity and labels, every check, the engine (`docker info`), the kernel, each target's image ID, interface and namespace, the timings, the netem counters, and the cleanup. A failure carries a kind: `image_unsupported`, `permission_denied`, `kernel_unsupported`, `runtime_failure`, `timeout` or `checker_failure`.
 
+### Candidate selector profiles
+
+`--selector` adds a check of a peer-selective profile to a functional check. The profiles are candidates: contract 1 does not promise them, a published helper is not checked against them before publication, and a module must not rely on them until a contract does.
+
+```sh
+python3 image/extension_check.py --extension netem --image my-registry/netem-helper:dev \
+  --functional --target quay.io/ceph/ceph:v20.2.4 --selector ipv4-tcp-u32 --selector ipv6-tcp-u32
+```
+
+| Profile | Selects |
+| --- | --- |
+| `ipv4-tcp-u32` | The target's IPv4 egress to one peer address, TCP, one destination port |
+| `ipv6-tcp-u32` | The same over IPv6, for TCP directly after the IPv6 base header |
+
+Each profile uses the same owned hierarchy, installed root first and filter last, so that until the filter exists all traffic takes the unshaped band:
+
+```text
+root prio 7e00:, 3 bands, every priority mapped to band 1 (7e00:1)
+child netem 7e10:, parent 7e00:3
+u32 filter, preference 10, handle 800::1: peer/32 or /128, TCP, destination port 7000 -> 7e00:3
+```
+
+The scenario uses a private dual-stack bridge network with the target, two peers that answer on ports 7000 and 7001 over both families, a helper with `NET_ADMIN` and a request driver in the target's namespace:
+
+1. It finds the target's interface by its address and MAC, records its root qdisc, and times the selected path (peer B, the profile's family, port 7000).
+2. It installs the hierarchy with a delay (`--delay-ms`) and reads the filter back. tc prints one `match` member per u32 key, repeated in one object, so the checker decodes them in order instead of as a dictionary, and compares every offset, value, mask and offmask, the handle and the flow ID with the requested selector. tc packs keys into words: the IPv6 next header and port appear at offsets 4 and 40.
+3. It times four controls before any selected traffic: peer B over the other family, peer B on port 7001, the third peer on port 7000, and a reverse connection from peer B to the target. They must stay fast, and the netem child must count no packet. Then the selected path must take at least the delay, and the child must count its packets.
+4. It waits, within 2 s, until the child holds no packet (backlog and queue length 0): a completed read does not show that the queue drained. Then it changes the child to 100% loss. A fresh selected connection must time out, the controls must still answer, and the child must count drops.
+5. It removes the leaf first, then whatever of its u32 table remains (removing the last leaf can remove its whole chain), then the root. The root qdisc must be the original one again, no filter may remain, and the selected path must be fast again.
+
+`extension-report.json` keeps each profile's result under `selectors`, and each scenario directory keeps the raw filter dump (`filter.json`) and every timing. The `ipv6-tcp-u32` profile does not select IPv6 traffic with extension headers or fragments, and neither profile covers IPv4 options, IPv4-mapped addresses or receiver-side shaping.
+
+CI runs both profiles on the GitHub-hosted runners of both architectures, against the same targets as the contract check, in a job that no publication waits for. On Docker Desktop 29.8.2 (LinuxKit 7.0.14, arm64), both profiles passed against the official image and the OSD role image of 20.2.4 and 19.2.5, with the published `extension-netem-v1` helper. With a 200 ms delay, the selected path took 410 to 412 ms and every control 0.06 to 0.11 ms; the child drained within 170 ms.
+
 ## Published helper
 
 ```text
@@ -115,5 +149,5 @@ The helper avoids all three, at the cost of one more small image and one more co
 ## Not in contract 1
 
 - Packet loss, duplication, reordering and rate limits. They use the same `tc`, but their kernel behavior is not checked yet.
-- Peer-selective delay with classifiers, receiver-side delay through IFB, and IPv6 networks.
+- Peer-selective delay with classifiers, receiver-side delay through IFB, and IPv6 networks. The [candidate selector profiles](#candidate-selector-profiles) are checked, but not promised.
 - `ss`, `nft` and `tcpdump` for socket destruction, peer-specific filtering and packet capture. Each becomes its own contract with its own checks.

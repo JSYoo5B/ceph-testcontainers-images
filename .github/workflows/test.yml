@@ -278,6 +278,50 @@ jobs:
           path: ${{ runner.temp }}/extension/
           if-no-files-found: warn
 
+  # Candidate selector profiles of the netem helper (docs/EXTENSIONS.md): no
+  # contract promises them and no publication waits for them. They run on
+  # both runner architectures as engine evidence.
+  netem-selector-profiles:
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        architecture: [amd64, arm64]
+        include:
+          - architecture: amd64
+            runner: ubuntu-24.04
+          - architecture: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.9'
+      - name: Build the helper
+        run: make extension-images PLATFORM="linux/${{ matrix.architecture }}" IMAGE_REPOSITORY=ceph-check
+      - name: Check the IPv4 and IPv6 u32 selectors in Ceph targets
+        run: |
+          targets=()
+          for release in $(python3 image/releases.py list); do
+            for reference in "$(python3 image/releases.py official "$release")" \
+                "ghcr.io/jsyoo5b/ceph-testcontainers-images:official-$release-osd"; do
+              docker pull --platform "linux/${{ matrix.architecture }}" "$reference"
+              targets+=(--target "$reference")
+            done
+          done
+          python3 image/extension_check.py --extension netem --image ceph-check:extension-netem \
+            --platform "linux/${{ matrix.architecture }}" --functional "${targets[@]}" \
+            --selector ipv4-tcp-u32 --selector ipv6-tcp-u32 --output-dir "$RUNNER_TEMP/selectors"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: extension-netem-selectors-${{ matrix.architecture }}-check
+          path: ${{ runner.temp }}/selectors/
+          if-no-files-found: warn
+
   promote-extension:
     if: inputs.publish
     needs: netem-extension
