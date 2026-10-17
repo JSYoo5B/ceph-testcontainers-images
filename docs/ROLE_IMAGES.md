@@ -39,7 +39,7 @@ Images are tagged `<repository>:official-<release>-<role>`, for example `ceph-te
 
 | Role | Root packages |
 | --- | --- |
-| `control` | `ceph-mon`, `ceph-mgr`, `ceph-common`, `python3-cephfs`, `rbd-mirror`, `cephfs-mirror`, `cryptsetup`, `libradosstriper1`, `procps-ng` |
+| `control` | `ceph-mon`, `ceph-mgr`, `ceph-common`, `python3-cephfs`, `rbd-mirror`, `cephfs-mirror`, `cryptsetup`, `libradosstriper1`, `procps-ng`, `ceph-immutable-object-cache` |
 | `osd` | `ceph-osd` |
 | `rgw` | `ceph-radosgw` |
 | `mds` | `ceph-mds` |

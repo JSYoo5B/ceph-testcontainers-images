@@ -18,6 +18,7 @@ ALL_ROOTS = (
     "ceph-mon", "ceph-mgr", "ceph-osd", "ceph-mds", "ceph-radosgw",
     "ceph-common", "python3-cephfs",
     "rbd-mirror", "cephfs-mirror", "cryptsetup", "libradosstriper1", "procps-ng",
+    "ceph-immutable-object-cache",
 )
 PROFILES = {
     "full": ALL_ROOTS,

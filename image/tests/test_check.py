@@ -226,5 +226,61 @@ class ProcessInspectionProbeTests(unittest.TestCase):
                 self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
                 self.assertIn(failure, result.stdout)
 
+
+class ParentCachePluginProbeTests(unittest.TestCase):
+    """Runs the control probe's Python block against a stub plugin directory."""
+
+    def run_probe(self, plugin):
+        script = (check.HERE / "check-runtime.sh").read_text()
+        start = script.index("python3 - <<'PY' || failed=1\n") + len("python3 - <<'PY' || failed=1\n")
+        block = script[start:script.index("\nPY\n", start)]
+        with tempfile.TemporaryDirectory() as temporary:
+            plugin_dir = Path(temporary) / "plugins"
+            (plugin_dir / "librbd").mkdir(parents=True)
+            if plugin is not None:
+                plugin(plugin_dir / "librbd" / "libceph_librbd_parent_cache.so", Path(temporary))
+            bin_dir = Path(temporary) / "bin"
+            bin_dir.mkdir()
+            stub = bin_dir / "ceph-mgr"
+            stub.write_text("#!/bin/sh\necho 'did not load config file' >&2\necho %s\n" % plugin_dir)
+            stub.chmod(0o755)
+            environment = dict(os.environ, PATH=str(bin_dir) + os.pathsep + os.environ["PATH"])
+            result = subprocess.run([sys.executable, "-c", block], env=environment,
+                                    capture_output=True, text=True, timeout=60)
+        return [line for line in result.stdout.splitlines() if "rbd-parent-cache" in line]
+
+    @staticmethod
+    def compiled(source):
+        def build(path, temporary):
+            compiler = shutil.which("cc")
+            if compiler is None:
+                raise unittest.SkipTest("the host has no C compiler")
+            (temporary / "plugin.c").write_text(source)
+            subprocess.run([compiler, "-shared", "-fPIC", "-o", str(path), str(temporary / "plugin.c")], check=True)
+        return build
+
+    def test_loadable_plugin_passes(self):
+        lines = self.run_probe(self.compiled(
+            "const char *__ceph_plugin_version(void) { return \"x\"; }\n"
+            "int __ceph_plugin_init(void *c, const char *t, const char *n) { return 0; }\n"))
+        self.assertEqual(lines, ["CHECK\tpassed\tlibrary-present:rbd-parent-cache",
+                                 "CHECK\tpassed\tlibrary-load:rbd-parent-cache"])
+
+    def test_missing_plugin_is_a_missing_file(self):
+        lines = self.run_probe(None)
+        self.assertEqual(lines, ["CHECK\tfailed\tlibrary-present:rbd-parent-cache",
+                                 "FAILURE\tmissing_file\tlibrary-present:rbd-parent-cache"])
+
+    def test_unloadable_or_incomplete_plugin_is_a_loading_failure(self):
+        for name, plugin in {
+            "not a library": lambda path, temporary: path.write_text("not a library"),
+            "no entry points": self.compiled("int unrelated(void) { return 0; }\n"),
+        }.items():
+            with self.subTest(name):
+                lines = self.run_probe(plugin)
+                self.assertEqual(lines, ["CHECK\tpassed\tlibrary-present:rbd-parent-cache",
+                                         "CHECK\tfailed\tlibrary-load:rbd-parent-cache",
+                                         "FAILURE\tloading_failure\tlibrary-load:rbd-parent-cache"])
+
 if __name__ == "__main__":
     unittest.main()

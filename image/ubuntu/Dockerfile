@@ -42,6 +42,7 @@ FROM common AS control
 RUN apt-get update && apt-get install -y --no-install-recommends "ceph-mon=${CEPH_PACKAGE_VERSION}" \
         "ceph-mgr=${CEPH_PACKAGE_VERSION}" ${CEPH_MGR_PACKAGES} "rbd-mirror=${CEPH_PACKAGE_VERSION}" \
         "cephfs-mirror=${CEPH_PACKAGE_VERSION}" cryptsetup-bin procps \
+        "ceph-immutable-object-cache=${CEPH_PACKAGE_VERSION}" \
         "libradosstriper1=${CEPH_PACKAGE_VERSION}" \
     && rm -rf /var/lib/apt/lists/* && sh /usr/local/lib/ceph-testcontainers/write-sources.sh
 LABEL io.ceph-testcontainers.role="control"
@@ -65,6 +66,7 @@ FROM common AS all
 RUN apt-get update && apt-get install -y --no-install-recommends "ceph-mon=${CEPH_PACKAGE_VERSION}" \
         "ceph-mgr=${CEPH_PACKAGE_VERSION}" ${CEPH_MGR_PACKAGES} "rbd-mirror=${CEPH_PACKAGE_VERSION}" \
         "cephfs-mirror=${CEPH_PACKAGE_VERSION}" "ceph-osd=${CEPH_PACKAGE_VERSION}" \
+        "ceph-immutable-object-cache=${CEPH_PACKAGE_VERSION}" \
         "radosgw=${CEPH_PACKAGE_VERSION}" "ceph-mds=${CEPH_PACKAGE_VERSION}" cryptsetup-bin procps \
         "libradosstriper1=${CEPH_PACKAGE_VERSION}" \
     && rm -rf /var/lib/apt/lists/* && sh /usr/local/lib/ceph-testcontainers/write-sources.sh

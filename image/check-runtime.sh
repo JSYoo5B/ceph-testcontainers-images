@@ -180,6 +180,23 @@ for name, (fallback, symbols) in libraries.items():
         result('library-load:' + name, False, 'loading_failure')
     else:
         result('library-load:' + name, True, 'loading_failure')
+# librbd loads a plugin by name from the plugin directory, so the parent
+# cache client needs that file and its dependencies, not only librbd.
+plugin_dir = subprocess.run(['ceph-mgr', '--show-config-value', 'plugin_dir'],
+                            capture_output=True, text=True).stdout.strip()
+plugin = os.path.join(plugin_dir, 'librbd', 'libceph_librbd_parent_cache.so')
+present = bool(plugin_dir) and os.path.isfile(plugin)
+result('library-present:rbd-parent-cache', present, 'missing_file')
+if present:
+    try:
+        library = ctypes.CDLL(plugin, mode=os.RTLD_NOW)
+        getattr(library, '__ceph_plugin_init')
+        getattr(library, '__ceph_plugin_version')
+    except (OSError, AttributeError) as error:
+        print(str(error))
+        result('library-load:rbd-parent-cache', False, 'loading_failure')
+    else:
+        result('library-load:rbd-parent-cache', True, 'loading_failure')
 try:
     import rados, rbd
     assert callable(rbd.Image.encryption_format) and callable(rbd.Image.encryption_load)
@@ -212,7 +229,7 @@ PY
     check keyring-read /bin/sh -c 'ceph-authtool "$1" --print-key > /dev/null' check "$work/keyring"
     check monmap monmaptool --create --fsid 9df1f6ea-6047-4d0c-bb3d-408fbef094b4 \
         --addv a '[v2:127.0.0.1:3300,v1:127.0.0.1:6789]' "$work/monmap"
-    for binary in rbd-mirror cephfs-mirror radosgw-admin; do
+    for binary in rbd-mirror cephfs-mirror radosgw-admin ceph-immutable-object-cache; do
         check "version:$binary" version "$binary"
     done
 fi

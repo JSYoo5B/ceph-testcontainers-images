@@ -54,7 +54,7 @@ Unit tests live in `tests/` next to each tool. Reports and logs go to the ignore
 
 | Role | Contents |
 | --- | --- |
-| `control` | MON, MGR, CLI and Python clients, cryptsetup, encrypted RBD and striper clients, RBD and CephFS mirror daemons, `pgrep` |
+| `control` | MON, MGR, CLI and Python clients, cryptsetup, encrypted RBD and striper clients, RBD and CephFS mirror daemons, the RBD immutable object cache daemon, `pgrep` |
 | `osd` | OSD, BlueStore, object classes including hello/lock and plugins |
 | `rgw` | RGW and its admin CLI |
 | `mds` | CephFS MDS |
