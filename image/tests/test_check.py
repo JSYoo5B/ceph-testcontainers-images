@@ -1,0 +1,286 @@
+import contextlib
+import io
+import json
+import os
+from pathlib import Path
+import shutil
+import subprocess
+import sys
+import tempfile
+import unittest
+from unittest import mock
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+import check
+
+
+class ImageContractTests(unittest.TestCase):
+    def test_bad_roles_references_and_duplicates_are_rejected(self):
+        for values in (["control"], ["mon=image"], ["all="], ["all= "],
+                       ["all=--help"], ["all=first", "all=second"]):
+            with self.subTest(values=values), self.assertRaises(check.CheckError):
+                check.image_arguments(values)
+        self.assertEqual(check.image_arguments(["all=repo/ceph:v1@sha256:abc"]),
+                         {"all": "repo/ceph:v1@sha256:abc"})
+
+    def test_partial_roles_cannot_run_full_check(self):
+        with self.assertRaises(check.CheckError):
+            check.runtime_sets({"control": "control", "osd": "osd"})
+        images = {role: role for role in check.ROLES}
+        sets = check.runtime_sets(images)
+        self.assertEqual(sets["mixed"], {role: role for role in check.ROLES[:-1]})
+        self.assertEqual(set(sets["all"].values()), {"all"})
+
+    def test_multiarch_probe_uses_runnable_index_id_without_resolving_tag_twice(self):
+        root_id = "sha256:" + "1" * 64
+        child_id = "sha256:" + "2" * 64
+        original = {"Id": root_id, "Os": "linux", "Architecture": "arm64", "RepoDigests": ["repo@" + root_id]}
+        selected = dict(original, Id=child_id)
+        with mock.patch.object(check, "run", side_effect=[json.dumps([original]), json.dumps([selected])]) as run:
+            image = check.inspect_image("mutable:tag", "linux/arm64")
+        self.assertEqual(image["image_id"], root_id)
+        self.assertEqual(image["platform_image_id"], child_id)
+        self.assertEqual(run.call_args_list[1].args[0][-1], root_id)
+
+    def test_missing_inspect_identity_and_platform_are_reported_as_errors(self):
+        for metadata in ([], [{}], [{"Id": "bad", "Os": "linux", "Architecture": "arm64"}]):
+            with self.subTest(metadata=metadata), mock.patch.object(check, "run", return_value=json.dumps(metadata)), \
+                    self.assertRaises(check.CheckError):
+                check.inspect_image("image", None)
+
+    def test_docker28_fallback_still_rejects_platform_mismatch(self):
+        original = {"Id": "sha256:" + "1" * 64, "Os": "linux", "Architecture": "arm64"}
+        for requested, succeeds in (("linux/arm64", True), ("linux/amd64", False)):
+            with self.subTest(platform=requested), mock.patch.object(check, "run", side_effect=[
+                    json.dumps([original]), check.CheckError("unknown flag: --platform")]):
+                if succeeds:
+                    self.assertEqual(check.inspect_image("image", requested)["platform"], requested)
+                else:
+                    with self.assertRaisesRegex(check.CheckError, "mismatched"):
+                        check.inspect_image("image", requested)
+
+    def test_platform_inspection_errors_other_than_unsupported_flag_are_not_hidden(self):
+        original = {"Id": "sha256:" + "1" * 64, "Os": "linux", "Architecture": "arm64"}
+        with mock.patch.object(check, "run", side_effect=[json.dumps([original]),
+                check.CheckError("missing platform manifest")]), self.assertRaisesRegex(check.CheckError, "missing"):
+            check.inspect_image("image", "linux/arm64")
+
+    def test_control_import_and_binary_failures_remain_in_report(self):
+        checks, versions = check.parse_probe("CHECK\tfailed\tversion:ceph-mon\nCHECK\tfailed\tpython-bindings\n")
+        self.assertEqual([item["status"] for item in checks], ["failed", "failed"])
+        self.assertEqual(versions, {})
+
+    def test_no_checks_or_version_and_inconsistent_versions_cannot_pass(self):
+        for output in ("", "CHECK\tpassed\tshell\n",
+                       "CHECK\tpassed\tshell\nVERSION\tceph\tunrecognized\n",
+                       "CHECK\tpassed\tshell\nVERSION\tceph\tceph version 20.2.4 (abc)\n"
+                       "VERSION\trbd\tceph version 19.2.3 (def)\n"):
+            with self.subTest(output=output), self.assertRaises(check.CheckError):
+                check.parse_probe(output)
+
+    def test_timeout_removes_the_owned_probe_container(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary)
+            image = {"platform": "linux/arm64", "image_id": "sha256:resolved"}
+            args = check.arguments(["--image", "all=mutable"])
+            with mock.patch.object(check, "run", return_value="container") as run, \
+                    mock.patch.object(check.subprocess, "run", side_effect=subprocess.TimeoutExpired(
+                        "docker start", 1, output=b"partial log")), self.assertRaises(check.CheckError):
+                check.probe_image("all", image, args, output)
+            calls = [call.args[0] for call in run.call_args_list]
+            self.assertEqual(calls[0][-4:], ["sha256:resolved", "-s", "--", "all"])
+            self.assertEqual(calls[1][:3], ["docker", "rm", "--force"])
+            self.assertEqual(calls[1][3], calls[0][3])
+            self.assertEqual((output / "all.log").read_text(), "partial log")
+            self.assertEqual(image["status"], "failed")
+
+    def test_incomplete_probe_with_exit_zero_cannot_pass(self):
+        with tempfile.TemporaryDirectory() as temporary, mock.patch.object(check, "run", return_value="container"), \
+                mock.patch.object(check.subprocess, "run", return_value=subprocess.CompletedProcess(
+                    [], 0, "CHECK\tpassed\tshell\nVERSION\tceph\tceph version 20.2.4 (abc)\n", "")):
+            image = {"platform": "linux/arm64", "image_id": "fixed"}
+            check.probe_image("control", image, check.arguments(["--image", "control=image"]), Path(temporary))
+        self.assertEqual(image["status"], "failed")
+        self.assertIn("did not finish", image["error"])
+
+    def test_main_uses_fixed_ids_and_preserves_runtime_failure(self):
+        for runtime_fails in (False, True):
+            with self.subTest(runtime_fails=runtime_fails), tempfile.TemporaryDirectory() as temporary:
+                output = Path(temporary)
+                def inspect(reference, platform):
+                    return {"image_id": "sha256:fixed", "platform": "linux/arm64", "reference": reference}
+                def probe(role, image, args, output):
+                    image.update({"status": "passed", "versions": {
+                        "ceph": {"release": "20.2.4", "commit": "abc"}}})
+                def run(images, scenarios, output, log):
+                    self.assertEqual(set(images.values()), {"sha256:fixed"})
+                    self.assertEqual(tuple(scenarios), check.suite.SCENARIOS)
+                    return {name: {"status": "failed" if runtime_fails and name == "rgw-multisite" else "passed"}
+                            for name in scenarios}
+                with mock.patch.object(check.shutil, "which", return_value="installed"), \
+                        mock.patch.object(check, "inspect_image", side_effect=inspect), \
+                        mock.patch.object(check, "probe_image", side_effect=probe), \
+                        mock.patch.object(check.suite, "run", side_effect=run), \
+                        contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                    code = check.main(["--image", "all=mutable", "--full", "--output-dir", str(output)])
+                report = json.loads((output / "check-report.json").read_text())
+                expected = "failed" if runtime_fails else "passed"
+                self.assertEqual(code, 1 if runtime_fails else 0)
+                self.assertEqual(report["level"], "full")
+                self.assertEqual(report["scenarios"], expected)
+                self.assertEqual(report["functional"]["all"]["status"], expected)
+                self.assertEqual(report["functional"]["all"]["failed"], ["rgw-multisite"] if runtime_fails else [])
+                self.assertEqual(report["preflight"], "passed")
+
+    def test_mixed_platforms_stop_before_starting_any_container(self):
+        with tempfile.TemporaryDirectory() as temporary, \
+                mock.patch.object(check.shutil, "which", return_value="docker"), \
+                mock.patch.object(check, "probe_image") as probe, \
+                mock.patch.object(check, "inspect_image", side_effect=[
+                    {"platform": "linux/arm64"}, {"platform": "linux/amd64"}]), \
+                contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            code = check.main(["--image", "control=a", "--image", "osd=b", "--output-dir", temporary])
+            report = json.loads((Path(temporary) / "check-report.json").read_text())
+        probe.assert_not_called()
+        self.assertEqual(code, 1)
+        self.assertEqual(report["preflight"], "failed")
+        self.assertEqual(report["level"], "quick")
+        self.assertEqual(report["scenarios"], "not_requested")
+
+    def test_existing_report_cannot_be_overwritten(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            report = Path(temporary) / "check-report.json"
+            report.write_text("previous evidence")
+            with mock.patch.object(check.shutil, "which", return_value="docker"), \
+                    self.assertRaises(check.CheckError):
+                check.main(["--image", "all=image", "--output-dir", temporary])
+            self.assertEqual(report.read_text(), "previous evidence")
+
+    def test_missing_and_loading_failures_remain_distinct(self):
+        checks, _ = check.parse_probe(
+            "CHECK\tfailed\tpath:cryptsetup\nFAILURE\tmissing_file\tpath:cryptsetup\n"
+            "CHECK\tfailed\tclass-load:hello\nFAILURE\tloading_failure\tclass-load:hello\n")
+        self.assertEqual([item["failure_kind"] for item in checks], ["missing_file", "loading_failure"])
+        self.assertEqual(checks[1]["failure_stage"], "quick:class-load:hello")
+
+    def test_missing_supported_dependency_fails_without_running_functional(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            def probe(role, image, args, output):
+                image.update(status="failed", checks=[{"name": "path:cryptsetup", "status": "failed",
+                    "failure_kind": "missing_file"}], versions={})
+            with mock.patch.object(check.shutil, "which", return_value="docker"), \
+                    mock.patch.object(check, "inspect_image", return_value={"platform": "linux/arm64", "reference": "image"}), \
+                    mock.patch.object(check, "probe_image", side_effect=probe), \
+                    mock.patch.object(check.suite, "run") as functional, \
+                    contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                code = check.main(["--image", "all=image", "--full", "--scenario", "rbd-encryption",
+                                   "--output-dir", temporary])
+            functional.assert_not_called()
+            report = json.loads((Path(temporary) / "check-report.json").read_text())
+        self.assertEqual(code, 1)
+        self.assertEqual(report["level"], "functional-selected")
+        self.assertEqual(report["scenarios"], "not_run")
+
+
+class ProcessInspectionProbeTests(unittest.TestCase):
+    """Runs the probe's pgrep_inspection function against stub pgrep commands."""
+
+    def run_inspection(self, stub):
+        script = (check.HERE / "check-runtime.sh").read_text()
+        start = script.index("pgrep_inspection() {")
+        function = script[start:script.index("\n}\n", start) + 3]
+        with tempfile.TemporaryDirectory() as temporary:
+            bin_dir = Path(temporary) / "bin"
+            bin_dir.mkdir()
+            if stub is not None:
+                pgrep = bin_dir / "pgrep"
+                pgrep.write_text("#!/bin/sh\n" + stub)
+                pgrep.chmod(0o755)
+            environment = dict(os.environ, PATH=str(bin_dir) + os.pathsep + os.environ["PATH"],
+                               STUB_STATE=temporary, NATIVE_PGREP=self.native_pgrep or "false")
+            return subprocess.run(["/bin/sh", "-c", "work=$1\n" + function + "\npgrep_inspection", "sh", temporary],
+                                  env=environment, capture_output=True, text=True, timeout=60)
+
+    def setUp(self):
+        self.native_pgrep = shutil.which("pgrep")
+
+    def test_native_pgrep_finds_the_process_and_then_nothing(self):
+        if self.native_pgrep is None:
+            self.skipTest("the host has no pgrep")
+        result = self.run_inspection(None)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_wrong_answers_fail(self):
+        stubs = {
+            "never finds the process": ("exit 1\n", "while process"),
+            "reports another process": ("echo 1\n", "while process"),
+            "still reports the process after it exited": (
+                'if test -e "$STUB_STATE/called"; then echo 4242; exit 0; fi\n'
+                'touch "$STUB_STATE/called"\nexec "$NATIVE_PGREP" "$@"\n', "after process"),
+        }
+        for name, (stub, failure) in stubs.items():
+            with self.subTest(name):
+                if failure == "after process" and self.native_pgrep is None:
+                    self.skipTest("the host has no pgrep")
+                result = self.run_inspection(stub)
+                self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertIn(failure, result.stdout)
+
+
+class ParentCachePluginProbeTests(unittest.TestCase):
+    """Runs the control probe's Python block against a stub plugin directory."""
+
+    def run_probe(self, plugin):
+        script = (check.HERE / "check-runtime.sh").read_text()
+        start = script.index("python3 - <<'PY' || failed=1\n") + len("python3 - <<'PY' || failed=1\n")
+        block = script[start:script.index("\nPY\n", start)]
+        with tempfile.TemporaryDirectory() as temporary:
+            plugin_dir = Path(temporary) / "plugins"
+            (plugin_dir / "librbd").mkdir(parents=True)
+            if plugin is not None:
+                plugin(plugin_dir / "librbd" / "libceph_librbd_parent_cache.so", Path(temporary))
+            bin_dir = Path(temporary) / "bin"
+            bin_dir.mkdir()
+            stub = bin_dir / "ceph-mgr"
+            stub.write_text("#!/bin/sh\necho 'did not load config file' >&2\necho %s\n" % plugin_dir)
+            stub.chmod(0o755)
+            environment = dict(os.environ, PATH=str(bin_dir) + os.pathsep + os.environ["PATH"])
+            result = subprocess.run([sys.executable, "-c", block], env=environment,
+                                    capture_output=True, text=True, timeout=60)
+        return [line for line in result.stdout.splitlines() if "rbd-parent-cache" in line]
+
+    @staticmethod
+    def compiled(source):
+        def build(path, temporary):
+            compiler = shutil.which("cc")
+            if compiler is None:
+                raise unittest.SkipTest("the host has no C compiler")
+            (temporary / "plugin.c").write_text(source)
+            subprocess.run([compiler, "-shared", "-fPIC", "-o", str(path), str(temporary / "plugin.c")], check=True)
+        return build
+
+    def test_loadable_plugin_passes(self):
+        lines = self.run_probe(self.compiled(
+            "const char *__ceph_plugin_version(void) { return \"x\"; }\n"
+            "int __ceph_plugin_init(void *c, const char *t, const char *n) { return 0; }\n"))
+        self.assertEqual(lines, ["CHECK\tpassed\tlibrary-present:rbd-parent-cache",
+                                 "CHECK\tpassed\tlibrary-load:rbd-parent-cache"])
+
+    def test_missing_plugin_is_a_missing_file(self):
+        lines = self.run_probe(None)
+        self.assertEqual(lines, ["CHECK\tfailed\tlibrary-present:rbd-parent-cache",
+                                 "FAILURE\tmissing_file\tlibrary-present:rbd-parent-cache"])
+
+    def test_unloadable_or_incomplete_plugin_is_a_loading_failure(self):
+        for name, plugin in {
+            "not a library": lambda path, temporary: path.write_text("not a library"),
+            "no entry points": self.compiled("int unrelated(void) { return 0; }\n"),
+        }.items():
+            with self.subTest(name):
+                lines = self.run_probe(plugin)
+                self.assertEqual(lines, ["CHECK\tpassed\tlibrary-present:rbd-parent-cache",
+                                         "CHECK\tfailed\tlibrary-load:rbd-parent-cache",
+                                         "FAILURE\tloading_failure\tlibrary-load:rbd-parent-cache"])
+
+if __name__ == "__main__":
+    unittest.main()
