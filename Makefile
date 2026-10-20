@@ -44,11 +44,29 @@ role-images-full:
 IMAGE_REPOSITORY ?= ceph-testcontainers
 PLATFORM ?= linux/arm64
 
+# Optional registry cache, separate from the tested/published image tags.
+# Use a docker-container Buildx builder for registry cache export. Each role
+# gets its own stable tag so the five exports cannot overwrite one another.
+BUILD_CACHE_REF ?=
+BUILD_CACHE_WRITE ?= false
+
+define registry_cache
+cache_args=""; \
+if [ -n "$(BUILD_CACHE_REF)" ]; then \
+	cache_ref="$(BUILD_CACHE_REF)$(1)"; \
+	cache_args="--cache-from=type=registry,ref=$$cache_ref"; \
+	if [ "$(BUILD_CACHE_WRITE)" = true ]; then \
+		cache_args="$$cache_args --cache-to=type=registry,ref=$$cache_ref,mode=max,ignore-error=true"; \
+	fi; \
+fi;
+endef
+
 debian-images ubuntu-images: %-images:
 	build_args="$$(python3 image/releases.py build-args $(CEPH_RELEASE) $*)" || exit 1; \
 	for role in control osd rgw mds all; do \
+		$(call registry_cache,-$$role) \
 		docker buildx build --load --platform "$(PLATFORM)" --provenance=false --target $$role $$build_args \
-			-t "$(IMAGE_REPOSITORY):$*-$(CEPH_RELEASE)-$$role" image/$* || exit 1; \
+			$$cache_args -t "$(IMAGE_REPOSITORY):$*-$(CEPH_RELEASE)-$$role" image/$* || exit 1; \
 	done
 
 # Opt-in extension helpers, built and checked apart from the role images
@@ -56,7 +74,8 @@ debian-images ubuntu-images: %-images:
 EXTENSION_IMAGE ?= $(IMAGE_REPOSITORY):extension-netem
 
 extension-images:
-	docker buildx build --load --platform "$(PLATFORM)" --provenance=false \
+	$(call registry_cache) \
+	docker buildx build --load --platform "$(PLATFORM)" --provenance=false $$cache_args \
 		-t "$(IMAGE_REPOSITORY):extension-netem" image/extensions/netem
 
 # The selector profiles of the netem contract, one per line; CI checks them all.
