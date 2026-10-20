@@ -115,6 +115,32 @@ Images are published as `ghcr.io/jsyoo5b/ceph-testcontainers-images:<variant>-<r
 
 Pull requests and pushes to `main` run the unit tests and the quick requirement checks of every release, variant and platform; documentation-only changes skip them. The full functional suite runs only in a manual run of the [checker workflow](.github/workflows/test.yml), whose `release` input selects one release or `all`.
 
+Distribution and netem builds reuse a BuildKit registry cache in the same
+public GHCR package. Stable `buildcache-<distribution>-<release>-<architecture>-<role>`
+and `buildcache-netem-<architecture>` tags keep the cache separate from the
+release and candidate tags without creating a tag per commit or pull request.
+Pull requests only import the cache; default-branch pushes and manual runs
+can update it. A missing cache falls back to building, and cache-export
+failures do not fail the build. The native checks still run on every built
+image, and publication still promotes only the exact tested image IDs.
+Official-role extraction keeps its existing local layer sharing; this cache
+does not skip package extraction or the unmodified official-image checks.
+
+For local builds, caching is off by default. With a `docker-container`
+Buildx builder, set `BUILD_CACHE_REF` to a registry tag prefix to import a
+cache, and `BUILD_CACHE_WRITE=true` to export it as well. Distribution builds
+append `-<role>` to the prefix; extension builds use it as given. Registry
+access uses the builder's Docker credentials.
+
+Check reports are retained for 7 days, or 14 days if the job has failed
+when the upload runs. Publication runs retain their reports, candidate
+digest maps and promotion receipts for 30 days, as do the published-image
+and published-extension verification workflows. The promotion jobs still
+download the candidate maps from the current run before they expire.
+These periods apply to new uploads; existing artifacts keep their recorded
+expiry and are not deleted by this change. Images and build caches stay in
+GHCR rather than being saved as Actions artifacts.
+
 To publish, run that workflow with `publish` enabled. Publishing one release leaves the other releases' tags untouched, so a fix for one release never waits for another. For an existing GHCR package, grant this repository **Write** access under **Manage Actions access** in the package settings; the workflow's `packages: write` permission also needs that [package access](https://docs.github.com/en/packages/learn-github-packages/configuring-a-packages-access-control-and-visibility).
 
 The workflow builds all five roles for each variant on native AMD64 and ARM64 runners and runs quick checks and the full functional suite for both the four-role combination and `all`. Each passing job uploads the exact tested image IDs under CI candidate tags, without rebuilding. Every release runs the same jobs. Only after all build/check jobs and unmodified Quay comparisons of every selected release pass does the promotion job overwrite, for each of those releases, the 30 platform tags and 15 two-platform release tags with those digests. Failed or skipped checks block promotion.

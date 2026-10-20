@@ -81,6 +81,7 @@ jobs:
         if: always()
         with:
           name: published-extension-${{ matrix.architecture }}-check
+          retention-days: 30
           path: |
             ${{ runner.temp }}/published-extension-digests.json
             ${{ runner.temp }}/published-extension/

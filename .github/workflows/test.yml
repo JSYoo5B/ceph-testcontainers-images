@@ -92,6 +92,7 @@ jobs:
         if: always()
         with:
           name: official-${{ matrix.release }}-${{ matrix.architecture }}-check
+          retention-days: ${{ inputs.publish && 30 || job.status == 'failure' && 14 || 7 }}
           path: |
             ${{ runner.temp }}/quick/
             ${{ runner.temp }}/full/
@@ -140,12 +141,14 @@ jobs:
         if: inputs.publish
         with:
           name: candidate-${{ matrix.release }}-official-${{ matrix.architecture }}
+          retention-days: 30
           path: ${{ runner.temp }}/extracted/candidate.json
           if-no-files-found: error
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: extracted-${{ matrix.release }}-${{ matrix.architecture }}-check
+          retention-days: ${{ inputs.publish && 30 || job.status == 'failure' && 14 || 7 }}
           path: |
             ${{ runner.temp }}/extracted/*.json
             ${{ runner.temp }}/extracted/*.log
@@ -174,7 +177,20 @@ jobs:
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v4
+        with:
+          driver: docker-container
+      - name: Log in for cache writes or image publication
+        uses: docker/login-action@v3
+        if: inputs.publish || (github.event_name != 'pull_request' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch))
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
       - name: Build all five roles
+        env:
+          BUILD_CACHE_REF: ghcr.io/jsyoo5b/ceph-testcontainers-images:buildcache-${{ matrix.distribution }}-${{ matrix.release }}-${{ matrix.architecture }}
+          BUILD_CACHE_WRITE: ${{ github.event_name != 'pull_request' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
         run: make "${{ matrix.distribution }}-images" CEPH_RELEASE=${{ matrix.release }} PLATFORM="linux/${{ matrix.architecture }}" IMAGE_REPOSITORY=ceph-check
       - name: Check mixed roles and all
         run: |
@@ -186,12 +202,6 @@ jobs:
             --image all=ceph-check:${{ matrix.distribution }}-${{ matrix.release }}-all \
             --platform linux/${{ matrix.architecture }} ${{ needs.releases.outputs.level == 'full' && '--full' || '' }} \
             --output-dir "$RUNNER_TEMP/distribution"
-      - uses: docker/login-action@v3
-        if: inputs.publish
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
       - name: Upload the exact tested images
         if: inputs.publish
         run: |
@@ -203,12 +213,14 @@ jobs:
         if: inputs.publish
         with:
           name: candidate-${{ matrix.release }}-${{ matrix.distribution }}-${{ matrix.architecture }}
+          retention-days: 30
           path: ${{ runner.temp }}/distribution/candidate.json
           if-no-files-found: error
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: ${{ matrix.distribution }}-${{ matrix.release }}-${{ matrix.architecture }}-check
+          retention-days: ${{ inputs.publish && 30 || job.status == 'failure' && 14 || 7 }}
           path: ${{ runner.temp }}/distribution/
           if-no-files-found: warn
 
@@ -238,7 +250,20 @@ jobs:
         with:
           python-version: '3.9'
       - run: make extension-test
+      - uses: docker/setup-buildx-action@v4
+        with:
+          driver: docker-container
+      - name: Log in for cache writes or image publication
+        uses: docker/login-action@v3
+        if: inputs.publish || (github.event_name != 'pull_request' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch))
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
       - name: Build the helper
+        env:
+          BUILD_CACHE_REF: ghcr.io/jsyoo5b/ceph-testcontainers-images:buildcache-netem-${{ matrix.architecture }}
+          BUILD_CACHE_WRITE: ${{ github.event_name != 'pull_request' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
         run: make extension-images PLATFORM="linux/${{ matrix.architecture }}" IMAGE_REPOSITORY=ceph-check
       - name: Check the contract, the kernel, a delay, the selectors, the rate and the packet faults in Ceph targets
         run: |
@@ -257,12 +282,6 @@ jobs:
           python3 image/extension_check.py --extension netem --image ceph-check:extension-netem \
             --platform "linux/${{ matrix.architecture }}" --functional "${targets[@]}" "${selectors[@]}" --rate --packet-faults \
             --output-dir "$RUNNER_TEMP/extension"
-      - uses: docker/login-action@v3
-        if: inputs.publish
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
       - name: Upload the exact tested helper
         if: inputs.publish
         run: |
@@ -274,12 +293,14 @@ jobs:
         if: inputs.publish
         with:
           name: extension-candidate-netem-${{ matrix.architecture }}
+          retention-days: 30
           path: ${{ runner.temp }}/extension/extension-candidate.json
           if-no-files-found: error
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: extension-netem-${{ matrix.architecture }}-check
+          retention-days: ${{ inputs.publish && 30 || job.status == 'failure' && 14 || 7 }}
           path: ${{ runner.temp }}/extension/
           if-no-files-found: warn
 
@@ -314,6 +335,7 @@ jobs:
         if: always()
         with:
           name: extension-promotion
+          retention-days: 30
           path: ${{ runner.temp }}/extension-promotion/
           if-no-files-found: warn
 
@@ -371,6 +393,7 @@ jobs:
         if: always()
         with:
           name: image-promotion
+          retention-days: 30
           path: ${{ runner.temp }}/promotion/
           if-no-files-found: warn
 
