@@ -10,6 +10,13 @@ import publish
 import contract
 
 class RoleSelectionTests(unittest.TestCase):
+    def test_diagnostic_decoder_follows_source_availability_only_in_client(self):
+        self.assertIn('ceph-dencoder',contract.executables('client',{'ceph-dencoder'}))
+        self.assertNotIn('ceph-dencoder',contract.executables('client',set()))
+        self.assertNotIn('ceph-dencoder',contract.executables('essential',{'ceph-dencoder'}))
+        self.assertTrue(contract.permits_path('client','/usr/bin/ceph-dencoder',{'ceph-dencoder'}))
+        self.assertFalse(contract.permits_path('essential','/usr/bin/ceph-dencoder',{'ceph-dencoder'}))
+
     def test_ordinary_rbd_has_no_auxiliary_or_rgw_requirement(self):
         images = {'essential':'core', 'client':'toolkit'}
         self.assertEqual(check.runtime_sets(images,['rbd'],'roles-v2'), {'mixed':images})

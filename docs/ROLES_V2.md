@@ -16,6 +16,10 @@ Common requirements in IMAGE_REQUIREMENTS.md continue to apply. MGR modules
 and OSD classes stay inside their host daemon. Libraries can be shared across
 roles. Ordinary RBD needs essential + client, not rbd-aux. The cache daemon,
 plugin and consuming librbd client share the cache client's container/socket.
+
+The client retains `ceph-dencoder` when the source provides it (supported
+RPM/deb ceph-common packages). The Alpine experiment's upstream source lacks
+this diagnostic CLI, so its contract does not claim that capability.
 RGW setup uses the rgw runtime with an idle entrypoint; gateway-local admin
 operations stay in the gateway. Client does not require radosgw-admin.
 

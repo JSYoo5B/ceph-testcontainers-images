@@ -13,9 +13,12 @@ def configure(kind):
     inventory, closure, base = backend.load(kind, analyze)
     packaging.ROLES = contract.ROLES
     packaging.ROOT_PACKAGES = backend.roots(kind)
+    executables = {role:contract.executables(role,
+        {name for name in contract.OPTIONAL_EXECUTABLES.get(role,set()) if shutil.which(name)})
+        for role in contract.ROLES}
     packaging.REQUIRED_EXECUTABLES = {
         role: tuple('/usr/sbin/cryptsetup' if name=='cryptsetup' else '/usr/bin/'+name
-                    for name in sorted(names)) for role,names in contract.EXECUTABLES.items()
+                    for name in sorted(names)) for role,names in executables.items()
     }
     # Resolve executable paths in the source rather than impose a distro layout.
     packaging.REQUIRED_EXECUTABLES = {
@@ -25,7 +28,7 @@ def configure(kind):
     ceph_bins = {Path(p).name for name,pkg in inventory.items() if any(x in name for x in ('ceph','rados','rbd'))
                  for p in pkg['files'] if str(Path(p).parent) in ('/usr/bin','/usr/sbin','/bin','/sbin')}
     packaging.include_path = lambda role,p: contract.permits_path(role,p,ceph_bins)
-    packaging.EXCLUDED_EXECUTABLES = {role:sorted(ceph_bins-contract.EXECUTABLES[role]) for role in contract.ROLES}
+    packaging.EXCLUDED_EXECUTABLES = {role:sorted(ceph_bins-executables[role]) for role in contract.ROLES}
     analyze.BASE = base
     analyze.installed_inventory = lambda: inventory
     analyze.closure = closure

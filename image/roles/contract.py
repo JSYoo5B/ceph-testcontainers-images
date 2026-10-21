@@ -10,6 +10,12 @@ EXECUTABLES = {
     "rbd-aux": CORE_CLI | {"rados", "rbd", "rbd-mirror", "ceph-immutable-object-cache"},
     "rgw": CORE_CLI | {"radosgw", "radosgw-admin"},
 }
+# Diagnostic CLI shipped by supported RPM/deb ceph-common. Alpine's source
+# package omits it; do not invent an upstream capability for that experiment.
+OPTIONAL_EXECUTABLES = {"client": {"ceph-dencoder"}}
+
+def executables(role, available):
+    return EXECUTABLES[role] | (OPTIONAL_EXECUTABLES.get(role, set()) & set(available))
 SCENARIOS = {
     "cluster-lifecycle": ("essential", "client"),
     "rbd": ("essential", "client"),
@@ -32,6 +38,6 @@ def permits_path(role, path, ceph_bins):
     for candidate in (path, os.path.realpath(path)):
         candidate = Path(candidate)
         if str(candidate.parent) in ('/usr/bin','/usr/sbin','/bin','/sbin'):
-            if candidate.name in ceph_bins - EXECUTABLES[role]:
+            if candidate.name in ceph_bins - executables(role, ceph_bins):
                 return False
     return True
