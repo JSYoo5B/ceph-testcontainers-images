@@ -50,6 +50,15 @@ image/debian/, image/ubuntu/  Role images from distribution packages
 
 Unit tests live in `tests/` next to each tool. Reports and logs go to the ignored `artifacts/` directory.
 
+## Versioned dependency roles
+
+The opt-in [roles-v2 contract](docs/ROLES_V2.md) uses essential, client,
+cephfs, rbd-aux, rgw and all. It separates ordinary client execution from
+mirror/cache and RGW administration. Existing tags and the legacy checker
+contract retain their meanings. Build with `make roles-v2-images`; select
+`--contract roles-v2` in the checker and publisher. V2 publication uses a
+separate `roles-v2-<variant>-<release>-<role>` namespace.
+
 ## Roles
 
 | Role | Contents |

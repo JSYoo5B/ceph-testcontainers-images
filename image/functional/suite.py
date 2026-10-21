@@ -6,6 +6,9 @@ import tempfile
 import time
 import traceback
 import uuid
+import sys
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "roles"))
+import contract
 
 from cluster import RGW_PORT, Cluster, ClusterError, Docker, DockerError, wait
 
@@ -182,8 +185,8 @@ def rgw_multisite(primary, secondary, workdir):
     primary.docker("network", "create", "--label", primary.docker.label(), peer)
     system_access, system_secret = keys()
     realm = ["--rgw-realm", "tc", "--rgw-zonegroup", "tc-zg"]
-    admin_a = primary.prefix + "-client"
-    admin_b = secondary.prefix + "-client"
+    admin_a = primary.admin_client()
+    admin_b = secondary.admin_client()
     primary.docker("network", "connect", peer, admin_a)
     secondary.docker("network", "connect", peer, admin_b)
     primary.rgw_admin("realm", "create", "--rgw-realm", "tc", "--default", container=admin_a)
@@ -256,7 +259,8 @@ def run(images, scenarios, output, log=print):
     Single-cluster scenarios share one cluster. Each multi-cluster scenario
     gets its own pair. Every container and network is removed afterwards.
     """
-    missing = [role for role in ROLES if role not in images]
+    required = contract.required(scenarios) if "essential" in images else ROLES
+    missing = [role for role in required if role not in images]
     if missing:
         raise ValueError("Missing role images: " + ", ".join(missing))
     unknown = [name for name in scenarios if name not in SCENARIOS]

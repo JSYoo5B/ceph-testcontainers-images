@@ -100,3 +100,25 @@ extension-selectors:
 extension-check:
 	python3 image/extension_check.py --extension netem --image "$(EXTENSION_IMAGE)" \
 		--functional --target "$(OFFICIAL_IMAGE)" $(addprefix --selector ,$(shell $(EXTENSION_SELECTORS))) --rate --packet-faults
+
+
+# roles-v2 never overwrites legacy role tags. Distribution source images retain
+# package-manager metadata only during extraction; final roles share tar layers.
+V2_VARIANT ?= official
+V2_TAG = roles-v2-$(V2_VARIANT)-$(if $(filter alpine,$(V2_VARIANT)),19.2.4,$(CEPH_RELEASE))
+V2_SOURCE = $(IMAGE_REPOSITORY):$(V2_TAG)-source
+.PHONY: roles-v2-images
+roles-v2-images:
+	@case "$(V2_VARIANT)" in official|debian|ubuntu|alpine) ;; *) exit 2 ;; esac
+	@if [ "$(V2_VARIANT)" = official ]; then \
+		source="$(OFFICIAL_IMAGE)"; backend=rpm; docker pull --platform "$(PLATFORM)" "$$source" || exit 1; \
+	else \
+		build_args=""; backend=deb; \
+		if [ "$(V2_VARIANT)" = alpine ]; then backend=apk; else \
+			build_args="$$(python3 image/releases.py build-args $(CEPH_RELEASE) $(V2_VARIANT))" || exit 1; fi; \
+		docker buildx build --load --platform "$(PLATFORM)" --provenance=false --target all $$build_args \
+			-t "$(V2_SOURCE)" image/$(V2_VARIANT) || exit 1; source="$(V2_SOURCE)"; \
+	fi; \
+	python3 image/roles/build.py --contract roles-v2 --package-backend $$backend --source-runtime-env \
+		--source-image "$$source" --skip-pull --platform "$(PLATFORM)" --repository "$(IMAGE_REPOSITORY)" \
+		--tag "$(V2_TAG)" --check quick

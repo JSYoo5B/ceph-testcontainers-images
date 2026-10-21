@@ -230,9 +230,9 @@ class ProcessInspectionProbeTests(unittest.TestCase):
 class ParentCachePluginProbeTests(unittest.TestCase):
     """Runs the control probe's Python block against a stub plugin directory."""
 
-    def run_probe(self, plugin):
+    def run_probe(self, plugin, role="control"):
         script = (check.HERE / "check-runtime.sh").read_text()
-        start = script.index("python3 - <<'PY' || failed=1\n") + len("python3 - <<'PY' || failed=1\n")
+        start = script.index("python3 - \"$role\" <<'PY' || failed=1\n") + len("python3 - \"$role\" <<'PY' || failed=1\n")
         block = script[start:script.index("\nPY\n", start)]
         with tempfile.TemporaryDirectory() as temporary:
             plugin_dir = Path(temporary) / "plugins"
@@ -241,11 +241,11 @@ class ParentCachePluginProbeTests(unittest.TestCase):
                 plugin(plugin_dir / "librbd" / "libceph_librbd_parent_cache.so", Path(temporary))
             bin_dir = Path(temporary) / "bin"
             bin_dir.mkdir()
-            stub = bin_dir / "ceph-mgr"
+            stub = bin_dir / ("ceph-conf" if role == "rbd-aux" else "ceph-mgr")
             stub.write_text("#!/bin/sh\necho 'did not load config file' >&2\necho %s\n" % plugin_dir)
             stub.chmod(0o755)
             environment = dict(os.environ, PATH=str(bin_dir) + os.pathsep + os.environ["PATH"])
-            result = subprocess.run([sys.executable, "-c", block], env=environment,
+            result = subprocess.run([sys.executable, "-c", block, role], env=environment,
                                     capture_output=True, text=True, timeout=60)
         return [line for line in result.stdout.splitlines() if "rbd-parent-cache" in line]
 
@@ -265,6 +265,10 @@ class ParentCachePluginProbeTests(unittest.TestCase):
             "int __ceph_plugin_init(void *c, const char *t, const char *n) { return 0; }\n"))
         self.assertEqual(lines, ["CHECK\tpassed\tlibrary-present:rbd-parent-cache",
                                  "CHECK\tpassed\tlibrary-load:rbd-parent-cache"])
+
+    def test_auxiliary_plugin_probe_does_not_need_a_manager_binary(self):
+        lines = self.run_probe(None, role="rbd-aux")
+        self.assertIn("CHECK\tfailed\tlibrary-present:rbd-parent-cache", lines)
 
     def test_missing_plugin_is_a_missing_file(self):
         lines = self.run_probe(None)
