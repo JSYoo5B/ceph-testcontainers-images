@@ -44,6 +44,10 @@ REQUIRED_EXECUTABLES = {
     "rgw": ("/usr/bin/radosgw", "/usr/bin/radosgw-admin"),
     "mds": ("/usr/bin/ceph-mds",),
 }
+include_path = lambda role, path: True
+role_notices = {}
+EXCLUDED_EXECUTABLES = {}
+
 COPYING = "/usr/share/doc/ceph/COPYING"
 SOURCE_NOTICE = """Ceph testcontainers role image: licenses and corresponding source
 
@@ -337,6 +341,7 @@ def main():
         licenses = set().union(*(inventory[p]["licenses"] for p in selected[role]))
         licenses.add(COPYING)
         files = set(extras).union(*(inventory[p]["files"] for p in selected[role]))
+        files = {p for p in files if include_path(role, p)}
         files.update(licenses)
         for path in plan_source_paths(files, licenses, materialized):
             path_members.setdefault(path, set()).add(role)
@@ -347,6 +352,12 @@ def main():
     if not os.path.isfile(COPYING):
         raise RuntimeError("Required Ceph license file missing: " + COPYING)
     add_parent_memberships(path_members)
+    # Only executables deliberately excluded by every v2 role may remain
+    # unassigned in the materialized source. Remove them before partitioning.
+    for p in tree_paths(materialized) - set(path_members):
+        source = '/' + p
+        if all(not include_path(role, source) for role in ROLES):
+            (materialized / p).unlink()
     actual_paths = tree_paths(materialized)
     missing = actual_paths - set(path_members)
     unexpected = set(path_members) - actual_paths
@@ -379,6 +390,7 @@ def main():
         executables = list(REQUIRED_EXECUTABLES[role]) if role != "all" else sorted(set().union(*REQUIRED_EXECUTABLES.values()))
         metadata = {
             "role": role,
+            "contract": "roles-v2" if "essential" in ROLES else "legacy",
             "source_image": source_image,
             "ceph_version": ceph_version,
             "architecture": architecture,
@@ -388,6 +400,7 @@ def main():
             "root_packages": list(roots[role]),
             "package_versions": versions,
             "required_executables": executables,
+            "excluded_executables": EXCLUDED_EXECUTABLES.get(role, []),
             "metadata_probes": role_metadata_probes(probes, path_members, materialized, role),
             "logical_regular_file_bytes": sum(group_metadata[name]["regular_file_bytes"] for name in role_groups),
         }
@@ -401,6 +414,8 @@ def main():
         (manifest_directory / "image-manifest.json").write_text(json.dumps(metadata, indent=2, sort_keys=True) + "\n")
         (manifest_directory / "source-packages.txt").write_text(source_listing(inventory, selected[role]))
         (manifest_directory / "SOURCES.txt").write_text(source_notice(source_image, ceph_version))
+        for name, data in role_notices.items():
+            (manifest_directory / name).write_bytes(data)
         write_archive(manifest_root, output / "manifests" / (role + ".tar"))
 
     plan = {

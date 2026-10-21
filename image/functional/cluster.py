@@ -185,7 +185,13 @@ class Cluster:
     def __init__(self, docker, name, images, osds=2):
         self.docker = docker
         self.name = name
-        self.images = images
+        self.v2 = "essential" in images
+        self.images = dict(images)
+        if self.v2:
+            self.images.update(control=images["essential"], osd=images["essential"])
+            if "cephfs" in images:
+                self.images["mds"] = images["cephfs"]
+        self.admin_container = None
         self.osd_count = osds
         self.prefix = "tc-" + docker.session[:8] + "-" + name
         self.network = self.prefix
@@ -258,7 +264,7 @@ class Cluster:
                                                    timeout=30), timeout=120)
         self.conf = self.exec(mon, "cat", "/etc/ceph/ceph.conf")
         self.admin_keyring = self.exec(mon, "cat", "/etc/ceph/ceph.client.admin.keyring")
-        self.container("client", self.images["control"], CLIENT_SCRIPT, env=self.shared_env(),
+        self.container("client", self.images.get("client", self.images["control"]), CLIENT_SCRIPT, env=self.shared_env(),
                        networks=extra_networks)
         self.start_mgr()
         for _ in range(self.osd_count):
@@ -278,7 +284,7 @@ class Cluster:
 
     def add_osd(self):
         osd_uuid = str(uuid.uuid4())
-        secret = self.client("ceph-authtool", "--gen-print-key").strip()
+        secret = self.exec(self.prefix + "-mon", "ceph-authtool", "--gen-print-key").strip()
         self.write_file("/tmp/osd-" + osd_uuid + ".json", json.dumps({"cephx_secret": secret}))
         osd_id = int(self.client("ceph", "osd", "new", osd_uuid, "-i", "/tmp/osd-" + osd_uuid + ".json").strip())
         keyring = "[osd.%d]\n\tkey = %s\n" % (osd_id, secret)
@@ -348,9 +354,17 @@ class Cluster:
         wait("RGW in " + self.name, lambda: self.python("s3.py", "ping", "rgw", str(RGW_PORT), timeout=30),
              timeout=240)
 
+    def admin_client(self):
+        if not self.v2:
+            return self.prefix + "-client"
+        if self.admin_container is None:
+            self.admin_container = self.container("rgw-admin", self.images["rgw"], CLIENT_SCRIPT, env=self.shared_env())
+        return self.admin_container
+
     def rgw_admin(self, *args, container=None):
         return self.exec(container or self.prefix + "-rgw", "radosgw-admin", *args)
 
     def start_mirror(self, daemon, name, keyring, networks):
-        return self.container(daemon, self.images["control"], MIRROR_SCRIPT, env=self.shared_env() + [
+        image = self.images["cephfs" if daemon == "cephfs-mirror" else "rbd-aux"] if self.v2 else self.images["control"]
+        return self.container(daemon, image, MIRROR_SCRIPT, env=self.shared_env() + [
             ("TC_DAEMON", daemon), ("TC_NAME", name), ("TC_KEYRING", keyring)], networks=networks)

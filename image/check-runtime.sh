@@ -3,6 +3,7 @@
 # Python is needed for non-control roles. Run only in a disposable container as root.
 set -u
 role=${1:?role required}
+contract=${2:-legacy}
 failed=0
 work=/tmp/ceph-image-check-$$
 
@@ -75,11 +76,19 @@ check sleep-infinity /bin/sh -c '
     wait "$sleeper" 2>/dev/null || true
 '
 
+core=false
+client=false
+cache=false
+fsmirror=false
 control=false
 osd=false
 rgw=false
 mds=false
 case "$role" in
+    essential) core=true; osd=true ;;
+    client) client=true ;;
+    cephfs) mds=true; fsmirror=true ;;
+    rbd-aux) cache=true ;;
     control) control=true ;;
     osd) osd=true ;;
     rgw) rgw=true ;;
@@ -94,7 +103,11 @@ version() {
         cat "$work/version" 2>/dev/null || true
         return 1
     }
-    printf 'VERSION\t%s\t%s\n' "$binary" "$(cat "$work/version")"
+    # Python startup diagnostics can precede the version (notably on Alpine).
+    # Preserve them in the log, but emit exactly one protocol VERSION record.
+    cat "$work/version"
+    release=$(awk '/^ceph version / {count++; value=$0} END {if (count != 1) exit 1; print value}' "$work/version") || return 1
+    printf 'VERSION\t%s\t%s\n' "$binary" "$release"
 }
 # pgrep -f reports exactly a live process found by its command line, and
 # nothing once that process has exited and been reaped.
@@ -124,22 +137,32 @@ pgrep_inspection() {
         return 1
     fi
 }
-if "$control"; then
-    for binary in ceph-mon ceph-mgr ceph ceph-authtool monmaptool rados rbd; do
+if "$control" || "$core" || "$client" || "$cache" || "$fsmirror" || { "$rgw" && test "$contract" = roles-v2; }; then
+    binaries="ceph"
+    if "$control" || "$core"; then binaries="$binaries ceph-mon ceph-mgr ceph-authtool monmaptool"; fi
+    if "$control" || "$client" || "$cache"; then binaries="$binaries rados rbd"; fi
+    for binary in $binaries; do
         check "version:$binary" version "$binary"
     done
     check path:python3 external_command python3
-    check python-bindings python3 -c 'import rados, rbd, cephfs, ceph_argparse, ceph_daemon'
+    check python-cli python3 -c 'import rados, ceph_argparse, ceph_daemon'
+    if "$control" || "$client"; then
+        check python-bindings python3 -c 'import rados, rbd, cephfs, ceph_argparse, ceph_daemon'
+    fi
+    if "$cache"; then check python-rbd python3 -c 'import rados,rbd'; fi
+    if "$control" || "$client" || "$cache"; then
+    if "$control" || "$client"; then
     check path:cryptsetup external_command cryptsetup
     if external_command cryptsetup; then
         check library-load:cryptsetup-executable cryptsetup --version
+    fi
     fi
     check path:pgrep external_command pgrep
     if external_command pgrep; then
         check process-inspection:pgrep pgrep_inspection
     fi
     # Resolve by linker names, not package names or distribution-specific paths.
-    python3 - <<'PY' || failed=1
+    python3 - "$role" <<'PY' || failed=1
 import ctypes
 import ctypes.util
 import os
@@ -158,6 +181,8 @@ libraries = {
     'radosstriper': ('libradosstriper.so.1', ('rados_striper_create', 'rados_striper_write',
                                          'rados_striper_read', 'rados_striper_remove')),
 }
+if sys.argv[1] == 'rbd-aux':
+    libraries = {}
 for name, (fallback, symbols) in libraries.items():
     # find_library may need ldconfig or a compiler, neither is a role
     # requirement. The loader can resolve the supported ABI directly too.
@@ -182,44 +207,56 @@ for name, (fallback, symbols) in libraries.items():
         result('library-load:' + name, True, 'loading_failure')
 # librbd loads a plugin by name from the plugin directory, so the parent
 # cache client needs that file and its dependencies, not only librbd.
-plugin_dir = subprocess.run(['ceph-mgr', '--show-config-value', 'plugin_dir'],
-                            capture_output=True, text=True).stdout.strip()
-plugin = os.path.join(plugin_dir, 'librbd', 'libceph_librbd_parent_cache.so')
-present = bool(plugin_dir) and os.path.isfile(plugin)
-result('library-present:rbd-parent-cache', present, 'missing_file')
-if present:
+if sys.argv[1] in ('control','all','rbd-aux'):
+    config_program = 'ceph-conf' if sys.argv[1] == 'rbd-aux' else 'ceph-mgr'
+    plugin_dir = subprocess.run([config_program, '--show-config-value', 'plugin_dir'],
+                                capture_output=True, text=True).stdout.strip()
+    plugin = os.path.join(plugin_dir, 'librbd', 'libceph_librbd_parent_cache.so')
+    present = bool(plugin_dir) and os.path.isfile(plugin)
+    result('library-present:rbd-parent-cache', present, 'missing_file')
+    if present:
+        try:
+            library = ctypes.CDLL(plugin, mode=os.RTLD_NOW)
+            getattr(library, '__ceph_plugin_init')
+            getattr(library, '__ceph_plugin_version')
+        except (OSError, AttributeError) as error:
+            print(str(error))
+            result('library-load:rbd-parent-cache', False, 'loading_failure')
+        else:
+            result('library-load:rbd-parent-cache', True, 'loading_failure')
+if sys.argv[1] != 'rbd-aux':
     try:
-        library = ctypes.CDLL(plugin, mode=os.RTLD_NOW)
-        getattr(library, '__ceph_plugin_init')
-        getattr(library, '__ceph_plugin_version')
-    except (OSError, AttributeError) as error:
+        import rados, rbd
+        assert callable(rbd.Image.encryption_format) and callable(rbd.Image.encryption_load)
+        assert callable(rados.WriteOpCtx.execute) and callable(rados.Ioctx.lock_exclusive)
+        assert callable(rados.Ioctx.unlock)
+    except (ImportError, AttributeError, AssertionError) as error:
         print(str(error))
-        result('library-load:rbd-parent-cache', False, 'loading_failure')
+        result('python-client-features', False, 'loading_failure')
     else:
-        result('library-load:rbd-parent-cache', True, 'loading_failure')
-try:
-    import rados, rbd
-    assert callable(rbd.Image.encryption_format) and callable(rbd.Image.encryption_load)
-    assert callable(rados.WriteOpCtx.execute) and callable(rados.Ioctx.lock_exclusive)
-    assert callable(rados.Ioctx.unlock)
-except (ImportError, AttributeError, AssertionError) as error:
-    print(str(error))
-    result('python-client-features', False, 'loading_failure')
-else:
-    result('python-client-features', True, 'loading_failure')
-help_output = subprocess.run(['rados', '--help'], capture_output=True, text=True)
-result('rados-striper-option', help_output.returncode == 0 and '--striper' in help_output.stdout,
-       'unsupported_feature')
+        result('python-client-features', True, 'loading_failure')
+    help_output = subprocess.run(['rados', '--help'], capture_output=True, text=True)
+    result('rados-striper-option', help_output.returncode == 0 and '--striper' in help_output.stdout,
+           'unsupported_feature')
 sys.exit(1 if failed else 0)
 PY
+    fi
+    if "$control" || "$core"; then
+    if "$core"; then
+        check path:pgrep external_command pgrep
+        check process-inspection:pgrep pgrep_inspection
+    fi
     mgr_modules() {
         module_path=$(ceph-mgr --show-config-value mgr_module_path) || return 1
-        python3 - "$module_path" <<'PY'
+        python3 - "$module_path" "$contract" <<'PY'
 from pathlib import Path
 import sys
 root = Path(sys.argv[1])
 assert (root / "mgr_module.py").is_file(), "missing mgr_module.py"
-for name in ("volumes", "rbd_support", "mirroring"):
+modules = ("volumes", "rbd_support", "mirroring")
+if sys.argv[2] == "roles-v2":
+    modules += ("snap_schedule",)
+for name in modules:
     assert (root / name / "module.py").is_file(), "missing MGR module: " + name
 PY
     }
@@ -229,7 +266,12 @@ PY
     check keyring-read /bin/sh -c 'ceph-authtool "$1" --print-key > /dev/null' check "$work/keyring"
     check monmap monmaptool --create --fsid 9df1f6ea-6047-4d0c-bb3d-408fbef094b4 \
         --addv a '[v2:127.0.0.1:3300,v1:127.0.0.1:6789]' "$work/monmap"
-    for binary in rbd-mirror cephfs-mirror radosgw-admin ceph-immutable-object-cache; do
+    fi
+    binaries=""
+    if "$control"; then binaries="rbd-mirror cephfs-mirror radosgw-admin ceph-immutable-object-cache"; fi
+    if "$cache"; then binaries="rbd-mirror ceph-immutable-object-cache"; fi
+    if "$fsmirror"; then binaries="cephfs-mirror"; fi
+    for binary in $binaries; do
         check "version:$binary" version "$binary"
     done
 fi
