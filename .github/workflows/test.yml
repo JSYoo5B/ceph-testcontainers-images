@@ -1,8 +1,8 @@
 name: checker
 
-# Pull requests and main pushes run unit tests and quick requirement checks.
-# A manual run selects a release, runs the full functional suite and, with
-# publish, promotes that release's tags from the exact tested images.
+# Default CI keeps unit and extension checks here. Dependency-role images
+# are built and qualified by roles-v2.yml. The old four-role image campaign
+# is an explicit manual diagnostic, not a second automatic production path.
 on:
   push:
     branches: [main]
@@ -11,6 +11,10 @@ on:
     paths-ignore: ['**.md', 'docs/**', 'LICENSE', '.idea/**']
   workflow_dispatch:
     inputs:
+      legacy_images:
+        description: Run the retired four-role image campaign explicitly
+        type: boolean
+        default: false
       release:
         description: 'Ceph release from image/releases.py, or all'
         type: string
@@ -39,6 +43,7 @@ jobs:
 
   # image/releases.py is the only list of checked and published releases.
   releases:
+    if: github.event_name == 'workflow_dispatch' && inputs.legacy_images
     needs: unit
     runs-on: ubuntu-24.04
     outputs:
@@ -270,7 +275,7 @@ jobs:
           targets=()
           for release in $(python3 image/releases.py list); do
             for reference in "$(python3 image/releases.py official "$release")" \
-                "ghcr.io/jsyoo5b/ceph-testcontainers-images:official-$release-osd"; do
+                "ghcr.io/jsyoo5b/ceph-testcontainers-images:roles-v2-official-$release-essential"; do
               docker pull --platform "linux/${{ matrix.architecture }}" "$reference"
               targets+=(--target "$reference")
             done
