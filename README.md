@@ -98,6 +98,47 @@ The output is `ceph-testcontainers:official-<release>-<role>` for the four roles
 
 [image/debian](image/debian/Dockerfile) (bookworm-slim) and [image/ubuntu](image/ubuntu/Dockerfile) build the same five roles by installing only the needed packages from Ceph's own Debian and Ubuntu repositories at download.ceph.com. They are built with `make debian-images` and `make ubuntu-images`, which take `CEPH_RELEASE` (default `20.2.4`), and tagged `<distribution>-<release>-<role>`. The arm64 Ubuntu images set `TCMALLOC_STACKTRACE_METHOD=generic_fp`, because Ceph's Noble daemons crash with SIGILL in the default tcmalloc stack unwinder on some ARM64 hosts; on amd64 the same setting makes them crash, so it is not set there. Like the extracted images, each one records its packages, licenses and source pointers under `/usr/share/ceph-testcontainers/`.
 
+### Experimental Alpine stable Squid
+
+`image/alpine/` builds the five roles from Alpine **3.24.2** and its stable
+`v3.24/main` and `v3.24/community` repositories. The base digest and Ceph APK
+version **19.2.4-r1** are pinned in its Dockerfile. No edge or testing repository
+is used. This is a separate **19.2.4** experiment: it is not part of
+`image/releases.py`, the publication workflow or the published **19.2.5** tags.
+`CEPH_RELEASE` continues to select the existing published image variants.
+
+```sh
+make alpine-images PLATFORM=linux/amd64
+python3 image/check.py --platform linux/amd64 --full \
+  --image control=ceph-testcontainers:alpine-19.2.4-control \
+  --image osd=ceph-testcontainers:alpine-19.2.4-osd \
+  --image rgw=ceph-testcontainers:alpine-19.2.4-rgw \
+  --image mds=ceph-testcontainers:alpine-19.2.4-mds \
+  --image all=ceph-testcontainers:alpine-19.2.4-all
+```
+
+Use `PLATFORM=linux/arm64` to build on a native ARM64 Docker host. Build success
+alone does not establish runtime compatibility; run the checker on that host.
+The target supports the same opt-in `BUILD_CACHE_REF` and `BUILD_CACHE_WRITE`
+settings as the distribution builds above.
+
+The control and `all` images set
+`CEPH_ARGS=--mgr-subinterpreter-modules=*` to restore Squid's per-module Python
+interpreters. Alpine's backported shared-interpreter default can otherwise
+dispatch a CephFS mirroring command to the wrong MGR module.
+They request an 8 MiB worker stack for `cephfs-mirror` through its ELF
+`PT_GNU_STACK` header: its directory replay allocates more stack than musl's
+default. Only the stack-size field changes; executable code and stack permission
+flags are preserved. `modifications.json` records the original and modified
+hashes and sizes alongside the source manifest.
+The OSD image installs the daemon and base packages without the OSD tools and
+ceph-volume metapackage. The control image needs the parent `ceph19` package
+for the immutable object cache and parent-cache plugin, which also brings in
+the other daemons; `all` consequently reuses it. Installed package versions,
+SPDX license expressions, source origins and aports commits are recorded under
+`/usr/share/ceph-testcontainers/`, with Ceph's upstream `COPYING` notice under
+`/usr/share/licenses/ceph/`.
+
 ## Extension images
 
 Some module features need tools that the official image does not ship, such as `tc` for kernel packet delay. They are opt-in: the caller selects an extension image for that feature, and baseline features never need one. [Extension Images](docs/EXTENSIONS.md) defines each extension's contract and how to check an image against it.
