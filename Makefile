@@ -1,4 +1,4 @@
-.PHONY: check base-check extension-test checker-test functional-test roles-test image-check official-check role-images role-images-full debian-images ubuntu-images extension-images extension-selectors extension-check
+.PHONY: check base-check extension-test checker-test functional-test roles-test image-check official-check role-images role-images-full debian-images ubuntu-images alpine-images extension-images extension-selectors extension-check
 
 # Release inputs live in image/releases.py; CEPH_RELEASE selects one of them.
 CEPH_RELEASE ?= 20.2.4
@@ -67,6 +67,16 @@ debian-images ubuntu-images: %-images:
 		$(call registry_cache,-$$role) \
 		docker buildx build --load --platform "$(PLATFORM)" --provenance=false --target $$role $$build_args \
 			$$cache_args -t "$(IMAGE_REPOSITORY):$*-$(CEPH_RELEASE)-$$role" image/$* || exit 1; \
+	done
+
+# Experimental stable Alpine Squid is a separate release from the published
+# matrix. Keep this version paired with image/alpine/Dockerfile; CEPH_RELEASE
+# intentionally continues to select only the existing published variants.
+alpine-images:
+	for role in control osd rgw mds all; do \
+		$(call registry_cache,-$$role) \
+		docker buildx build --load --platform "$(PLATFORM)" --provenance=false --target $$role \
+			$$cache_args -t "$(IMAGE_REPOSITORY):alpine-19.2.4-$$role" image/alpine || exit 1; \
 	done
 
 # Opt-in extension helpers, built and checked apart from the role images
