@@ -75,3 +75,16 @@ class BuildIDPruningTests(unittest.TestCase):
             self.assertTrue(contract.permits_path('rgw',str(alias),{'radosgw-admin'}))
         self.assertFalse(contract.permits_path('essential','/usr/bin/rbd',{'rbd'}))
         self.assertTrue(contract.permits_path('client','/usr/bin/rbd',{'rbd'}))
+
+class SavedConfigurationTests(unittest.TestCase):
+    def test_index_id_resolves_only_the_exact_runnable_platform(self):
+        import measure
+        observed = {'Id':'sha256:index','Os':'linux','Architecture':'amd64','RootFS':{'Layers':['sha256:layer']}}
+        record = {'Layers':['native/layer.tar']}
+        config = {'os':'linux','architecture':'amd64','rootfs':{'diff_ids':['sha256:layer']}}
+        other = dict(config,architecture='arm64')
+        self.assertEqual(measure.select_configuration(observed,{'sha256:native':(record,config),'sha256:other':({},other)}),('sha256:native',record))
+        with self.assertRaises(ValueError):
+            measure.select_configuration(observed,{'sha256:other':({},other)})
+        with self.assertRaises(ValueError):
+            measure.select_configuration(observed,{'sha256:a':(record,config),'sha256:b':(record,config)})

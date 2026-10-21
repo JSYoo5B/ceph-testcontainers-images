@@ -14,6 +14,20 @@ import contract
 def inspect(reference):
     return json.loads(subprocess.check_output(['docker','image','inspect',reference],text=True))[0]
 
+def select_configuration(observed, configurations):
+    """Docker can expose an index ID instead of the runnable config digest."""
+    def matches(item):
+        _, config = item
+        return (config.get('os'),config.get('architecture'),config.get('rootfs',{}).get('diff_ids')) == (
+            observed['Os'],observed['Architecture'],observed['RootFS']['Layers'])
+    advertised = observed.get('Descriptor',{}).get('annotations',{}).get('config.digest',observed['Id'])
+    if advertised in configurations and matches(configurations[advertised]):
+        return advertised,configurations[advertised][0]
+    candidates = [(digest,record) for digest,(record,config) in configurations.items() if matches((record,config))]
+    if len(candidates) != 1:
+        raise ValueError('saved archive must identify exactly one runnable platform configuration')
+    return candidates[0]
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--image', action='append',required=True,metavar='ROLE=REF')
@@ -43,7 +57,7 @@ def main():
             configurations = {}
             for record in records:
                 data = saved.extractfile(record['Config']).read()
-                configurations['sha256:'+hashlib.sha256(data).hexdigest()] = record
+                configurations['sha256:'+hashlib.sha256(data).hexdigest()] = (record,json.loads(data))
                 for path in record['Layers']:
                     member = saved.getmember(path)
                     with saved.extractfile(member) as stream:
@@ -67,11 +81,10 @@ def main():
                                                           diff_id='sha256:'+diff.hexdigest(),uncompressed_tar_bytes=unpacked)
                     record.setdefault('identities',[]).append(identity)
             for role,observed in images.items():
-                config = observed.get('Descriptor',{}).get('annotations',{}).get('config.digest',observed['Id'])
-                record = configurations[config]
+                config,record = select_configuration(observed,configurations)
                 identities = record['identities']
                 assert [result['layers'][i]['diff_id'] for i in identities] == observed['RootFS']['Layers'],role
-                result['images'][role] = dict(reference=refs[role],image_id=observed['Id'],docker_size_bytes=observed['Size'],layers=identities)
+                result['images'][role] = dict(reference=refs[role],image_id=observed['Id'],config_digest=config,docker_size_bytes=observed['Size'],layers=identities)
     scenarios = {'essential-client':('essential','client'),'rbd-aux':('essential','client','rbd-aux'),
                  'cephfs':('essential','client','cephfs'),'rgw':('essential','rgw'),
                  'complete':contract.ROLES,'all':('all',),'baseline':('baseline',)}
