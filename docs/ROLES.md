@@ -1,7 +1,6 @@
-# Dependency roles, version 2
+# Role images
 
 This default production contract follows the execution/dependency analysis in issue #3.
-Legacy control/osd/mds/rgw tags and checker mode keep their meanings.
 
 | Role | Required capability |
 | --- | --- |
@@ -36,18 +35,18 @@ another container; custom targets retain explicit capability checks.
 ## Building and checking
 
 ```sh
-make roles-v2-images V2_VARIANT=official CEPH_RELEASE=19.2.5
-make roles-v2-images V2_VARIANT=debian CEPH_RELEASE=19.2.5
-make roles-v2-images V2_VARIANT=ubuntu CEPH_RELEASE=19.2.5
-make roles-v2-images V2_VARIANT=alpine  # independent 19.2.4 experiment
+make role-images VARIANT=official CEPH_RELEASE=19.2.5
+make role-images VARIANT=debian CEPH_RELEASE=19.2.5
+make role-images VARIANT=ubuntu CEPH_RELEASE=19.2.5
+make role-images VARIANT=alpine  # independent 19.2.4 experiment
 
-python3 image/check.py --contract roles-v2 --full \
-  --image essential=ceph-testcontainers:roles-v2-official-19.2.5-essential \
-  --image client=ceph-testcontainers:roles-v2-official-19.2.5-client \
-  --image cephfs=ceph-testcontainers:roles-v2-official-19.2.5-cephfs \
-  --image rbd-aux=ceph-testcontainers:roles-v2-official-19.2.5-rbd-aux \
-  --image rgw=ceph-testcontainers:roles-v2-official-19.2.5-rgw \
-  --image all=ceph-testcontainers:roles-v2-official-19.2.5-all
+python3 image/check.py --full \
+  --image essential=ceph-testcontainers:official-19.2.5-essential \
+  --image client=ceph-testcontainers:official-19.2.5-client \
+  --image cephfs=ceph-testcontainers:official-19.2.5-cephfs \
+  --image rbd-aux=ceph-testcontainers:official-19.2.5-rbd-aux \
+  --image rgw=ceph-testcontainers:official-19.2.5-rgw \
+  --image all=ceph-testcontainers:official-19.2.5-all
 ```
 
 Installed RPM/deb/APK closures are resolved offline from the complete pinned
@@ -57,17 +56,17 @@ package inventory and documented Alpine modifications remain in the outputs.
 Identical membership-group tar layers are reused, including in all. Source
 runtime CEPH_ARGS and architecture-specific tcmalloc settings are retained.
 
-The roles-v2 workflow builds all supported release/variant/platform cells.
+The roles workflow builds all supported release/variant/platform cells.
 Manual full runs validate split roles and all separately before optional
-publication. Publisher stage/promote/health take `--contract roles-v2`; output
-tags begin `roles-v2-`, and legacy reports cannot promote into that namespace.
+publication. Publisher stage/promote/health use the default role contract;
+tags are `<variant>-<release>-<role>`.
 The six-platform completeness and exact tested-image gates remain in force.
 
-## Existing requirement and test relocation
+## Requirements and validation
 
 R01–R28 refer in order to IMAGE_REQUIREMENTS.md's component-use table.
 
-| Existing requirements | New quick-test owner | Functional follow-up |
+| Requirements | Quick-check role | Functional coverage |
 | --- | --- | --- |
 | R01–R04 common/bootstrap utilities | Every role | Bootstrap and cleanup in every selected scenario |
 | R05–R08 MON/MGR/bootstrap/core CLI | essential; local CLI subset in each relevant role | cluster-lifecycle; consumer MON/MGR topology and auth tests |
@@ -89,7 +88,7 @@ R01–R28 refer in order to IMAGE_REQUIREMENTS.md's component-use table.
 The scenario-to-role manifest in image/roles/contract.py covers all eleven
 existing image scenarios. Selected runs resolve only that scenario union;
 missing roles fail before Docker allocation. Full split and all runs are
-independent. Neither all nor control is an implicit missing-role substitute.
+independent. Missing optional roles are errors; all is selected explicitly.
 
 Core-only/RBD scenarios never start mirror or gateway processes. RGW-only
 scenarios use core probes and an RGW setup executor. Independent native client
@@ -114,6 +113,6 @@ Only an all-gzip result is a compressed-layer comparison. It does not measure
 registry/config/protocol overhead, physical snapshot storage or CPU/RAM.
 
 The existing assembler's doc/man/info/bytecode exclusions also apply to the
-v2 distribution runtime, with license-file exceptions. Executable pruning,
+distribution runtime, with license-file exceptions. Executable pruning,
 metadata removal and layer reuse contribute alongside role selection; savings
 must not be attributed to role labels alone.

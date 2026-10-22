@@ -22,28 +22,11 @@ import analyze
 import assemble
 
 
-ROLES = ("control", "osd", "rgw", "mds")
-ROOT_PACKAGES = {
-    "control": (
-        "ceph-mon", "ceph-mgr", "ceph-common", "python3-cephfs",
-        "rbd-mirror", "cephfs-mirror", "cryptsetup", "libradosstriper1", "procps-ng",
-        "ceph-immutable-object-cache",
-    ),
-    "osd": ("ceph-osd",),
-    "rgw": ("ceph-radosgw",),
-    "mds": ("ceph-mds",),
-}
-REQUIRED_EXECUTABLES = {
-    "control": (
-        "/usr/bin/ceph", "/usr/bin/ceph-mon", "/usr/bin/ceph-mgr",
-        "/usr/bin/rados", "/usr/bin/rbd", "/usr/bin/ceph-authtool", "/usr/bin/monmaptool",
-        "/usr/bin/rbd-mirror", "/usr/bin/cephfs-mirror", "/usr/sbin/cryptsetup", "/usr/bin/pgrep",
-        "/usr/bin/ceph-immutable-object-cache",
-    ),
-    "osd": ("/usr/bin/ceph-osd",),
-    "rgw": ("/usr/bin/radosgw", "/usr/bin/radosgw-admin"),
-    "mds": ("/usr/bin/ceph-mds",),
-}
+import contract
+
+ROLES = contract.ROLES
+ROOT_PACKAGES = {}
+REQUIRED_EXECUTABLES = {}
 include_path = lambda role, path: True
 role_notices = {}
 EXCLUDED_EXECUTABLES = {}
@@ -352,7 +335,7 @@ def main():
     if not os.path.isfile(COPYING):
         raise RuntimeError("Required Ceph license file missing: " + COPYING)
     add_parent_memberships(path_members)
-    # Only executables deliberately excluded by every v2 role may remain
+    # Only executables deliberately excluded by every role may remain
     # unassigned in the materialized source. Remove them before partitioning.
     for p in tree_paths(materialized) - set(path_members):
         source = '/' + p
@@ -390,7 +373,7 @@ def main():
         executables = list(REQUIRED_EXECUTABLES[role]) if role != "all" else sorted(set().union(*REQUIRED_EXECUTABLES.values()))
         metadata = {
             "role": role,
-            "contract": "roles-v2" if "essential" in ROLES else "legacy",
+            "contract": "roles",
             "source_image": source_image,
             "ceph_version": ceph_version,
             "architecture": architecture,
@@ -456,15 +439,15 @@ def self_test():
         if os.geteuid() == 0:
             # Linux Docker packaging also exercises non-root numeric owners.
             os.chown(shared, 167, 167)
-        first = materialized / "usr/bin/control-helper"
-        first.write_bytes(b"shared-control-osd-inode")
+        first = materialized / "usr/bin/client-helper"
+        first.write_bytes(b"shared-client-essential-inode")
         first.chmod(0o755)
-        second = materialized / "usr/bin/osd-helper"
+        second = materialized / "usr/bin/essential-helper"
         os.link(first, second)
         os.symlink("usr/lib64", materialized / "lib64")
         os.symlink("/usr/bin", materialized / "bin")
-        private = materialized / "usr/bin/control"
-        private.write_bytes(b"control-only")
+        private = materialized / "usr/bin/client"
+        private.write_bytes(b"client-only")
         private.chmod(0o6751)
         expected_directory_mode = stat.S_IMODE(os.stat(materialized / "etc/ceph").st_mode)
         expected_file_mode = stat.S_IMODE(os.stat(private).st_mode)
@@ -472,13 +455,13 @@ def self_test():
         if sys.platform.startswith("linux") and os.geteuid() == 0:
             assert set_id_supported, "Linux fixture source filesystem stripped set-id bits"
         memberships = {path: set(ROLES) for path in tree_paths(materialized)}
-        memberships["usr/bin/control-helper"] = {"control"}
-        memberships["usr/bin/osd-helper"] = {"osd"}
-        memberships["usr/bin/control"] = {"control"}
+        memberships["usr/bin/client-helper"] = {"client"}
+        memberships["usr/bin/essential-helper"] = {"essential"}
+        memberships["usr/bin/client"] = {"client"}
         groups, ordered = partition_materialized(materialized, memberships)
-        assert ordered == ["common", "shared-control-osd", "control"], ordered
-        assert groups["shared-control-osd"]["members"] == ["control", "osd"]
-        assert len(groups["shared-control-osd"]["inodes"]) == 1
+        assert ordered == ["common", "shared-client-essential", "client"], ordered
+        assert groups["shared-client-essential"]["members"] == ["client", "essential"]
+        assert len(groups["shared-client-essential"]["inodes"]) == 1
         for name in ordered:
             overlay = root / name
             write_overlay(materialized, groups[name]["paths"], overlay)
@@ -500,13 +483,13 @@ def self_test():
                     assert packaged.getmember("etc/ceph").mode == expected_directory_mode
                     assert packaged.getmember("bin").issym()
                     assert packaged.getmember("bin").linkname == "/usr/bin"
-                if name == "shared-control-osd":
-                    assert packaged.getmember("usr/bin/osd-helper").islnk()
-                    assert packaged.getmember("usr/bin/osd-helper").linkname == "usr/bin/control-helper"
-                if name == "control":
-                    assert packaged.getmember("usr/bin/control").mode == expected_file_mode
-        assert not (root / "control/usr/lib64/shared.so").exists()
-        assert os.stat(root / "shared-control-osd/usr/bin/control-helper").st_ino == os.stat(root / "shared-control-osd/usr/bin/osd-helper").st_ino
+                if name == "shared-client-essential":
+                    assert packaged.getmember("usr/bin/essential-helper").islnk()
+                    assert packaged.getmember("usr/bin/essential-helper").linkname == "usr/bin/client-helper"
+                if name == "client":
+                    assert packaged.getmember("usr/bin/client").mode == expected_file_mode
+        assert not (root / "client/usr/lib64/shared.so").exists()
+        assert os.stat(root / "shared-client-essential/usr/bin/client-helper").st_ino == os.stat(root / "shared-client-essential/usr/bin/essential-helper").st_ino
     print("Role packaging fixture passed: disjoint files, hardlinks, symlinks, sticky modes, ownership and deterministic tar" + (
         "; set-id modes preserved" if set_id_supported else "; host stripped set-id source modes before copying"
     ))

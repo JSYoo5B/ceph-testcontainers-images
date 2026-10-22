@@ -1,9 +1,8 @@
 #!/bin/sh
 # Quick check of the image requirements. No build metadata, package manager or
-# Python is needed for non-control roles. Run only in a disposable container as root.
+# Python probes run only in roles that provide the interpreter. Run only in a disposable container as root.
 set -u
 role=${1:?role required}
-contract=${2:-legacy}
 failed=0
 work=/tmp/ceph-image-check-$$
 
@@ -80,7 +79,6 @@ core=false
 client=false
 cache=false
 fsmirror=false
-control=false
 osd=false
 rgw=false
 mds=false
@@ -89,11 +87,8 @@ case "$role" in
     client) client=true ;;
     cephfs) mds=true; fsmirror=true ;;
     rbd-aux) cache=true ;;
-    control) control=true ;;
-    osd) osd=true ;;
     rgw) rgw=true ;;
-    mds) mds=true ;;
-    all) control=true; osd=true; rgw=true; mds=true ;;
+    all) core=true; client=true; cache=true; fsmirror=true; osd=true; rgw=true; mds=true ;;
     *) exit 2 ;;
 esac
 
@@ -137,20 +132,20 @@ pgrep_inspection() {
         return 1
     fi
 }
-if "$control" || "$core" || "$client" || "$cache" || "$fsmirror" || { "$rgw" && test "$contract" = roles-v2; }; then
+if "$core" || "$client" || "$cache" || "$fsmirror" || "$rgw"; then
     binaries="ceph"
-    if "$control" || "$core"; then binaries="$binaries ceph-mon ceph-mgr ceph-authtool monmaptool"; fi
-    if "$control" || "$client" || "$cache"; then binaries="$binaries rados rbd"; fi
+    if "$core"; then binaries="$binaries ceph-mon ceph-mgr ceph-authtool monmaptool"; fi
+    if "$client" || "$cache"; then binaries="$binaries rados rbd"; fi
     for binary in $binaries; do
         check "version:$binary" version "$binary"
     done
     check path:python3 external_command python3
     check python-cli python3 -c 'import rados, ceph_argparse, ceph_daemon'
-    if "$control" || "$client"; then
+    if "$client"; then
         check python-bindings python3 -c 'import rados, rbd, cephfs, ceph_argparse, ceph_daemon'
     fi
     if "$cache"; then check python-rbd python3 -c 'import rados,rbd'; fi
-    if { "$client" || "$control"; } && test "$contract" = roles-v2; then
+    if "$client"; then
     map_tools_roundtrip() {
         python3 - "$work" <<'MAPTOOLS'
 from pathlib import Path
@@ -181,8 +176,8 @@ MAPTOOLS
     check path:osdmaptool external_command osdmaptool
     check map-tools-roundtrip map_tools_roundtrip
     fi
-    if "$control" || "$client" || "$cache"; then
-    if "$control" || "$client"; then
+    if "$client" || "$cache"; then
+    if "$client"; then
     check path:cryptsetup external_command cryptsetup
     if external_command cryptsetup; then
         check library-load:cryptsetup-executable cryptsetup --version
@@ -238,7 +233,7 @@ for name, (fallback, symbols) in libraries.items():
         result('library-load:' + name, True, 'loading_failure')
 # librbd loads a plugin by name from the plugin directory, so the parent
 # cache client needs that file and its dependencies, not only librbd.
-if sys.argv[1] in ('control','all','rbd-aux'):
+if sys.argv[1] in ('all','rbd-aux'):
     config_program = 'ceph-conf' if sys.argv[1] == 'rbd-aux' else 'ceph-mgr'
     plugin_dir = subprocess.run([config_program, '--show-config-value', 'plugin_dir'],
                                 capture_output=True, text=True).stdout.strip()
@@ -272,21 +267,19 @@ if sys.argv[1] != 'rbd-aux':
 sys.exit(1 if failed else 0)
 PY
     fi
-    if "$control" || "$core"; then
+    if "$core"; then
     if "$core"; then
         check path:pgrep external_command pgrep
         check process-inspection:pgrep pgrep_inspection
     fi
     mgr_modules() {
         module_path=$(ceph-mgr --show-config-value mgr_module_path) || return 1
-        python3 - "$module_path" "$contract" <<'PY'
+        python3 - "$module_path" <<'PY'
 from pathlib import Path
 import sys
 root = Path(sys.argv[1])
 assert (root / "mgr_module.py").is_file(), "missing mgr_module.py"
-modules = ("volumes", "rbd_support", "mirroring")
-if sys.argv[2] == "roles-v2":
-    modules += ("snap_schedule",)
+modules = ("volumes", "rbd_support", "mirroring", "snap_schedule")
 for name in modules:
     assert (root / name / "module.py").is_file(), "missing MGR module: " + name
 PY
@@ -299,9 +292,8 @@ PY
         --addv a '[v2:127.0.0.1:3300,v1:127.0.0.1:6789]' "$work/monmap"
     fi
     binaries=""
-    if "$control"; then binaries="rbd-mirror cephfs-mirror radosgw-admin ceph-immutable-object-cache"; fi
-    if "$cache"; then binaries="rbd-mirror ceph-immutable-object-cache"; fi
-    if "$fsmirror"; then binaries="cephfs-mirror"; fi
+    if "$cache"; then binaries="$binaries rbd-mirror ceph-immutable-object-cache"; fi
+    if "$fsmirror"; then binaries="$binaries cephfs-mirror"; fi
     for binary in $binaries; do
         check "version:$binary" version "$binary"
     done

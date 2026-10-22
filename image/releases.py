@@ -74,6 +74,18 @@ def build_args(name, distribution):
             "CEPH_MGR_PACKAGES": values["mgr_packages"]}
 
 
+def published_role(name, variant, role):
+    import json
+    import re
+    from pathlib import Path
+    release(name)
+    data = json.loads((Path(__file__).resolve().parents[1]/'.github/ceph-role-images.json').read_text())
+    digest = data['images'][name][variant][role]
+    if not re.fullmatch(r'sha256:[0-9a-f]{64}', digest):
+        raise ValueError('Invalid published role digest')
+    return 'ghcr.io/jsyoo5b/ceph-testcontainers-images@'+digest
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
@@ -83,11 +95,17 @@ def main(argv=None):
     arguments = commands.add_parser("build-args", help="Print docker --build-arg options")
     arguments.add_argument("release")
     arguments.add_argument("distribution", choices=DISTRIBUTIONS)
+    role = commands.add_parser("role", help="Print an immutable published role reference")
+    role.add_argument("release")
+    role.add_argument("variant", choices=("official","debian","ubuntu"))
+    role.add_argument("role", choices=("essential","client","cephfs","rbd-aux","rgw","all"))
     args = parser.parse_args(argv)
     if args.command == "list":
         print("\n".join([DEFAULT] + [name for name in RELEASES if name != DEFAULT]))
     elif args.command == "official":
         print(release(args.release)["official"])
+    elif args.command == "role":
+        print(published_role(args.release,args.variant,args.role))
     else:
         print(" ".join("--build-arg " + key + "=" + value for key, value in build_args(args.release, args.distribution).items() if value))
     return 0

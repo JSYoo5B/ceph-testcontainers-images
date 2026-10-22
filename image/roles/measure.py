@@ -40,7 +40,7 @@ def main():
     for item in args.image:
         role,sep,ref = item.partition('=')
         if not sep or role not in contract.ROLES+('all',) or role in refs or not ref:
-            parser.error('expected distinct ROLE=REF for roles-v2')
+            parser.error('expected distinct ROLE=REF for roles')
         refs[role] = ref
     if args.baseline:
         refs['baseline'] = args.baseline

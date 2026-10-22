@@ -1,0 +1,35 @@
+name: image checks
+on:
+  workflow_call:
+    inputs:
+      matrix:
+        type: string
+        required: true
+      ref:
+        type: string
+        required: true
+permissions:
+  contents: read
+jobs:
+  native:
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(inputs.matrix) }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+          persist-credentials: false
+      - name: Check the requested native cohort
+        run: >-
+          python3 image/ci.py --release ${{ matrix.release }} --variant ${{ matrix.variant }}
+          --architecture ${{ matrix.architecture }} --scope ${{ matrix.scope }}
+          --output "$RUNNER_TEMP/images"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: images-${{ matrix.release }}-${{ matrix.variant }}-${{ matrix.architecture }}
+          path: ${{ runner.temp }}/images
+          retention-days: 14

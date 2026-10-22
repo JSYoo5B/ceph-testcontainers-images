@@ -17,10 +17,10 @@ import releases
 REGISTRY = "ghcr.io/jsyoo5b/ceph-testcontainers-images"
 VARIANTS = ("official", "debian", "ubuntu")
 ARCHITECTURES = ("amd64", "arm64")
-CONTRACT = "legacy"
+CONTRACT = "roles"
 
 def active_roles():
-    return check.contract.ROLES + ("all",) if CONTRACT == "roles-v2" else check.ROLES
+    return check.ROLES
 
 DIGEST = re.compile(r"sha256:[0-9a-f]{64}")
 
@@ -58,7 +58,7 @@ def raw_manifest(reference):
 
 
 def release_tag(release, variant, role, architecture=None):
-    return REGISTRY + ":" + ("roles-v2-" if CONTRACT == "roles-v2" else "") + variant + "-" + release + "-" + role + (
+    return REGISTRY + ":" + variant + "-" + release + "-" + role + (
         "-linux-" + architecture if architecture else "")
 
 
@@ -73,7 +73,7 @@ def previous_manifest(tag):
 
 
 def validate_report(report, architecture, release):
-    require(report.get("contract", "legacy") == CONTRACT, "Image contract differs from publication namespace")
+    require(report.get("contract") == CONTRACT, "Image contract differs from publication namespace")
     require(report.get("status") == "passed" and report.get("level") == "full",
             "Publishing requires a passing full check")
     require(report.get("preflight") == "passed" and report.get("scenarios") == "passed",
@@ -143,7 +143,7 @@ def stage(args):
               "report_sha256": hashlib.sha256(report_bytes).hexdigest(), "contract": CONTRACT, "images": {}}
     save(args.output, result)
     for role, entry in prepared.items():
-        tag = REGISTRY + ":ci-" + ("roles-v2-" if CONTRACT == "roles-v2" else "") + args.run_id + "-" + args.variant + "-" + args.release + "-" + role + "-linux-" + args.architecture
+        tag = REGISTRY + ":ci-" + args.run_id + "-" + args.variant + "-" + args.release + "-" + role + "-linux-" + args.architecture
         run(["docker", "tag", entry["image_id"], tag])
         (args.output.parent / ("push-" + role + ".log")).write_text(run(["docker", "push", tag]))
         entry.update(digest=manifest(tag)["digest"], candidate_tag=tag)
@@ -164,7 +164,7 @@ def collect_candidates(directory, revision, run_id, release):
         require(key not in result, "Duplicate candidate platform")
         require(candidate.get("status") == "passed" and candidate.get("revision") == revision
                 and candidate.get("run_id") == run_id, "Candidates must pass in the same CI run and revision")
-        require(candidate.get("contract", "legacy") == CONTRACT, "Candidate contract differs")
+        require(candidate.get("contract") == CONTRACT, "Candidate contract differs")
         require(candidate.get("release") == release, "Candidates must be built for release " + release)
         require(set(candidate.get("images", {})) == set(active_roles()), "Incomplete candidate roles")
         for role, entry in candidate["images"].items():
@@ -231,9 +231,9 @@ def extension_tag(extension, architecture=None):
 
 def extension_targets():
     """The targets every published helper must pass: the official image and the
-    published OSD role image of every release."""
+    published essential role image of every release."""
     return {reference for release, value in releases.RELEASES.items()
-            for reference in (value["official"], release_tag(release, "official", "osd"))}
+            for reference in (value["official"], releases.published_role(release, "official", "essential"))}
 
 
 def validate_extension_report(report, extension, architecture):
@@ -373,10 +373,16 @@ def promote_extension(args):
 
 
 def health(args):
-    """Every release tag must list both platforms, and each platform image must
-    still exist; deleting a platform tag leaves a release tag that cannot pull."""
-    check_tags([release_tag(release, variant, role)
-                for release in args.releases for variant in VARIANTS for role in active_roles()])
+    """Check both native platforms of the selected published role indexes."""
+    promotion = getattr(args, 'promotion', None)
+    if promotion:
+        receipt = json.loads(promotion.read_text())
+        require(receipt.get('status') == 'passed', 'Promotion must have completed')
+        tags = list(receipt['indexes'])
+    else:
+        tags = [releases.published_role(release, variant, role)
+                for release in args.releases for variant in VARIANTS for role in active_roles()]
+    check_tags(tags)
 
 
 def extension_health(args):
@@ -411,7 +417,6 @@ def check_tags(tags):
 
 
 def main():
-    global CONTRACT
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
     upload = commands.add_parser("stage")
@@ -422,7 +427,6 @@ def main():
     promote_parser.add_argument("--candidates", type=Path, required=True)
     promote_parser.add_argument("--github-output", type=Path)
     for command in (upload, promote_parser):
-        command.add_argument("--contract", choices=("legacy", "roles-v2"), default="legacy")
         command.add_argument("--release", choices=tuple(releases.RELEASES), default=releases.DEFAULT)
         command.add_argument("--revision", required=True)
         command.add_argument("--run-id", required=True)
@@ -439,11 +443,10 @@ def main():
         command.add_argument("--run-id", required=True)
         command.add_argument("--output", type=Path, required=True)
     health_parser = commands.add_parser("health", help="Check that every published platform image still exists")
-    health_parser.add_argument("--contract", choices=("legacy", "roles-v2"), default="legacy")
+    health_parser.add_argument("--promotion", type=Path, help="Check the tags of this completed promotion")
     health_parser.add_argument("--release", dest="releases", action="append", choices=tuple(releases.RELEASES))
     commands.add_parser("extension-health", help="Check that every published helper platform image still exists")
     args = parser.parse_args()
-    CONTRACT = getattr(args, "contract", "legacy")
     if args.command == "health":
         args.releases = args.releases or list(releases.RELEASES)
         health(args)

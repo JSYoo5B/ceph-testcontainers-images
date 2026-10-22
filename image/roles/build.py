@@ -18,7 +18,9 @@ import unicodedata
 import uuid
 
 
-ROLES = ("control", "osd", "rgw", "mds", "all")
+import contract
+
+ROLES = contract.ROLES + ("all",)
 HERE = Path(__file__).resolve().parent
 PROJECT_URL = "https://github.com/JSYoo5B/ceph-testcontainers-images"
 NOTICE = "/usr/share/ceph-testcontainers/SOURCES.txt"
@@ -216,7 +218,6 @@ def check_layers(plan, images):
 
 def arguments(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--contract", choices=("legacy", "roles-v2"), default="legacy")
     parser.add_argument("--package-backend", choices=("rpm", "deb", "apk"), default="rpm")
     parser.add_argument("--source-runtime-env", action="store_true", help="Retain source Ceph runtime environment for extracted distro images")
     parser.add_argument("--source-image", required=True, help="Official Ceph image tag or immutable digest")
@@ -243,19 +244,13 @@ def arguments(argv=None):
 def check_command(tags, level, output):
     """image/check.py invocation for the built mixed roles and all image."""
     command = [sys.executable, str(PROJECT / "image" / "check.py"), "--output-dir", str(output)]
-    if "essential" in tags:
-        command += ["--contract", "roles-v2"]
     for role in ROLES:
         command += ["--image", role + "=" + tags[role]]
     return command + (["--full"] if level == "full" else [])
 
 
 def main():
-    global ROLES
     args = arguments()
-    if args.contract == "roles-v2":
-        import contract
-        ROLES = contract.ROLES + ("all",)
     if not shutil.which("docker"):
         raise BuildError("docker is required")
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
@@ -290,13 +285,13 @@ def main():
             context.mkdir()
             scripts = work / "ceph-roles"
             scripts.mkdir()
-            for name in ("assemble.py", "analyze.py", "package_roles.py", "package_v2.py", "contract.py", "backend.py"):
+            for name in ("assemble.py", "analyze.py", "package_roles.py", "runtime.py", "contract.py", "backend.py"):
                 shutil.copy2(HERE / name, scripts / name)
             create = ["docker", "create", "--network=none", "--platform", platform,
                       "--label", "io.ceph-testcontainers.role-build=" + timestamp,
                       "-e", "SOURCE_IMAGE=" + immutable, "-e", "SOURCE_IMAGE_ID=" + source["Id"]]
             create += ["-e", "PACKAGE_BACKEND=" + args.package_backend]
-            script = "package_v2.py" if args.contract == "roles-v2" else "package_roles.py"
+            script = "runtime.py"
             create += ["--entrypoint", "python3", immutable, "/tmp/ceph-roles/" + script]
             container_id = run(create, capture=True)
             run(["docker", "cp", str(scripts), container_id + ":/tmp/ceph-roles"], log=output / "source-copy.log")
@@ -312,7 +307,7 @@ def main():
             release = re.match(r"ceph version (\S+)", plan["ceph_version"])
             if not release:
                 raise BuildError("Unexpected Ceph version output: " + plan["ceph_version"])
-            tag = args.tag or ("roles-v2-" if args.contract == "roles-v2" else "") + "official-" + release.group(1)
+            tag = args.tag or "official-" + release.group(1)
             if not re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9_.-]{0,119}", tag):
                 raise BuildError("Invalid output tag prefix; specify --tag")
             tags = {role: "%s:%s-%s" % (args.repository, tag, role) for role in ROLES}
@@ -362,7 +357,7 @@ def main():
                 print("Smoke testing " + role, flush=True)
                 run(["docker", "run", "--rm", "-i", "--network=none", "--platform", platform,
                      "--entrypoint", "/bin/sh", tags[role], "-s", "--", role],
-                    stdin=HERE / ("smoke-v2.sh" if args.contract == "roles-v2" else "smoke-role.sh"), log=output / ("smoke-" + role + ".log"))
+                    stdin=HERE / "smoke-role.sh", log=output / ("smoke-" + role + ".log"))
             report["checks"]["smoke"] = "passed"
         if args.check:
             print("Running the " + args.check + " image check...", flush=True)

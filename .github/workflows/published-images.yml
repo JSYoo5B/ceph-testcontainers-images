@@ -83,7 +83,7 @@ jobs:
           images = json.loads(os.environ['PUBLISHED_IMAGES'])[os.environ['IMAGE_RELEASE']]
           variants = {'official', 'debian', 'ubuntu'}
           architectures = {'amd64', 'arm64'}
-          roles = ('control', 'osd', 'rgw', 'mds', 'all')
+          roles = ('essential', 'client', 'cephfs', 'rbd-aux', 'rgw', 'all')
           if set(images) != variants:
               raise ValueError('Provide all three image variants')
           for variant in variants:
@@ -92,7 +92,7 @@ jobs:
               for architecture in architectures:
                   entries = images[variant][architecture]
                   if set(entries) != set(roles):
-                      raise ValueError('Provide all five roles for every platform')
+                      raise ValueError('Provide all six images for every platform')
                   if any(not isinstance(digest, str) or not re.fullmatch(r'sha256:[0-9a-f]{64}', digest)
                          for digest in entries.values()):
                       raise ValueError('Image references must be immutable sha256 digests')

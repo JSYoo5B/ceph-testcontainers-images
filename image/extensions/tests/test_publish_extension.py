@@ -55,13 +55,13 @@ class ExtensionPublicationTests(unittest.TestCase):
         value = copy.deepcopy(good); value["kernel"]["status"] = "failed"; bad.append(value)
         value = copy.deepcopy(good); value["kernel"]["cleanup"]["status"] = "failed"; bad.append(value)
         value = copy.deepcopy(good); del value["targets"][publish.releases.RELEASES["19.2.5"]["official"]]; bad.append(value)
-        value = copy.deepcopy(good); del value["targets"][publish.release_tag("20.2.4", "official", "osd")]; bad.append(value)
+        value = copy.deepcopy(good); del value["targets"][publish.releases.published_role("20.2.4", "official", "essential")]; bad.append(value)
         value = copy.deepcopy(good)
         next(iter(value["targets"].values()))["cleanup"]["leftovers"] = ["ceph-extension-check-x"]; bad.append(value)
         # Every selector profile of the contract, in every release target.
         value = copy.deepcopy(good); del value["selectors"]; bad.append(value)
         value = copy.deepcopy(good); del value["selectors"]["multi-peer-u32"]; bad.append(value)
-        value = copy.deepcopy(good); del value["selectors"]["ipv6-tcp-u32"][publish.release_tag("19.2.5", "official", "osd")]
+        value = copy.deepcopy(good); del value["selectors"]["ipv6-tcp-u32"][publish.releases.published_role("19.2.5", "official", "essential")]
         bad.append(value)
         value = copy.deepcopy(good)
         next(iter(value["selectors"]["ipv4-tcp-u32"].values()))["status"] = "failed"; bad.append(value)
@@ -72,7 +72,7 @@ class ExtensionPublicationTests(unittest.TestCase):
             value = copy.deepcopy(good); del value[key]; bad.append(value)
             value = copy.deepcopy(good); value[key]["scope"] = "parser"; bad.append(value)
             value = copy.deepcopy(good); value[key]["status"] = "failed"; bad.append(value)
-            value = copy.deepcopy(good); del value[key]["targets"][publish.release_tag("20.2.4", "official", "osd")]
+            value = copy.deepcopy(good); del value[key]["targets"][publish.releases.published_role("20.2.4", "official", "essential")]
             bad.append(value)
             value = copy.deepcopy(good)
             next(iter(value[key]["targets"].values()))["cleanup"]["leftovers"] = ["x"]; bad.append(value)
@@ -119,7 +119,7 @@ class ExtensionPublicationTests(unittest.TestCase):
         with mock.patch.object(publish, "raw_manifest", return_value={"config": {"digest": digest(60)}}), \
                 mock.patch.object(publish, "run", return_value=json.dumps(image)):
             publish.verify_image(entry)
-        image["config"]["Labels"] = {"io.ceph-testcontainers.role": "control"}
+        image["config"]["Labels"] = {"io.ceph-testcontainers.role": "essential"}
         with mock.patch.object(publish, "raw_manifest", return_value={"config": {"digest": digest(60)}}), \
                 mock.patch.object(publish, "run", return_value=json.dumps(image)), self.assertRaises(publish.PublishError):
             publish.verify_image(entry)
@@ -179,7 +179,8 @@ class ExtensionPublicationTests(unittest.TestCase):
 sys.path.insert(0, sys.argv[1])
 from types import SimpleNamespace
 import publish
-publish.raw_manifest = lambda reference: {"config": {}} if "@" in reference else {"manifests": [
+indexes = {publish.releases.published_role(r,v,k) for r in publish.releases.RELEASES for v in publish.VARIANTS for k in publish.active_roles()}
+publish.raw_manifest = lambda reference: {"config": {}} if reference not in indexes else {"manifests": [
     {"platform": {"os": "linux", "architecture": a}, "digest": "sha256:" + "1" * 64} for a in ("amd64", "arm64")]}
 publish.health(SimpleNamespace(releases=list(publish.releases.RELEASES)))
 print("extension_check" in sys.modules)

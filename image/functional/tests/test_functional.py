@@ -52,13 +52,13 @@ class PayloadTests(unittest.TestCase):
 
 class RunnerTests(unittest.TestCase):
     def test_all_image_fills_unset_roles(self):
-        self.assertEqual(run.images_from(["all=a", "osd=b"]),
-                         {"control": "a", "osd": "b", "rgw": "a", "mds": "a"})
+        self.assertEqual(run.images_from(["all=a", "essential=b"]),
+                         {role: "b" if role == "essential" else "a" for role in suite.ROLES})
 
     def test_missing_roles_and_unknown_scenarios_fail_before_docker(self):
         with tempfile.TemporaryDirectory() as temporary:
             with self.assertRaises(ValueError):
-                suite.run({"control": "a"}, ["rbd"], Path(temporary))
+                suite.run({"essential": "a"}, ["rbd"], Path(temporary))
             with self.assertRaises(ValueError):
                 suite.run({role: "a" for role in suite.ROLES}, ["unknown"], Path(temporary))
 

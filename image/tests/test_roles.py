@@ -30,34 +30,31 @@ class RoleSelectionTests(unittest.TestCase):
 
     def test_ordinary_rbd_has_no_auxiliary_or_rgw_requirement(self):
         images = {'essential':'core', 'client':'toolkit'}
-        self.assertEqual(check.runtime_sets(images,['rbd'],'roles-v2'), {'mixed':images})
+        self.assertEqual(check.runtime_sets(images,['rbd']), {'mixed':images})
         with self.assertRaises(check.CheckError):
-            check.runtime_sets({'essential':'core'},['rbd'],'roles-v2')
+            check.runtime_sets({'essential':'core'},['rbd'])
 
     def test_rgw_does_not_inherit_generic_client(self):
         images = {'essential':'core', 'rgw':'gateway-and-admin'}
-        self.assertEqual(check.runtime_sets(images,['rgw-multisite'],'roles-v2'), {'mixed':images})
+        self.assertEqual(check.runtime_sets(images,['rgw-multisite']), {'mixed':images})
 
     def test_all_and_mixed_are_independent(self):
         images = {r:r for r in contract.ROLES}
         images['all'] = 'complete'
-        sets = check.runtime_sets(images,None,'roles-v2')
+        sets = check.runtime_sets(images,None)
         self.assertEqual(sets['mixed'],{r:r for r in contract.ROLES})
         self.assertEqual(sets['all'],{r:'complete' for r in contract.ROLES})
         with self.assertRaises(check.CheckError):
-            check.runtime_sets({'essential':'core','control':'old'},['rbd'],'roles-v2')
+            check.runtime_sets({'essential':'core','control':'old'},['rbd'])
 
     def test_every_existing_scenario_has_an_explicit_requirement_set(self):
         self.assertEqual(set(contract.SCENARIOS),set(check.suite.SCENARIOS))
         self.assertIn('rbd-aux',contract.required(['rbd-snapshot-mirror']))
         self.assertNotIn('rbd-aux',contract.required(['rbd-backup']))
 
-    def test_v2_publication_cannot_overwrite_legacy_tags(self):
-        with patch.object(publish,'CONTRACT','roles-v2'):
-            self.assertEqual(publish.active_roles(),contract.ROLES+('all',))
-            self.assertIn(':roles-v2-official-19.2.5-all',publish.release_tag('19.2.5','official','all'))
-            with self.assertRaises(publish.PublishError):
-                publish.validate_report({'contract':'legacy'},'amd64','19.2.5')
+    def test_publication_uses_the_default_role_tags(self):
+        self.assertEqual(publish.active_roles(),contract.ROLES+('all',))
+        self.assertEqual(publish.release_tag('19.2.5','official','all'),publish.REGISTRY+':official-19.2.5-all')
 
 class VersionDiagnosticsTests(unittest.TestCase):
     def test_python_diagnostics_do_not_corrupt_version_records(self):

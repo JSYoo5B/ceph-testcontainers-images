@@ -1,40 +1,39 @@
-"""Check that ordinary production and extension CI use dependency roles."""
+"""Keep ordinary CI bounded and review-selected image execution read-only."""
 from pathlib import Path
 import unittest
 
 ROOT = Path(__file__).resolve().parents[2]
 
-
 class ProductionWorkflowTests(unittest.TestCase):
-    def test_old_role_builds_require_manual_opt_in(self):
-        workflow = (ROOT / '.github/workflows/test.yml').read_text()
-        self.assertIn('legacy_images:\n', workflow)
-        self.assertIn("if: github.event_name == 'workflow_dispatch' && inputs.legacy_images", workflow)
-        # All old image jobs depend on this gated release planner. Extensions
-        # remain independent so they can run without an obsolete image build.
-        for name in ('official-image', 'extracted-images', 'distribution-images'):
-            self.assertIn('  ' + name + ':\n    needs: releases\n', workflow)
-        self.assertIn('  netem-extension:\n    permissions:', workflow)
+    def test_default_checker_has_no_image_build_matrix(self):
+        workflow = (ROOT/'.github/workflows/test.yml').read_text()
+        self.assertIn('  unit:',workflow)
+        self.assertIn('  netem-extension:',workflow)
+        for job in ('official-image:', 'extracted-images:', 'distribution-images:', 'legacy_images:'):
+            self.assertNotIn(job,workflow)
 
-    def test_extension_checks_the_current_osd_runtime(self):
-        for name in ('test.yml', 'published-extension.yml'):
-            workflow = (ROOT / '.github/workflows' / name).read_text()
-            self.assertIn('roles-v2-official-$release-essential', workflow)
-            self.assertNotIn(':official-$release-osd', workflow)
+    def test_images_are_explicit_and_publication_keeps_full_checks(self):
+        workflow=(ROOT/'.github/workflows/images.yml').read_text()
+        self.assertIn('  workflow_dispatch:',workflow)
+        self.assertNotIn('  pull_request:',workflow)
+        self.assertNotIn('  push:',workflow)
+        self.assertIn('--scope full',workflow)
+        self.assertIn('image/publish.py stage',workflow)
+        self.assertIn('needs: [unit, build]',workflow)
+        self.assertIn('if: github.event_name ==',workflow)
 
-    def test_health_and_production_use_the_dependency_contract(self):
-        health = (ROOT / '.github/workflows/published-health.yml').read_text()
-        self.assertIn('image/publish.py health --contract roles-v2', health)
-        production = (ROOT / '.github/workflows/roles-v2.yml').read_text()
-        self.assertIn('  pull_request:', production)
-        self.assertIn('  push:', production)
-        self.assertIn('variant: [official, debian, ubuntu]', production)
-        self.assertIn('architecture: [amd64, arm64]', production)
-        self.assertIn('image/check.py --contract roles-v2', production)
-        self.assertIn('image/publish.py stage --contract roles-v2', production)
-        self.assertIn('image/publish.py promote --contract roles-v2', production)
-        self.assertIn('needs: [unit, build]', production)
+    def test_comment_checks_cannot_publish_and_pin_the_requested_head(self):
+        workflow=(ROOT/'.github/workflows/image-checks.yml').read_text()
+        self.assertIn('ref: ${{ inputs.ref }}',workflow)
+        self.assertIn('persist-credentials: false',workflow)
+        self.assertNotIn('packages: write',workflow)
+        self.assertNotIn('publish.py',workflow)
+        command=(ROOT/'.github/workflows/ci-command.yml').read_text()
+        self.assertIn('issue_comment:',command)
+        self.assertIn('HEAD_SHA: ${{ needs.command.outputs.sha }}',command)
+        self.assertNotIn('pull-requests: write',command)
 
-
-if __name__ == '__main__':
-    unittest.main()
+    def test_health_and_extension_use_immutable_published_roles(self):
+        for name in ('test.yml','published-extension.yml'):
+            self.assertIn('image/releases.py role',(ROOT/'.github/workflows'/name).read_text())
+        self.assertIn('image/publish.py health',(ROOT/'.github/workflows/published-health.yml').read_text())

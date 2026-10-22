@@ -2,13 +2,10 @@
 
 ## Purpose
 
-The official Ceph image is the default for Ceph testcontainers modules, and every baseline module feature must work with it unmodified:
-
-```text
-quay.io/ceph/ceph:v20.2.4@sha256:6bb1c8a42fbc0bf87938946990b65174466997bc11c31eb5a323225a779fd8f9
-```
-
-The same requirements apply to every release in [image/releases.py](../image/releases.py); the official image of each listed release must meet them unmodified.
+The role images are the default runtime for Ceph testcontainers. The upstream
+official image remains a complete aggregate compatibility reference for every
+release in [image/releases.py](../image/releases.py). All baseline features
+must work with that image unmodified.
 
 Opt-in extension features, which a caller selects explicitly, may use an additional extension image with tools that the official image does not ship. They never change these requirements; see [Extension Images](EXTENSIONS.md).
 
@@ -28,17 +25,18 @@ The testcontainers module supplies all cluster setup at run time: configuration,
 
 ## Roles
 
-Requirements are split by role so that each container pulls only what it runs. A role describes the components an image must contain, not the number of containers: MON and MGR, for example, run as separate containers from the same `control` image.
+A role describes runtime contents, not container count. MON, MGR and OSD
+run in separate containers from essential. Optional features select their
+explicit role; only an explicit all selection supplies every role.
 
-| Role | Purpose |
+| Role | Required capability |
 | --- | --- |
-| `control` | MON, MGR, CLI clients, mirror daemons and client containers |
-| `osd` | OSD daemons, one container per OSD |
-| `rgw` | RGW gateways |
-| `mds` | CephFS metadata servers |
-| `all` | Every component of the four roles; one image reused by all containers, like the official image |
-
-Roles without their own image fall back to the `control` image. A cluster always needs `control` and `osd`; `rgw` and `mds` are required only when RGW or CephFS is started.
+| essential | MON, MGR, OSD; ceph CLI, keyring/monmap bootstrap, process inspection, release always-on MGR modules and volumes/rbd_support/mirroring/snap_schedule with dependencies; BlueStore, rbd/rgw/cephfs/hello/lock classes, compressor and erasure-code plugins |
+| client | ceph/rados/rbd and offline CRUSH/OSD map diagnostics (`crushtool`, `osdmaptool`); Python rados/rbd/cephfs, ceph_argparse/ceph_daemon; libradosstriper, librbd LUKS1/LUKS2, libcryptsetup and cryptsetup executable; command/process utilities |
+| cephfs | MDS and cephfs-mirror, their libraries and local ceph CLI |
+| rbd-aux | rbd-mirror and cache-capable client runtime: rados/rbd CLI/bindings, ceph-immutable-object-cache and the librbd parent_cache plugin, local ceph CLI |
+| rgw | RGW Beast/TLS, radosgw-admin and readlink; ceph/Python runtime for independently invoked per-zone setup containers |
+| all | Union of the five responsibilities |
 
 ## Common requirements
 
@@ -56,23 +54,12 @@ These apply to every role. The official image meets all of them.
 
 ## Role requirements
 
-| Role | Executables on `PATH` | Additional runtime dependencies |
-| --- | --- | --- |
-| `control` | `ceph-mon`, `ceph-mgr`, `ceph`, `ceph-authtool`, `monmaptool`, `rados` supporting `--striper`, `rbd`, `cryptsetup`, `rbd-mirror`, `cephfs-mirror`, `radosgw-admin`, `ceph-immutable-object-cache`, `python3`, `pgrep` | Python modules `rados`, `rbd`, `cephfs`, `ceph_argparse`, `ceph_daemon`; librbd LUKS1/LUKS2 encryption and the librbd `parent_cache` plugin, libcryptsetup and libradosstriper with their runtime dependencies; the release's always-on MGR modules plus `volumes`, `rbd_support` and `mirroring`, each with its Python dependencies |
-| `osd` | `ceph-osd` | BlueStore; `rbd`, `rgw`, `cephfs`, `hello` and `lock` object classes with their runtime dependencies; compressor and erasure-code plugins |
-| `rgw` | `radosgw`, `radosgw-admin`, `readlink` | Beast HTTP frontend with TLS and the RGW shared libraries |
-| `mds` | `ceph-mds` | MDS shared libraries |
-| `all` | Union of the four roles | Union of the four roles |
-
-Python, `pgrep`, the CLI tools of other roles, compilers and development headers are not required in `osd`, `rgw` or `mds`.
-
-`all` includes every control and OSD requirement. `cryptsetup` must be an executable
-on `PATH`: libcryptsetup alone cannot perform the external passphrase-change
-command. The `hello` and `lock` classes belong to OSD; their clients belong to
-control. Striped I/O uses libradosstriper and `lock`, without a separate
-`cls_striper`. Package names and distribution-specific library paths are not
-part of the contract. The system linker must resolve the required libraries
-and their dependencies; Ceph's effective `osd_class_dir` selects the classes.
+The [role capability table](ROLES.md) specifies executables, libraries and
+bindings. MGR modules and OSD classes/plugins remain inside essential.
+Client includes ordinary CLI/bindings, encryption/striper clients and offline
+map tools. The cache daemon, parent-cache plugin and consuming librbd stay
+together in rbd-aux. RGW administration belongs to rgw; CephFS daemons and
+mirror runtime belong to cephfs. No optional role falls back to essential.
 
 ## Where each component is used
 
@@ -81,33 +68,33 @@ The table lists what a testcontainers module does with each component. Rows mark
 | Component | Role | Used for |
 | --- | --- | --- |
 | `sh`, `mkdir`, `cp`, `cat`, `rm`, `awk` | common | Bootstrap scripts that write configuration, keyrings and daemon data |
-| `hostname -i` | `control` | MON bootstrap and MON join read the container address for the monmap |
+| `hostname -i` | `essential` | MON bootstrap and MON join read the container address for the monmap |
 | `test` | common | File and readiness checks executed directly in a running container |
-| `sleep infinity` | `control` | Entrypoint of client, CLI and tools containers that stay idle while commands are executed in them |
-| `ceph-mon`, `monmaptool` | `control` | Creating the initial monmap, starting MONs and adding or replacing MONs |
-| `ceph-authtool` | `control` | Generating and reading the admin, daemon and client keyrings |
-| `ceph-mgr` | `control` | Active and standby MGRs, health and placement group readiness |
-| `ceph` with `ceph_argparse`, `ceph_daemon`, Python `rados` | `control` | Every cluster command the module issues; the `ceph` CLI imports these modules |
-| `rados` and libradosstriper | `control` | RADOS object I/O, striped put/get/rm, pool inspection and CephFS data pool checks |
-| `rbd` | `control` | RBD images, snapshots, clones, namespaces, backup export and import, and RBD mirroring configuration |
-| Python `rados`/`rbd`, librbd encryption, `cryptsetup` | `control` | Userspace encrypted RBD creation/read and external LUKS passphrase changes on regular-file raw exports; RADOS compound class calls and locking |
-| Python `cephfs` | `control` | Userspace CephFS I/O helpers, such as directory pinning and clone identity checks |
-| `python3` | `control` | RGW HTTP and TLS readiness probes, S3, RBD and CephFS client helpers |
-| `ceph-immutable-object-cache`, librbd `parent_cache` plugin | `control` | The RBD immutable object cache: the daemon runs in a client container and caches parent-image objects of clones for librbd clients there that enable `rbd_parent_cache_enabled` |
-| `pgrep` | `control` | Process inspection in the control container: `pgrep -f` finds a running command by its command line, for example to confirm that a canceled `ceph` command no longer runs |
-| MGR always-on modules | `control` | Required for `HEALTH_OK`; a missing module or dependency raises a health error |
-| MGR `volumes` | `control` | CephFS filesystems, subvolumes, snapshots, clones, data pools and quiesce |
-| MGR `rbd_support` with Python `rbd` | `control` | RBD background tasks and mirror snapshot schedules |
-| MGR `mirroring` | `control` | CephFS snapshot mirroring peers and directory configuration |
-| `rbd-mirror` | `control` | RBD journal and snapshot mirroring daemon, started in its own container when RBD mirroring between clusters is requested |
-| `cephfs-mirror` | `control` | CephFS snapshot mirroring daemon, started in its own container when CephFS mirroring between clusters is requested |
-| `radosgw-admin` | `control` | RGW multisite realm, zonegroup, zone, period and sync policy management, executed from a client container |
-| `ceph-osd` with object classes and plugins | `osd` | OSDs; RBD, RGW and CephFS operations call the object classes inside the OSD, and pools load the compressor and erasure-code plugins |
-| OSD `hello` and `lock` object classes | `osd` | Built-in class requests and striper locking, with each class’s runtime dependencies |
+| `sleep infinity` | `essential` | Entrypoint of client, CLI and tools containers that stay idle while commands are executed in them |
+| `ceph-mon`, `monmaptool` | `essential` | Creating the initial monmap, starting MONs and adding or replacing MONs |
+| `ceph-authtool` | `essential` | Generating and reading the admin, daemon and client keyrings |
+| `ceph-mgr` | `essential` | Active and standby MGRs, health and placement group readiness |
+| `ceph` with `ceph_argparse`, `ceph_daemon`, Python `rados` | `client` | Every cluster command the module issues; the `ceph` CLI imports these modules |
+| `rados` and libradosstriper | `client` | RADOS object I/O, striped put/get/rm, pool inspection and CephFS data pool checks |
+| `rbd` | `client` | RBD images, snapshots, clones, namespaces, backup export and import, and RBD mirroring configuration |
+| Python `rados`/`rbd`, librbd encryption, `cryptsetup` | `client` | Userspace encrypted RBD creation/read and external LUKS passphrase changes on regular-file raw exports; RADOS compound class calls and locking |
+| Python `cephfs` | `client` | Userspace CephFS I/O helpers, such as directory pinning and clone identity checks |
+| `python3` | `essential/client` | RGW HTTP and TLS readiness probes, S3, RBD and CephFS client helpers |
+| `ceph-immutable-object-cache`, librbd `parent_cache` plugin | `rbd-aux` | The RBD immutable object cache: the daemon runs in a client container and caches parent-image objects of clones for librbd clients there that enable `rbd_parent_cache_enabled` |
+| `pgrep` | `essential/client` | Process inspection in the control container: `pgrep -f` finds a running command by its command line, for example to confirm that a canceled `ceph` command no longer runs |
+| MGR always-on modules | `essential` | Required for `HEALTH_OK`; a missing module or dependency raises a health error |
+| MGR `volumes` | `essential` | CephFS filesystems, subvolumes, snapshots, clones, data pools and quiesce |
+| MGR `rbd_support` with Python `rbd` | `essential` | RBD background tasks and mirror snapshot schedules |
+| MGR `mirroring` | `essential` | CephFS snapshot mirroring peers and directory configuration |
+| `rbd-mirror` | `rbd-aux` | RBD journal and snapshot mirroring daemon, started in its own container when RBD mirroring between clusters is requested |
+| `cephfs-mirror` | `cephfs` | CephFS snapshot mirroring daemon, started in its own container when CephFS mirroring between clusters is requested |
+| `radosgw-admin` | `rgw` | RGW multisite realm, zonegroup, zone, period and sync policy management, executed from a client container |
+| `ceph-osd` with object classes and plugins | `essential` | OSDs; RBD, RGW and CephFS operations call the object classes inside the OSD, and pools load the compressor and erasure-code plugins |
+| OSD `hello` and `lock` object classes | `essential` | Built-in class requests and striper locking, with each class’s runtime dependencies |
 | `radosgw` | `rgw` | RGW gateways for S3, Swift and STS |
 | `radosgw-admin` | `rgw` | RGW users, keys, buckets and placement created from the gateway container |
 | `readlink` | `rgw` | Confirming that the gateway owns the listening socket on host networks and TLS listeners |
-| `ceph-mds` | `mds` | Active, standby and standby-replay MDS daemons |
+| `ceph-mds` | `cephfs` | Active, standby and standby-replay MDS daemons |
 
 Daemons that are not requested are not started. An image with `rbd-mirror` does not start a mirror daemon in a single cluster, and an `all` image used for OSDs does not start MGR or RGW processes.
 

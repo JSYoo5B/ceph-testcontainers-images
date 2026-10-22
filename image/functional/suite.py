@@ -12,7 +12,7 @@ import contract
 
 from cluster import RGW_PORT, Cluster, ClusterError, Docker, DockerError, wait
 
-ROLES = ("control", "osd", "rgw", "mds")
+ROLES = contract.ROLES
 CLIENT_CAPABILITIES = ("rbd-encryption", "rados-object-class", "rados-striper")
 SINGLE_CLUSTER = ("cluster-lifecycle", "rbd", "cephfs", "rgw-s3") + CLIENT_CAPABILITIES
 MULTI_CLUSTER = ("rbd-backup", "rbd-snapshot-mirror", "cephfs-snapshot-mirror", "rgw-multisite")
@@ -259,13 +259,13 @@ def run(images, scenarios, output, log=print):
     Single-cluster scenarios share one cluster. Each multi-cluster scenario
     gets its own pair. Every container and network is removed afterwards.
     """
-    required = contract.required(scenarios) if "essential" in images else ROLES
-    missing = [role for role in required if role not in images]
-    if missing:
-        raise ValueError("Missing role images: " + ", ".join(missing))
     unknown = [name for name in scenarios if name not in SCENARIOS]
     if unknown:
         raise ValueError("Unknown scenarios: " + ", ".join(unknown))
+    required = contract.required(scenarios)
+    missing = [role for role in required if role not in images]
+    if missing:
+        raise ValueError("Missing role images: " + ", ".join(missing))
     output.mkdir(parents=True, exist_ok=True)
     docker = Docker(uuid.uuid4().hex, output / "docker.log")
     results = {}

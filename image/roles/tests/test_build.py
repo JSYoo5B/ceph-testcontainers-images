@@ -91,7 +91,7 @@ class RuntimeEnvironmentTests(unittest.TestCase):
         expected = 'ENV LITERAL="\\$HOME \\${UNSET:-fallback} \\$(touch marker) \\"quote\\" \\\\path"'
         self.assertIn(expected + '\nENV EMPTY=""\n', generated)
         self.assertEqual(generated.count("ENV LITERAL="), 1)
-        self.assertLess(generated.index(expected), generated.index("FROM common AS control"))
+        self.assertLess(generated.index(expected), generated.index("FROM common AS essential"))
         for role in build.ROLES:
             self.assertIn("FROM common AS " + role, generated)
         self.assertEqual(build.dockerfile(common_only_plan()), build.dockerfile(common_only_plan(), {}))
@@ -131,7 +131,7 @@ class RuntimeEnvironmentTests(unittest.TestCase):
             source = {"Id": "sha256:source", "Os": "linux", "Architecture": "arm64", "Size": 1}
             if image.startswith("source"):
                 return source
-            role = image.rsplit("-", 1)[1]; inspected.append(role)
+            role = next(role for role in sorted(build.ROLES,key=len,reverse=True) if image.endswith("-"+role)); inspected.append(role)
             actual = dict(env)
             if role == mismatch_role:
                 actual[next(iter(actual))] = "unexpected"
@@ -154,7 +154,7 @@ class RuntimeEnvironmentTests(unittest.TestCase):
                 build.main()
         return json.loads((output / "build-report.json").read_text()), inspected, commands
 
-    def test_build_report_binds_requested_and_inspected_values_for_all_five_roles(self):
+    def test_build_report_binds_requested_and_inspected_values_for_all_role_images(self):
         with tempfile.TemporaryDirectory() as directory:
             supplied = {"TCMALLOC_STACKTRACE_METHOD": "generic_fp", "LITERAL": '$HOME "quote" \\path', "EMPTY": ""}
             report, inspected, commands = self.execute_mocked_build(Path(directory), supplied)
@@ -179,8 +179,8 @@ class RuntimeEnvironmentTests(unittest.TestCase):
 
     def test_inspected_mismatch_fails_report_before_remaining_roles_or_smoke(self):
         with tempfile.TemporaryDirectory() as directory:
-            report, inspected, _ = self.execute_mocked_build(Path(directory), {"VALUE": "wanted"}, "osd")
-            self.assertEqual(inspected, ["control", "osd"])
+            report, inspected, _ = self.execute_mocked_build(Path(directory), {"VALUE": "wanted"}, "client")
+            self.assertEqual(inspected, ["essential", "client"])
             self.assertEqual(report["status"], "failed")
             self.assertEqual(report["checks"]["runtime_env"], "failed")
             self.assertEqual(report["runtime_env"], {"VALUE": "wanted"})

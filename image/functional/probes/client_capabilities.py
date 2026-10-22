@@ -1,4 +1,4 @@
-"""Userspace application compatibility probes; executed inside control images."""
+"""Userspace application compatibility probes; executed inside client images."""
 import contextlib
 import errno
 import hashlib
