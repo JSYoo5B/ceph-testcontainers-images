@@ -512,14 +512,18 @@ def capture_refusal(image, output):
         (output / "refusal.log").write_text(text)
         result.update(exit_code=code, state={key: state.get(key) for key in ("ExitCode", "Error", "StartedAt")})
         started = bool(state.get("StartedAt")) and not state.get("StartedAt", "").startswith("0001-")
-        refused = (started and not state.get("Error") and state.get("ExitCode") == 255 and code == 255
-                   and EXEC_REFUSED.fullmatch(text.strip()) is not None)
+        if not started or state.get("Error") or code != state.get("ExitCode"):
+            # Docker or the runtime never ran the container's process: the
+            # engine could not run the check, which says nothing about the image.
+            raise CheckError("The refusal container did not run: docker start exited %s, state %s: %s"
+                             % (code, json.dumps(result["state"]), text.strip()[:500]))
+        refused = state.get("ExitCode") == 255 and EXEC_REFUSED.fullmatch(text.strip()) is not None
         result["status"] = "passed" if refused else "failed"
         if not refused:
             result.update(failure_stage="quick:refused-without-net_raw", failure_kind="quick_failure")
     except check.CheckError as error:
-        # A container that Docker could not create or inspect says nothing
-        # about the image.
+        # A container that Docker could not create, start or inspect says
+        # nothing about the image.
         result.update(status="failed", error=str(error), failure_stage="quick:refused-without-net_raw",
                       failure_kind="checker_failure")
     finally:

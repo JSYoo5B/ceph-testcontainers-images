@@ -95,22 +95,57 @@ class CaptureQuickCheckTests(unittest.TestCase):
         self.assertFalse(any(arg.startswith("--cap-add") for arg in command))
         self.assertEqual(command[command.index("--entrypoint=tcpdump") + 2], "--version")
 
+    NEVER_STARTED = {"ExitCode": 0, "Error": "", "StartedAt": "0001-01-01T00:00:00Z"}
+    # Docker or the runtime never ran the process: these say nothing about the image.
+    SETUP_FAILURES = (
+        (125, "permission denied while trying to connect to the Docker daemon socket\n", NEVER_STARTED),
+        (126, "OCI runtime create failed: unable to start container process\n",
+         dict(NEVER_STARTED, ExitCode=126, Error="OCI runtime create failed")),
+        (255, "exec /usr/bin/tcpdump: operation not permitted\n", dict(NEVER_STARTED, ExitCode=255)),
+        (1, "Error response from daemon: container is marked for removal\n", STARTED))
+
     def test_only_the_runtime_exec_refusal_passes(self):
-        never_started = {"ExitCode": 0, "Error": "", "StartedAt": "0001-01-01T00:00:00Z"}
         for code, text, state in (
                 (0, "tcpdump version 4.99.3\n", dict(self.STARTED, ExitCode=0)),
                 # tcpdump itself ran and failed: its capability was granted.
                 (1, "tcpdump: Operation not permitted\n", dict(self.STARTED, ExitCode=1)),
                 (255, "tcpdump: lo: You don't have permission to perform this capture\n", None),
-                # Docker could not run the container: nothing about the image.
-                (125, "permission denied while trying to connect to the Docker daemon socket\n", never_started),
-                (126, "exec /usr/bin/tcpdump: operation not permitted\n", dict(never_started, Error="runtime")),
                 (255, "exec /usr/bin/tcpdump: operation not permitted\nmore\n", None)):
             with self.subTest(code=code, text=text):
                 result, _ = self.refusal(code, text, state)
                 self.assertEqual((result["status"], result["failure_kind"]), ("failed", "quick_failure"))
         result, _ = self.refusal(0, "", create_error="permission denied while trying to connect to the Docker daemon")
         self.assertEqual((result["status"], result["failure_kind"]), ("failed", "checker_failure"))
+
+    def test_docker_and_runtime_setup_failures_are_checker_failures(self):
+        for code, text, state in self.SETUP_FAILURES:
+            with self.subTest(code=code, text=text):
+                result, _ = self.refusal(code, text, state)
+                self.assertEqual((result["status"], result["failure_kind"]), ("failed", "checker_failure"))
+                self.assertIn("did not run", result["error"])
+                image = dict(HELPER, labels={})
+
+                def probe(extension, checked, args, output):
+                    checked.update(status="passed", checks=[], cleanup={"status": "passed", "errors": []})
+
+                docker_calls = {"create": (0, ""), "start": (code, text), "container": (0, json.dumps(state))}
+
+                def docker(*command, timeout=120, check_exit=True):
+                    if command[0] == "image":
+                        return 0, json.dumps([{"Config": {"Labels": {}}}])
+                    return docker_calls[command[0]]
+
+                output = self.output / ("main-%d-%d" % (code, len(text)))
+                with mock.patch.object(extension_check.check, "inspect_image", return_value=dict(image)), \
+                        mock.patch.object(extension_check, "docker", side_effect=docker), \
+                        mock.patch.object(extension_check, "probe", side_effect=probe), \
+                        mock.patch.object(extension_check, "remove_container",
+                                          return_value={"status": "passed", "errors": []}), \
+                        mock.patch("sys.stdout"), mock.patch("sys.stderr"):
+                    self.assertEqual(extension_check.main(["--extension", "capture", "--image", "x", "--output-dir",
+                                                           str(output)]), 1)
+                report = json.loads((output / "extension-report.json").read_text())
+                self.assertEqual((report["status"], report["failure_kind"]), ("failed", "checker_failure"))
 
     def test_a_tcpdump_that_starts_without_net_raw_fails_the_image(self):
         image = dict(HELPER, labels={})
