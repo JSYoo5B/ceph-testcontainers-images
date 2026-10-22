@@ -165,7 +165,7 @@ with tempfile.TemporaryDirectory(dir=sys.argv[1]) as directory:
         return subprocess.run(args, check=True, capture_output=True, text=True, timeout=30).stdout
     run('osdmaptool', str(osdmap), '--createsimple', '2')
     printed = run('osdmaptool', str(osdmap), '--print')
-    assert 'osd.0' in printed and 'osd.1' in printed, 'OSD map lost device identities'
+    assert 'max_osd 2' in printed.splitlines(), 'synthetic OSD map lost its device limit: '+printed
     run('osdmaptool', str(osdmap), '--export-crush', str(exported))
     decoded = run('crushtool', '-d', str(exported))
     assert 'device 0 osd.0' in decoded and 'device 1 osd.1' in decoded, 'CRUSH map lost device identities'
