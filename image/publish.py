@@ -238,7 +238,7 @@ def extension_targets():
 
 def validate_extension_report(report, extension, architecture):
     extension_check = extensions()
-    require(extension in extension_check.EXTENSIONS, "Unknown extension " + repr(extension))
+    require(extension in extension_check.PUBLISHED, "Unknown or unpublished extension " + repr(extension))
     contract = extension_check.EXTENSIONS[extension]["contract"]
     require(report.get("status") == "passed" and report.get("level") == "functional",
             "Publishing an extension requires a passing functional check")
@@ -331,7 +331,7 @@ def collect_extension_candidates(directory, revision, run_id):
         require(all(isinstance(entry.get(field), str) and DIGEST.fullmatch(entry[field])
                     for field in ("digest", "config_digest", "image_id")), "Invalid candidate identity")
         result[key] = candidate
-    require(set(result) == {(e, a) for e in extensions().EXTENSIONS for a in ARCHITECTURES},
+    require(set(result) == {(e, a) for e in extensions().PUBLISHED for a in ARCHITECTURES},
             "Every extension must pass on both platforms")
     return result
 
@@ -340,7 +340,7 @@ def promote_extension(args):
     candidates = collect_extension_candidates(args.candidates, args.revision, args.run_id)
     with ThreadPoolExecutor(max_workers=4) as pool:
         list(pool.map(verify_image, [candidate["image"] for candidate in candidates.values()]))
-    names = extensions().EXTENSIONS
+    names = extensions().PUBLISHED
     tags = [extension_tag(e, a) for e in names for a in (*ARCHITECTURES, None)]
     result = {"status": "promoting", "revision": args.revision, "run_id": args.run_id,
               "previous": {tag: previous_manifest(tag) for tag in tags}, "platforms": {}, "indexes": {}}
@@ -387,7 +387,7 @@ def health(args):
 
 def extension_health(args):
     """The same for every extension helper tag."""
-    check_tags([extension_tag(extension) for extension in extensions().EXTENSIONS])
+    check_tags([extension_tag(extension) for extension in extensions().PUBLISHED])
 
 
 def check_tags(tags):

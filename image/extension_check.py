@@ -31,7 +31,19 @@ import uuid
 import check
 
 HERE = Path(__file__).resolve().parent
-EXTENSIONS = {"netem": {"contract": "1", "probe": HERE / "extensions" / "netem" / "check-netem.sh"}}
+# Each extension's quick probe, the user that runs it and the capabilities it
+# gets in a container without a network: the netem helper runs as root with
+# none; the capture helper as the unprivileged user of its image with
+# NET_RAW, which its tcpdump needs to start at all.
+EXTENSIONS = {"netem": {"contract": "1", "probe": HERE / "extensions" / "netem" / "check-netem.sh", "user": "0:0",
+                        "caps": (), "published": True},
+              "capture": {"contract": "1", "probe": HERE / "extensions" / "capture" / "check-capture.sh",
+                          "user": None, "caps": ("NET_RAW",), "published": False}}
+# The helpers that image/publish.py publishes. A helper joins only once its
+# functional check gates publication.
+PUBLISHED = tuple(name for name, spec in EXTENSIONS.items() if spec["published"])
+# The checks that exist only for the netem helper so far.
+NETEM_ONLY = ("functional", "target", "selector", "rate", "packet_faults")
 LABEL = "io.ceph-testcontainers.extension-check"
 HANDLE = "c7e1:"
 PORT = 7000
@@ -405,6 +417,9 @@ def arguments(argv=None):
         parser.error("--functional requires at least one --target")
     if args.selector and not args.functional:
         parser.error("--selector requires --functional")
+    if args.extension != "netem" and any(getattr(args, option) for option in NETEM_ONLY):
+        parser.error("--extension " + args.extension + " has only the quick check so far; --functional, --target, "
+                     "--selector, --rate and --packet-faults belong to netem")
     if args.image.startswith("-") or any(target.startswith("-") for target in args.target):
         parser.error("image references cannot start with -")
     return args
@@ -450,10 +465,13 @@ def probe(extension, image, args, output):
     container = "ceph-extension-check-" + uuid.uuid4().hex
     log = output / "quick.log"
     try:
-        # The contract asks for sh on PATH, not for /bin/sh.
+        # The contract asks for sh on PATH, not for /bin/sh. Without a user,
+        # the image's own user runs the probe.
+        user = EXTENSIONS[extension]["user"]
+        caps = ["--cap-add=" + cap for cap in EXTENSIONS[extension]["caps"]]
         docker("create", "--name", container, "--label", LABEL + "=quick", "--pull=never", "--network=none",
-               "--cap-drop=ALL", "--user=0:0", "--interactive", "--platform", image["platform"],
-               "--entrypoint=sh", image["image_id"], "-s")
+               "--cap-drop=ALL", *caps, *(["--user=" + user] if user else []), "--interactive", "--platform",
+               image["platform"], "--entrypoint=sh", image["image_id"], "-s")
         try:
             result = subprocess.run(["docker", "start", "--attach", "--interactive", container],
                                     input=EXTENSIONS[extension]["probe"].read_text(), capture_output=True,
@@ -469,6 +487,29 @@ def probe(extension, image, args, output):
             image["error"] = "The probe did not finish all checks"
     finally:
         image["cleanup"] = remove_container(container)
+
+
+def capture_refusal(image, output):
+    """Without NET_RAW, the capture helper's tcpdump must not start at all:
+    the kernel refuses a file capability that the bounding set lacks."""
+    container = "ceph-extension-check-" + uuid.uuid4().hex
+    result = {"name": "refused-without-net_raw"}
+    try:
+        code, text = docker("run", "--name", container, "--label", LABEL + "=quick", "--pull=never",
+                            "--network=none", "--cap-drop=ALL", "--platform", image["platform"],
+                            "--entrypoint=tcpdump", image["image_id"], "--version", check_exit=False)
+        (output / "refusal.log").write_text(text)
+        # Docker reports "exec ...: operation not permitted"; a tcpdump that
+        # starts and then fails would say "Operation not permitted".
+        refused = code != 0 and ("operation not permitted" in text.lower() or "permission" in text.lower())
+        result["status"] = "passed" if refused else "failed"
+        if not refused:
+            result.update(failure_stage="quick:refused-without-net_raw", failure_kind="quick_failure")
+    finally:
+        result["cleanup"] = remove_container(container)
+        if result["cleanup"]["status"] != "passed":
+            result.update(status="failed", failure_kind="checker_failure")
+    return result
 
 
 def classify(output):
@@ -1968,6 +2009,12 @@ def main(argv=None):
         print("Checking the " + args.extension + " contract: " + args.image, flush=True)
         probe(args.extension, image, args, output)
         save(output, report)
+        if args.extension == "capture" and image["status"] == "passed":
+            refusal = capture_refusal(image, output)
+            image["checks"].append(refusal)
+            if refusal["status"] != "passed":
+                image["status"] = "failed"
+            save(output, report)
         if image["status"] != "passed":
             raise CheckError("The image does not meet the " + args.extension + " contract; see quick.log",
                              "image_unsupported")

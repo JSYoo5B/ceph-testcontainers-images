@@ -50,7 +50,7 @@ jobs:
           sys.path.insert(0, 'image')
           import extension_check
           images = json.loads(os.environ['PUBLISHED_IMAGES'])
-          if set(images) != set(extension_check.EXTENSIONS):
+          if set(images) != set(extension_check.PUBLISHED):
               raise ValueError('Provide a digest map for every extension')
           for extension, platforms in images.items():
               if set(platforms) != {'amd64', 'arm64'}:
