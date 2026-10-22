@@ -1,4 +1,4 @@
-.PHONY: check base-check checker-test functional-test roles-test extension-test extension-images extension-selectors extension-check image-check official-check role-images role-images-full debian-images ubuntu-images alpine-images
+.PHONY: check base-check checker-test functional-test roles-test extension-test extension-images extension-selectors extension-check capture-image capture-check image-check official-check role-images role-images-full debian-images ubuntu-images alpine-images
 CEPH_RELEASE ?= 20.2.4
 OFFICIAL_IMAGE ?= $(shell python3 image/releases.py official $(CEPH_RELEASE))
 IMAGE_REPOSITORY ?= ceph-testcontainers
@@ -71,6 +71,18 @@ extension-images:
 	$(call registry_cache) \
 	docker buildx build --load --platform "$(PLATFORM)" --provenance=false $$cache_args \
 		-t "$(IMAGE_REPOSITORY):extension-netem" image/extensions/netem
+
+# The packet-capture helper has its own image and, so far, only the quick check.
+CAPTURE_IMAGE ?= $(IMAGE_REPOSITORY):extension-capture
+
+capture-image:
+	$(call registry_cache) \
+	docker buildx build --load --platform "$(PLATFORM)" --provenance=false $$cache_args \
+		-t "$(IMAGE_REPOSITORY):extension-capture" image/extensions/capture
+
+# Example: make capture-check CAPTURE_IMAGE=my-registry/capture-helper:dev
+capture-check:
+	python3 image/extension_check.py --extension capture --image "$(CAPTURE_IMAGE)"
 
 # The selector profiles of the netem contract, one per line; CI checks them all.
 EXTENSION_SELECTORS = python3 -c 'import sys; sys.path.insert(0, "image"); import extension_check; print("\n".join(extension_check.SELECTORS))'
