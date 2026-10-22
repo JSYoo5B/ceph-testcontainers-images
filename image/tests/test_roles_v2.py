@@ -17,6 +17,17 @@ class RoleSelectionTests(unittest.TestCase):
         self.assertTrue(contract.permits_path('client','/usr/bin/ceph-dencoder',{'ceph-dencoder'}))
         self.assertFalse(contract.permits_path('essential','/usr/bin/ceph-dencoder',{'ceph-dencoder'}))
 
+    def test_client_map_diagnostics_preserve_executable_boundaries(self):
+        tools = {'crushtool', 'osdmaptool'}
+        self.assertTrue(tools <= contract.executables('client', set()))
+        self.assertIn('crushtool', contract.executables('essential', set()))
+        for role in ('cephfs', 'rbd-aux', 'rgw'):
+            self.assertTrue(tools.isdisjoint(contract.executables(role, tools)))
+        for name in tools:
+            self.assertTrue(contract.permits_path('client', '/usr/bin/'+name, tools))
+        for name in ('ceph-osd', 'ceph-mon', 'ceph-mgr', 'radosgw-admin'):
+            self.assertFalse(contract.permits_path('client', '/usr/bin/'+name, {name}))
+
     def test_ordinary_rbd_has_no_auxiliary_or_rgw_requirement(self):
         images = {'essential':'core', 'client':'toolkit'}
         self.assertEqual(check.runtime_sets(images,['rbd'],'roles-v2'), {'mixed':images})

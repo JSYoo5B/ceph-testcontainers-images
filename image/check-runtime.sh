@@ -150,6 +150,37 @@ if "$control" || "$core" || "$client" || "$cache" || "$fsmirror" || { "$rgw" && 
         check python-bindings python3 -c 'import rados, rbd, cephfs, ceph_argparse, ceph_daemon'
     fi
     if "$cache"; then check python-rbd python3 -c 'import rados,rbd'; fi
+    if { "$client" || "$control"; } && test "$contract" = roles-v2; then
+    map_tools_roundtrip() {
+        python3 - "$work" <<'MAPTOOLS'
+from pathlib import Path
+import subprocess
+import sys
+import tempfile
+
+with tempfile.TemporaryDirectory(dir=sys.argv[1]) as directory:
+    root = Path(directory)
+    osdmap, exported, text, compiled, restored = (root/name for name in ('osdmap', 'exported', 'crush.txt', 'compiled', 'restored'))
+    def run(*args):
+        return subprocess.run(args, check=True, capture_output=True, text=True, timeout=30).stdout
+    run('osdmaptool', str(osdmap), '--createsimple', '2')
+    printed = run('osdmaptool', str(osdmap), '--print')
+    assert 'max_osd 2' in printed.splitlines(), 'synthetic OSD map lost its device limit: '+printed
+    run('osdmaptool', str(osdmap), '--export-crush', str(exported))
+    decoded = run('crushtool', '-d', str(exported))
+    assert 'device 0 osd.0' in decoded and 'device 1 osd.1' in decoded, 'CRUSH map lost device identities'
+    text.write_text(decoded)
+    run('crushtool', '-c', str(text), '-o', str(compiled))
+    assert run('crushtool', '-d', str(compiled)) == decoded, 'CRUSH decode/compile differs'
+    run('osdmaptool', str(osdmap), '--import-crush', str(compiled))
+    run('osdmaptool', str(osdmap), '--export-crush', str(restored))
+    assert restored.read_bytes() == compiled.read_bytes(), 'OSD map CRUSH bytes differ'
+MAPTOOLS
+    }
+    check path:crushtool external_command crushtool
+    check path:osdmaptool external_command osdmaptool
+    check map-tools-roundtrip map_tools_roundtrip
+    fi
     if "$control" || "$client" || "$cache"; then
     if "$control" || "$client"; then
     check path:cryptsetup external_command cryptsetup
