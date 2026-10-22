@@ -17,7 +17,8 @@ on:
 permissions:
   contents: read
 concurrency:
-  group: roles-v2-${{ github.event_name }}-${{ github.ref }}
+  # Release publications use disjoint tags, so Squid and Tentacle can qualify independently.
+  group: roles-v2-${{ github.event_name }}-${{ github.ref }}-${{ inputs.release || 'matrix' }}
   cancel-in-progress: false
 jobs:
   unit:
