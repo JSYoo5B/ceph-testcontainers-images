@@ -2,6 +2,9 @@ import contextlib
 import io
 import json
 from pathlib import Path
+import re
+import struct
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -65,12 +68,20 @@ class CaptureQuickCheckTests(unittest.TestCase):
         self.assertIn("--user=0:0", netem)
         self.assertFalse(any(arg.startswith("--cap-add") for arg in netem))
 
-    def refusal(self, code, text):
+    STARTED = {"ExitCode": 255, "Error": "", "StartedAt": "2026-10-22T22:27:18Z"}
+
+    def refusal(self, code, text, state=None, create_error=None):
         calls = []
 
         def docker(*command, timeout=120, check_exit=True):
             calls.append(list(command))
-            return code, text
+            if command[0] == "create":
+                if create_error:
+                    raise extension_check.CheckError(create_error)
+                return 0, ""
+            if command[0] == "start":
+                return code, text
+            return 0, json.dumps(self.STARTED if state is None else state)
 
         with mock.patch.object(extension_check, "docker", side_effect=docker), \
                 mock.patch.object(extension_check, "remove_container", return_value={"status": "passed", "errors": []}):
@@ -78,15 +89,28 @@ class CaptureQuickCheckTests(unittest.TestCase):
         return result, calls[0]
 
     def test_tcpdump_must_not_start_without_net_raw(self):
-        result, command = self.refusal(1, "exec /usr/bin/tcpdump: operation not permitted\n")
+        result, command = self.refusal(255, "exec /usr/bin/tcpdump: operation not permitted\n")
         self.assertEqual(result["status"], "passed")
         self.assertIn("--cap-drop=ALL", command)
         self.assertFalse(any(arg.startswith("--cap-add") for arg in command))
         self.assertEqual(command[command.index("--entrypoint=tcpdump") + 2], "--version")
-        for code, text in ((0, "tcpdump version 4.99.3\n"), (1, "tcpdump: no such file\n")):
-            with self.subTest(text=text):
-                result, _ = self.refusal(code, text)
+
+    def test_only_the_runtime_exec_refusal_passes(self):
+        never_started = {"ExitCode": 0, "Error": "", "StartedAt": "0001-01-01T00:00:00Z"}
+        for code, text, state in (
+                (0, "tcpdump version 4.99.3\n", dict(self.STARTED, ExitCode=0)),
+                # tcpdump itself ran and failed: its capability was granted.
+                (1, "tcpdump: Operation not permitted\n", dict(self.STARTED, ExitCode=1)),
+                (255, "tcpdump: lo: You don't have permission to perform this capture\n", None),
+                # Docker could not run the container: nothing about the image.
+                (125, "permission denied while trying to connect to the Docker daemon socket\n", never_started),
+                (126, "exec /usr/bin/tcpdump: operation not permitted\n", dict(never_started, Error="runtime")),
+                (255, "exec /usr/bin/tcpdump: operation not permitted\nmore\n", None)):
+            with self.subTest(code=code, text=text):
+                result, _ = self.refusal(code, text, state)
                 self.assertEqual((result["status"], result["failure_kind"]), ("failed", "quick_failure"))
+        result, _ = self.refusal(0, "", create_error="permission denied while trying to connect to the Docker daemon")
+        self.assertEqual((result["status"], result["failure_kind"]), ("failed", "checker_failure"))
 
     def test_a_tcpdump_that_starts_without_net_raw_fails_the_image(self):
         image = dict(HELPER, labels={})
@@ -108,6 +132,64 @@ class CaptureQuickCheckTests(unittest.TestCase):
         self.assertEqual((code, report["status"], report["failure_kind"]), (1, "failed", "image_unsupported"))
         self.assertEqual(report["contract"], "1")
         self.assertEqual(report["image"]["checks"][-1]["name"], "refused-without-net_raw")
+
+
+PROBE = Path(extension_check.EXTENSIONS["capture"]["probe"])
+
+
+def udp_frame(port, payload):
+    """An Ethernet/IPv4/UDP frame to 127.0.0.1:port."""
+    udp = struct.pack(">HHHH", 40000, port, 8 + len(payload), 0) + payload
+    ip = struct.pack(">BBHHHBBH4s4s", 0x45, 0, 20 + len(udp), 1, 0, 64, 17, 0, bytes([127, 0, 0, 1]),
+                     bytes([127, 0, 0, 1]))
+    return b"\x00" * 12 + b"\x08\x00" + ip + udp
+
+
+def pcap(*frames, snaplen=128, link=1):
+    data = struct.pack("<IHHiIII", 0xa1b2c3d4, 2, 4, 0, 0, snaplen, link)
+    for frame in frames:
+        data += struct.pack("<IIII", 1, 0, len(frame), len(frame)) + frame
+    return data
+
+
+class CaptureOracleTests(unittest.TestCase):
+    """The loopback oracle embedded in check-capture.sh, run on synthetic captures."""
+
+    def oracle(self, data, status=0, stderr=None):
+        script = PROBE.read_text()
+        code = script[script.index("<<'ORACLE'\n") + len("<<'ORACLE'\n"):script.index("\nORACLE\n")]
+        with tempfile.TemporaryDirectory() as directory:
+            Path(directory, "lo.pcap").write_bytes(data)
+            Path(directory, "stderr").write_text(stderr if stderr is not None else (
+                "tcpdump: listening on lo, link-type EN10MB (Ethernet), snapshot length 128 bytes\n"
+                "1 packet captured\n2 packets received by filter\n0 packets dropped by kernel\n"))
+            return subprocess.run([sys.executable, "-c", code, directory, str(status)], capture_output=True).returncode
+
+    def test_only_the_selected_datagram_passes(self):
+        selected, excluded = udp_frame(7000, b"capture-check-7000"), udp_frame(7001, b"capture-check-7001")
+        self.assertEqual(self.oracle(pcap(selected)), 0)
+        for name, data in (("excluded only", pcap(excluded)), ("both", pcap(selected, excluded)),
+                           ("selected port, other payload", pcap(udp_frame(7000, b"capture-check-7001"))),
+                           ("empty", pcap()), ("cut record", pcap(selected)[:-3]),
+                           ("other snaplen", pcap(selected, snaplen=262144)), ("other link type", pcap(selected, link=113)),
+                           ("no header", b"")):
+            with self.subTest(name=name):
+                self.assertNotEqual(self.oracle(data), 0)
+        self.assertNotEqual(self.oracle(pcap(selected), status=1), 0)
+        self.assertNotEqual(self.oracle(pcap(selected), stderr="0 packets captured\n"), 0)
+
+    def test_the_probe_uses_only_the_contract_executables(self):
+        # sh builtins plus sh, sleep, tcpdump and python3; no grep, tr, rm and the like.
+        script = PROBE.read_text()
+        shell = "\n".join(line for line in script.splitlines() if not line.lstrip().startswith("#"))
+        for heredoc in ("READY", "ORACLE"):
+            start = shell.index("<<'%s'\n" % heredoc)
+            shell = shell[:start] + shell[shell.index("\n%s\n" % heredoc, start) + len(heredoc) + 2:]
+        for tool in ("grep", "tr", "rm", "cat", "sed", "awk", "head", "tail", "seq", "id", "mkdir", "ls", "cut",
+                     "mktemp", "getcap", "timeout"):
+            with self.subTest(tool=tool):
+                self.assertIsNone(re.search(r"(^|[;&|(`]|\$\(|\bthen|\bdo|\belse)\s*%s\b" % tool, shell, re.M),
+                                  tool + " is not a contract executable")
 
 
 class CapturePublicationTests(unittest.TestCase):

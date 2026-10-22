@@ -23,6 +23,7 @@ import hashlib
 import ipaddress
 import json
 from pathlib import Path
+import re
 import subprocess
 import sys
 import time
@@ -489,22 +490,38 @@ def probe(extension, image, args, output):
         image["cleanup"] = remove_container(container)
 
 
+# What runc prints, as the container's own output, when the kernel refuses to
+# execute a file whose effective file capability the bounding set lacks.
+EXEC_REFUSED = re.compile(r"exec (/[^\s:]*/)?tcpdump: operation not permitted")
+
+
 def capture_refusal(image, output):
     """Without NET_RAW, the capture helper's tcpdump must not start at all:
-    the kernel refuses a file capability that the bounding set lacks."""
+    the kernel refuses to execute a file capability that the bounding set
+    lacks. Only that refusal passes: the container must have started (no
+    Docker or runtime setup error) and exited with runc's status 255 and its
+    exec message alone, not with an error of tcpdump itself."""
     container = "ceph-extension-check-" + uuid.uuid4().hex
     result = {"name": "refused-without-net_raw"}
     try:
-        code, text = docker("run", "--name", container, "--label", LABEL + "=quick", "--pull=never",
-                            "--network=none", "--cap-drop=ALL", "--platform", image["platform"],
-                            "--entrypoint=tcpdump", image["image_id"], "--version", check_exit=False)
+        docker("create", "--name", container, "--label", LABEL + "=quick", "--pull=never", "--network=none",
+               "--cap-drop=ALL", "--platform", image["platform"], "--entrypoint=tcpdump", image["image_id"],
+               "--version")
+        code, text = docker("start", "--attach", container, check_exit=False)
+        state = json.loads(docker("container", "inspect", "--format", "{{json .State}}", container)[1])
         (output / "refusal.log").write_text(text)
-        # Docker reports "exec ...: operation not permitted"; a tcpdump that
-        # starts and then fails would say "Operation not permitted".
-        refused = code != 0 and ("operation not permitted" in text.lower() or "permission" in text.lower())
+        result.update(exit_code=code, state={key: state.get(key) for key in ("ExitCode", "Error", "StartedAt")})
+        started = bool(state.get("StartedAt")) and not state.get("StartedAt", "").startswith("0001-")
+        refused = (started and not state.get("Error") and state.get("ExitCode") == 255 and code == 255
+                   and EXEC_REFUSED.fullmatch(text.strip()) is not None)
         result["status"] = "passed" if refused else "failed"
         if not refused:
             result.update(failure_stage="quick:refused-without-net_raw", failure_kind="quick_failure")
+    except check.CheckError as error:
+        # A container that Docker could not create or inspect says nothing
+        # about the image.
+        result.update(status="failed", error=str(error), failure_stage="quick:refused-without-net_raw",
+                      failure_kind="checker_failure")
     finally:
         result["cleanup"] = remove_container(container)
         if result["cleanup"]["status"] != "passed":
@@ -2012,9 +2029,12 @@ def main(argv=None):
         if args.extension == "capture" and image["status"] == "passed":
             refusal = capture_refusal(image, output)
             image["checks"].append(refusal)
+            save(output, report)
+            if refusal.get("failure_kind") == "checker_failure":
+                raise CheckError("Could not run the refusal check: " + refusal.get("error", "cleanup failed"),
+                                 "checker_failure")
             if refusal["status"] != "passed":
                 image["status"] = "failed"
-            save(output, report)
         if image["status"] != "passed":
             raise CheckError("The image does not meet the " + args.extension + " contract; see quick.log",
                              "image_unsupported")

@@ -61,7 +61,7 @@ version() {
         *'tcpdump version'*'libpcap version'*) ;;
         *) return 1 ;;
     esac
-    printf 'VERSION\ttcpdump\t%s\n' "$(printf '%s' "$output" | tr '\n' ' ')"
+    printf 'VERSION\ttcpdump\t%s\n' "$(printf '%s' "$output" | python3 -c 'import sys; print(" ".join(sys.stdin.read().split()))')"
 }
 check version:tcpdump version
 
@@ -99,52 +99,74 @@ check filter:invalid refuses_filter 'tcp portx 7000'
 # A short capture on the loopback, with the options that the module uses: it
 # needs NET_RAW and no network. Readiness is tcpdump's "listening on" line;
 # a TERM signal ends it with exit status 0, a flushed classic pcap and its
-# statistics. The filter keeps the UDP datagram to port 7000 and drops the
-# one to port 7001.
+# statistics. The filter must keep the datagram to UDP port 7000 and drop
+# the one to port 7001; each carries its own payload.
+remove_tree() {
+    python3 -c 'import shutil, sys; shutil.rmtree(sys.argv[1], ignore_errors=True)' "$1"
+}
 capture_lo() {
     directory=$(python3 -c 'import tempfile; print(tempfile.mkdtemp(dir="/tmp"))') || return 1
     tcpdump -p -i lo -s 128 -c 100 --immediate-mode -U -w "$directory/lo.pcap" 'udp port 7000' \
         2>"$directory/stderr" &
     pid=$!
-    ready=1
-    for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25; do
-        if grep -q '^tcpdump: listening on lo, link-type EN10MB' "$directory/stderr" 2>/dev/null; then
-            ready=0
-            break
-        fi
-        sleep 0.2
-    done
-    if test "$ready" -ne 0; then
+    if ! python3 - "$directory/stderr" <<'READY'
+import sys, time
+deadline = time.monotonic() + 5
+while time.monotonic() < deadline:
+    try:
+        with open(sys.argv[1]) as stderr:
+            if any(line.startswith("tcpdump: listening on lo, link-type EN10MB") for line in stderr):
+                sys.exit(0)
+    except OSError:
+        pass
+    time.sleep(0.1)
+sys.exit(1)
+READY
+    then
         kill "$pid" 2>/dev/null
         { wait "$pid"; } 2>/dev/null
-        rm -rf "$directory"
+        remove_tree "$directory"
         return 1
     fi
     python3 -c '
 import socket
 for port in (7000, 7001):
-    socket.socket(socket.AF_INET, socket.SOCK_DGRAM).sendto(b"capture-check", ("127.0.0.1", port))
+    socket.socket(socket.AF_INET, socket.SOCK_DGRAM).sendto(b"capture-check-%d" % port, ("127.0.0.1", port))
 '
     sleep 0.5
     kill -TERM "$pid"
     wait "$pid"
     status=$?
-    python3 - "$directory" "$status" <<'PY'
+    python3 - "$directory" "$status" <<'ORACLE'
 import pathlib, struct, sys
 directory, status = pathlib.Path(sys.argv[1]), int(sys.argv[2])
 stderr = (directory / "stderr").read_text()
 data = (directory / "lo.pcap").read_bytes()
-magic, major, minor, _, _, snaplen, link = struct.unpack_from("<IHHiIII", data)
-captured, original = struct.unpack_from("<II", data, 24 + 8)
-payload = data[24 + 16:24 + 16 + captured]
-ok = (status == 0 and "1 packet captured" in stderr and "packets received by filter" in stderr
-      and magic == 0xa1b2c3d4 and (major, minor) == (2, 4) and snaplen == 128 and link == 1
-      and len(data) == 24 + 16 + captured and payload.endswith(b"capture-check"))
 print("CAPTURE\t%s" % " ".join(line.strip() for line in stderr.splitlines()))
-sys.exit(not ok)
-PY
+if len(data) < 24 or status != 0 or "1 packet captured" not in stderr or "packets received by filter" not in stderr:
+    sys.exit(1)
+magic, major, minor, _, _, snaplen, link = struct.unpack_from("<IHHiIII", data)
+if magic != 0xa1b2c3d4 or (major, minor) != (2, 4) or snaplen != 128 or link != 1:
+    sys.exit(1)
+# Every record as (UDP destination port, payload): Ethernet, IPv4, UDP.
+datagrams, offset = [], 24
+while offset < len(data):
+    if offset + 16 > len(data):
+        sys.exit(1)
+    captured = struct.unpack_from("<I", data, offset + 8)[0]
+    frame = data[offset + 16:offset + 16 + captured]
+    offset += 16 + captured
+    if len(frame) != captured or len(frame) < 14 + 20 + 8 or frame[12:14] != b"\x08\x00":
+        sys.exit(1)
+    header = (frame[14] & 0x0f) * 4
+    if frame[14 + 9] != 17 or len(frame) < 14 + header + 8:
+        sys.exit(1)
+    port = struct.unpack_from(">H", frame, 14 + header + 2)[0]
+    datagrams.append((port, frame[14 + header + 8:]))
+sys.exit(datagrams != [(7000, b"capture-check-7000")])
+ORACLE
     result=$?
-    rm -rf "$directory"
+    remove_tree "$directory"
     return "$result"
 }
 check capture:loopback capture_lo
