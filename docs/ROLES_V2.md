@@ -1,6 +1,6 @@
 # Dependency roles, version 2
 
-This opt-in contract follows the execution/dependency analysis in issue #3.
+This default production contract follows the execution/dependency analysis in issue #3.
 Legacy control/osd/mds/rgw tags and checker mode keep their meanings.
 
 | Role | Required capability |
