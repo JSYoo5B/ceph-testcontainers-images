@@ -87,7 +87,7 @@ def roots(kind):
     if kind == 'apk':
         return {
             'essential': ('ceph19-mon','ceph19-mgr','ceph19-osd-daemon','ceph19-common','py3-setuptools'),
-            'client': ('ceph19-common','py3-cephfs19','libradosstriper19','cryptsetup'),
+            'client': ('ceph19-common','ceph19-osd','py3-cephfs19','libradosstriper19','cryptsetup'),
             'cephfs': ('ceph19-mds','cephfs19-mirror','ceph19-common','py3-cephfs19'),
             'rbd-aux': ('ceph19','rbd-mirror19','ceph19-common','py3-rbd19'),
             'rgw': ('ceph19-radosgw','ceph19-common'),
@@ -95,7 +95,7 @@ def roots(kind):
     common = ('ceph-common','python3-cephfs')
     result = {
         'essential': ('ceph-mon','ceph-mgr','ceph-osd','ceph-common'),
-        'client': common+('libradosstriper1','cryptsetup' if kind=='rpm' else 'cryptsetup-bin'),
+        'client': common+('ceph-base','libradosstriper1','cryptsetup' if kind=='rpm' else 'cryptsetup-bin'),
         'cephfs': common+('ceph-mds','cephfs-mirror'),
         'rbd-aux': ('ceph-common','rbd-mirror','ceph-immutable-object-cache'),
         'rgw': ('ceph-radosgw' if kind=='rpm' else 'radosgw','ceph-common'),

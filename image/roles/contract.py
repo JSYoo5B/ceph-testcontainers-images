@@ -5,7 +5,7 @@ ROLES = ("essential", "client", "cephfs", "rbd-aux", "rgw")
 CORE_CLI = {"ceph", "ceph-conf"}
 EXECUTABLES = {
     "essential": CORE_CLI | {"ceph-mon", "ceph-mgr", "ceph-osd", "ceph-authtool", "monmaptool", "crushtool"},
-    "client": CORE_CLI | {"rados", "rbd", "cryptsetup"},
+    "client": CORE_CLI | {"rados", "rbd", "cryptsetup", "crushtool", "osdmaptool"},
     "cephfs": CORE_CLI | {"ceph-mds", "cephfs-mirror"},
     "rbd-aux": CORE_CLI | {"rados", "rbd", "rbd-mirror", "ceph-immutable-object-cache"},
     "rgw": CORE_CLI | {"radosgw", "radosgw-admin"},
