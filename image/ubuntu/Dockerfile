@@ -1,7 +1,6 @@
-# Minimal Ceph role images on Ubuntu from the Ceph project's packages. Each target
-# installs only the packages its role needs (docs/IMAGE_REQUIREMENTS.md).
-# Release-specific inputs come from image/releases.py (make ubuntu-images); the
-# defaults are the default release.
+# Installed Ceph source runtime for the dependency-based role assembler.
+# Release-specific inputs come from image/releases.py.
+# Final role images are produced by image/roles/build.py.
 ARG BASE_IMAGE=ubuntu:24.04@sha256:534baea6a22c03a63003dbc8dbe78fe34bc0d7e595d9a9dc9834884ff530eb55
 ARG BASE_NAME=ubuntu:24.04
 
@@ -37,30 +36,6 @@ LABEL org.opencontainers.image.source="https://github.com/JSYoo5B/ceph-testconta
       org.opencontainers.image.description="Ceph role image built on Ubuntu from Ceph packages; see /usr/share/ceph-testcontainers/SOURCES.txt for licenses and corresponding source" \
       org.opencontainers.image.base.name="${BASE_NAME}" \
       io.ceph-testcontainers.source-notice="/usr/share/ceph-testcontainers/SOURCES.txt"
-
-FROM common AS control
-RUN apt-get update && apt-get install -y --no-install-recommends "ceph-mon=${CEPH_PACKAGE_VERSION}" \
-        "ceph-mgr=${CEPH_PACKAGE_VERSION}" ${CEPH_MGR_PACKAGES} "rbd-mirror=${CEPH_PACKAGE_VERSION}" \
-        "cephfs-mirror=${CEPH_PACKAGE_VERSION}" cryptsetup-bin procps \
-        "ceph-immutable-object-cache=${CEPH_PACKAGE_VERSION}" \
-        "libradosstriper1=${CEPH_PACKAGE_VERSION}" \
-    && rm -rf /var/lib/apt/lists/* && sh /usr/local/lib/ceph-testcontainers/write-sources.sh
-LABEL io.ceph-testcontainers.role="control"
-
-FROM common AS osd
-RUN apt-get update && apt-get install -y --no-install-recommends "ceph-osd=${CEPH_PACKAGE_VERSION}" \
-    && rm -rf /var/lib/apt/lists/* && sh /usr/local/lib/ceph-testcontainers/write-sources.sh
-LABEL io.ceph-testcontainers.role="osd"
-
-FROM common AS rgw
-RUN apt-get update && apt-get install -y --no-install-recommends "radosgw=${CEPH_PACKAGE_VERSION}" \
-    && rm -rf /var/lib/apt/lists/* && sh /usr/local/lib/ceph-testcontainers/write-sources.sh
-LABEL io.ceph-testcontainers.role="rgw"
-
-FROM common AS mds
-RUN apt-get update && apt-get install -y --no-install-recommends "ceph-mds=${CEPH_PACKAGE_VERSION}" \
-    && rm -rf /var/lib/apt/lists/* && sh /usr/local/lib/ceph-testcontainers/write-sources.sh
-LABEL io.ceph-testcontainers.role="mds"
 
 FROM common AS all
 RUN apt-get update && apt-get install -y --no-install-recommends "ceph-mon=${CEPH_PACKAGE_VERSION}" \

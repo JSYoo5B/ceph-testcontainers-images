@@ -21,15 +21,16 @@ python3 image/check.py --image all=my-company/ceph:dev --full
 
 # Validate mixed roles and all independently in the same run.
 python3 image/check.py \
-  --image control=my-company/ceph:control --image osd=my-company/ceph:osd \
-  --image rgw=my-company/ceph:rgw --image mds=my-company/ceph:mds \
+  --image essential=my-company/ceph:essential --image client=my-company/ceph:client \
+  --image cephfs=my-company/ceph:cephfs --image rbd-aux=my-company/ceph:rbd-aux \
+  --image rgw=my-company/ceph:rgw \
   --image all=my-company/ceph:all --full
 ```
 
 | Option | Behavior |
 | --- | --- |
-| `--image ROLE=REF` | Repeat for `control`, `osd`, `rgw`, `mds` or `all`; additional components are allowed |
-| `--full` | Run every functional scenario after quick checks; requires `all` or all four role images |
+| `--image ROLE=REF` | Repeat for `essential`, `client`, `cephfs`, `rbd-aux`, `rgw` or `all`; additional components are allowed |
+| `--full` | Run every functional scenario after quick checks; requires `all` or all five role images |
 | `--scenario NAME` | Repeat with `--full` to select scenarios; report level is `functional-selected` |
 | `--platform PLATFORM` | Select `linux/arm64` or `linux/amd64` from a local multi-platform image |
 | `--output-dir DIR` | Empty report directory; default `artifacts/image-check-<uuid>` |
@@ -44,8 +45,9 @@ To select the encrypted RBD, object-class and striped I/O scenarios:
 
 ```sh
 python3 image/check.py \
-  --image control=my-company/ceph:control --image osd=my-company/ceph:osd \
-  --image rgw=my-company/ceph:rgw --image mds=my-company/ceph:mds \
+  --image essential=my-company/ceph:essential --image client=my-company/ceph:client \
+  --image cephfs=my-company/ceph:cephfs --image rbd-aux=my-company/ceph:rbd-aux \
+  --image rgw=my-company/ceph:rgw \
   --image all=my-company/ceph:all --full \
   --scenario rbd-encryption --scenario rados-object-class --scenario rados-striper
 ```
@@ -56,7 +58,7 @@ same prerequisites, immutable identities and report format.
 ## Quick checks
 
 Quick checks run one disposable container per role, with no network or
-volumes. `all` runs the checks of all four roles. Configuration queries
+volumes. `all` runs the checks of all five roles. Configuration queries
 select MGR module, OSD class and plugin directories, so the checks follow
 the image's effective paths rather than a distribution's fixed layout.
 
@@ -65,26 +67,26 @@ the image's effective paths rather than a distribution's fixed layout.
 | Executable utilities | All | Find `sh`, `mkdir`, `cp`, `cat`, `rm`, `test`, `sleep`, `hostname` and `awk` as executable files on PATH, and check `/bin/sh`; establishes the bootstrap command prerequisites, including commands invoked directly through Docker exec |
 | Writable Ceph paths | All | Create a test file in each configuration/data/run/log path and `/tmp`, copy it, read and compare its content, then remove it; verifies the paths support bootstrap file operations |
 | New directories | All | Create a fresh directory below `/`, perform the same file operations and remove it; verifies the module can choose a new destination for copied files |
-| Temporary-directory permissions | All | Check `/tmp` has its sticky bit; control also checks mode `1777` through Python; verifies the expected temporary-directory permissions |
+| Temporary-directory permissions | All | Check `/tmp` has its sticky bit; Python-bearing roles also check mode `1777` through Python; verifies the expected temporary-directory permissions |
 | Hostname resolution | All | Run `hostname -i` with a disposable hostname mapping and require a nonempty address; verifies the address lookup used to build the monmap can run |
 | Idle client process | All | Start `sleep infinity`, wait one second, require the process to remain alive, then terminate it; verifies an idle client container can stay available for later commands |
 | Ceph executables | Each role | Run the required Ceph binaries with `--version` and parse release/commit; verifies executable startup and reported version consistency within the image and release consistency across the supplied role set |
-| Python bindings | control | Import `rados`, `rbd`, `cephfs`, `ceph_argparse` and `ceph_daemon`; verifies the interpreter, bindings and import-time runtime dependencies load |
-| Cryptsetup executable | control | Resolve the executable on PATH and run `cryptsetup --version`; verifies a runnable external command is available, independently of the shared library |
-| Process inspection | control | Resolve `pgrep` on PATH, start a disposable Python process with a unique argument, require `pgrep -f` to report exactly its PID, then stop and reap it and require `pgrep -f` to exit 1 with no output; verifies process lookup by command line works, not only that the file exists |
-| Native client libraries | control | Resolve and eagerly load librbd, libcryptsetup and libradosstriper, then look up required encryption, keyslot and striper symbols; distinguishes missing libraries from dependency/symbol loading failures |
-| RBD parent cache plugin | control | Find `libceph_librbd_parent_cache.so` under the `librbd` directory of the image's `plugin_dir`, load it eagerly and look up its plugin entry points; verifies that librbd can load the plugin that `rbd_plugins=parent_cache` names |
-| Python client APIs | control | Require callable RBD encryption format/load, compound class execute, exclusive lock and unlock APIs; verifies the installed bindings expose the functions used by the functional probes |
-| Striper CLI option | control | Run `rados --help` and require a successful result containing `--striper`; verifies the CLI advertises the required interface |
-| MGR module files | control | Query `mgr_module_path` and require `mgr_module.py` and module files for volumes, rbd_support and mirroring; verifies those module sources are present, without claiming their cluster operations have run |
-| Keyring creation and reading | control | Generate a temporary client keyring with `ceph-authtool`, then read its key back; verifies bootstrap keyring generation and parsing work |
-| Monmap creation | control | Create a temporary monmap with a supplied FSID and v1/v2 MON addresses; verifies the monmap tool accepts the runtime bootstrap inputs |
-| Mirror/admin executables | control | Run `rbd-mirror`, `cephfs-mirror` and `radosgw-admin` with `--version`; verifies startup and version identity, while replication is checked in separate functional scenarios |
-| OSD object-class files | osd | Query `osd_class_dir` and locate the rbd, rgw, cephfs, hello and lock shared objects; verifies the required class files exist |
-| OSD object-class loading | osd | Preload each required class into `ceph-osd` with eager ELF relocation, run `--version` and reject loader errors even if the process exits zero; verifies class dependency and OSD symbol resolution, without claiming class methods executed |
-| OSD plugin files | osd | Query `plugin_dir` and require shared objects in the compressor and erasure-code groups; verifies plugin files are present, without claiming every plugin has loaded or processed data |
+| Python bindings | client | Import `rados`, `rbd`, `cephfs`, `ceph_argparse` and `ceph_daemon`; verifies the interpreter, bindings and import-time runtime dependencies load |
+| Cryptsetup executable | client | Resolve the executable on PATH and run `cryptsetup --version`; verifies a runnable external command is available, independently of the shared library |
+| Process inspection | essential/client | Resolve `pgrep` on PATH, start a disposable Python process with a unique argument, require `pgrep -f` to report exactly its PID, then stop and reap it and require `pgrep -f` to exit 1 with no output; verifies process lookup by command line works, not only that the file exists |
+| Native client libraries | client | Resolve and eagerly load librbd, libcryptsetup and libradosstriper, then look up required encryption, keyslot and striper symbols; distinguishes missing libraries from dependency/symbol loading failures |
+| RBD parent cache plugin | rbd-aux | Find `libceph_librbd_parent_cache.so` under the `librbd` directory of the image's `plugin_dir`, load it eagerly and look up its plugin entry points; verifies that librbd can load the plugin that `rbd_plugins=parent_cache` names |
+| Python client APIs | client | Require callable RBD encryption format/load, compound class execute, exclusive lock and unlock APIs; verifies the installed bindings expose the functions used by the functional probes |
+| Striper CLI option | client | Run `rados --help` and require a successful result containing `--striper`; verifies the CLI advertises the required interface |
+| MGR module files | essential | Query `mgr_module_path` and require `mgr_module.py` and module files for volumes, rbd_support and mirroring; verifies those module sources are present, without claiming their cluster operations have run |
+| Keyring creation and reading | essential | Generate a temporary client keyring with `ceph-authtool`, then read its key back; verifies bootstrap keyring generation and parsing work |
+| Monmap creation | essential | Create a temporary monmap with a supplied FSID and v1/v2 MON addresses; verifies the monmap tool accepts the runtime bootstrap inputs |
+| Mirror/admin executables | rbd-aux/cephfs/rgw | Run `rbd-mirror`, `cephfs-mirror` and `radosgw-admin` with `--version`; verifies startup and version identity, while replication is checked in separate functional scenarios |
+| OSD object-class files | essential | Query `osd_class_dir` and locate the rbd, rgw, cephfs, hello and lock shared objects; verifies the required class files exist |
+| OSD object-class loading | essential | Preload each required class into `ceph-osd` with eager ELF relocation, run `--version` and reject loader errors even if the process exits zero; verifies class dependency and OSD symbol resolution, without claiming class methods executed |
+| OSD plugin files | essential | Query `plugin_dir` and require shared objects in the compressor and erasure-code groups; verifies plugin files are present, without claiming every plugin has loaded or processed data |
 | Gateway prerequisites | rgw | Require `readlink` on PATH and run `radosgw`/`radosgw-admin` version checks; verifies required gateway/admin executables start and the socket-inspection utility is available |
-| Metadata-server prerequisite | mds | Run `ceph-mds --version`; verifies the MDS executable and its startup dependency closure load |
+| Metadata-server prerequisite | cephfs | Run `ceph-mds --version`; verifies the MDS executable and its startup dependency closure load |
 
 OSD object-class loading does not require Python or a compiler in the OSD
 image. Class method execution, encrypted I/O and striper data operations
@@ -97,8 +99,8 @@ cluster operations below; file presence and `--version` do not qualify.
 
 Scenarios run real clusters on private Docker networks. Single-cluster
 scenarios share one cluster; each multi-cluster scenario starts its own
-pair. MON/MGR and clients use control, OSDs use osd, gateways use rgw, and
-metadata servers use mds. For `all`, every container uses that image.
+pair. MON/MGR/OSD use essential, clients use client, gateways and RGW setup
+use rgw, MDS and CephFS mirrors use cephfs, and RBD mirrors use rbd-aux. For `all`, every container uses that image.
 
 | Scenario | Clusters | Pass criteria |
 | --- | --- | --- |
@@ -116,7 +118,7 @@ metadata servers use mds. For `all`, every container uses that image.
 
 ### `cluster-lifecycle`: cluster bootstrap and OSD changes
 
-Uses control and osd images in one cluster.
+Uses essential and client images in one cluster.
 
 1. Generate a fresh FSID, monmap and CephX keyrings, initialize MON, then
    start MGR and two file-backed BlueStore OSDs. Require an available MGR,
@@ -143,7 +145,7 @@ quorum failover or permanent loss of all replicas.
 
 ### `rbd`: snapshots, clones and independent image data
 
-Uses control and osd images in one cluster.
+Uses essential and client images in one cluster.
 
 1. Create and initialize an RBD pool, create a 32 MiB parent image through
    Python librbd, write and flush a 4 MiB payload, and hash the entire
@@ -164,7 +166,7 @@ fresh Python clients and read the entire image, including unwritten areas.
 
 ### `cephfs`: file persistence and MGR subvolumes
 
-Uses control, osd and mds images in one cluster.
+Uses essential, client and cephfs images in one cluster.
 
 1. Create metadata and data pools, create a filesystem and start MDS.
    Require an `up:active` MDS and clean placement groups, verifying that
@@ -183,12 +185,12 @@ Uses control, osd and mds images in one cluster.
    in separate client processes. This verifies the MGR volumes API creates
    a usable subvolume and its path supports normal CephFS I/O.
 
-These mounts use LibCephFS inside control containers; no kernel mount is
+These mounts use LibCephFS inside client containers; no kernel mount is
 used. The scenario does not exercise MDS failover.
 
 ### `rgw-s3`: authenticated object operations
 
-Uses control, osd and rgw images in one cluster.
+Uses essential and rgw images in one cluster.
 
 1. Start RGW and wait for an HTTP service response, then create a user
    and credentials with `radosgw-admin`. This verifies gateway startup and
@@ -211,7 +213,7 @@ TLS, Swift, STS or every S3 API.
 
 ### `rbd-encryption`: encrypted RBD and external passphrase change
 
-Uses control and osd images in one cluster.
+Uses essential and client images in one cluster.
 
 For each of LUKS1 and LUKS2:
 
@@ -251,7 +253,7 @@ tests short; it is not a production password policy.
 
 ### `rados-object-class`: compound calls and OSD responses
 
-Uses control and osd images in one cluster.
+Uses essential and client images in one cluster.
 
 1. Create a RADOS pool and submit a Python librados compound write
    operation containing `hello.record_hello` with input `application`.
@@ -268,12 +270,12 @@ Uses control and osd images in one cluster.
 
 This proves the request reaches OSD and its built-in class loads, executes
 and responds. It does not guarantee arbitrary user-defined class
-compatibility. The client belongs in control; hello and its dependencies
-belong in osd.
+compatibility. The client belongs in client; hello and its dependencies
+belong in essential.
 
 ### `rados-striper`: striped I/O and OSD locks
 
-Uses control and osd images in one cluster.
+Uses essential and client images in one cluster.
 
 1. Create a lock fixture and take an exclusive lock through Python
    librados. A second cookie must receive `ObjectBusy` while the first
@@ -293,11 +295,11 @@ Uses control and osd images in one cluster.
 
 This exercises libradosstriper and OSD together, including split, reassembly,
 deletion and lock-class execution. Control provides the CLI and striper
-library; osd provides lock and its dependencies. No `cls_striper` is required.
+library; essential provides lock and its dependencies. No `cls_striper` is required.
 
 ### `rbd-backup`: full and incremental image restore
 
-Uses control and osd images in two independent clusters.
+Uses essential and client images in two independent clusters.
 
 1. Initialize RBD pools in the source and backup clusters. Create a
    32 MiB source image, write and flush 4 MiB at offset zero, and create
@@ -321,8 +323,8 @@ daemon or test automatic backup scheduling.
 
 ### `rbd-snapshot-mirror`: snapshot replication across clusters
 
-Uses control and osd images in two independent clusters. The mirror daemon
-runs from the secondary control image.
+Uses essential and client images in two independent clusters. The mirror daemon
+runs from the rbd-aux image.
 
 1. Initialize both RBD pools and enable image-mode mirroring with distinct
    site names. Create a peer bootstrap token on the primary and import it
@@ -330,7 +332,7 @@ runs from the secondary control image.
    the secondary client's authenticated contact with the primary.
 2. Create a CephX identity with mirror permissions and start `rbd-mirror`
    on the secondary with access to both cluster networks. This verifies
-   the control image can run the mirror daemon with injected credentials.
+   the rbd-aux image can run the mirror daemon with injected credentials.
 3. Create a 32 MiB primary image and enable snapshot mirroring. Write
    and flush a 2 MiB payload, create a mirror snapshot and wait until
    the secondary whole-image SHA-256 equals the primary hash. This
@@ -348,8 +350,8 @@ exercise journal mirroring, promotion, failover or reverse replication.
 
 ### `cephfs-snapshot-mirror`: directory snapshot replication
 
-Uses control, osd and mds images in two independent clusters. The mirror
-daemon runs from the primary control image.
+Uses essential, client and cephfs images in two independent clusters. The mirror
+daemon runs from the cephfs image.
 
 1. Create a filesystem and start an active MDS in each cluster. Enable
    the MGR mirroring module on both and filesystem snapshot mirroring
@@ -361,7 +363,7 @@ daemon runs from the primary control image.
    relationship through its bootstrap API.
 3. Create a CephX identity with mirror permissions and start
    `cephfs-mirror` on the primary with access to both clusters. This
-   verifies the control image can run the userspace mirror daemon with
+   verifies the cephfs image can run the userspace mirror daemon with
    the configured identity and peer connectivity.
 4. Write and fsync a 1 MiB file beneath `/mirrored`, register that
    directory for mirroring, and create snapshot `first` in its `.snap`
@@ -377,7 +379,7 @@ synchronization, multiple update rounds or failover.
 
 ### `rgw-multisite`: realm configuration and cross-zone object replication
 
-Uses control, osd and rgw images in two independent clusters. Gateway and
+Uses essential and rgw images in two independent clusters. Gateway and
 administrative containers communicate over a shared peer network.
 
 1. On the primary, create a realm, a master zonegroup and master zone

@@ -1,4 +1,4 @@
-"""Resolve installed package closures offline for the roles-v2 assembler."""
+"""Resolve installed package closures offline for the roles assembler."""
 import os
 from pathlib import Path
 import re

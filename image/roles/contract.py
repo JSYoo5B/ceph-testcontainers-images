@@ -1,4 +1,4 @@
-"""Versioned role capabilities. Package names are backend implementation details."""
+"""Role capabilities. Package names are backend implementation details."""
 import os
 from pathlib import Path
 ROLES = ("essential", "client", "cephfs", "rbd-aux", "rgw")

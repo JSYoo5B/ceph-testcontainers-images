@@ -4,11 +4,9 @@ This repository defines the requirements for Ceph images used by Ceph testcontai
 
 ## Purpose
 
-Ceph testcontainers modules use the official Ceph image by default:
-
-```text
-quay.io/ceph/ceph:v20.2.4@sha256:6bb1c8a42fbc0bf87938946990b65174466997bc11c31eb5a323225a779fd8f9
-```
+Ceph testcontainers modules use the pruned role runtime by default. Published
+role indexes are pinned in [.github/ceph-role-images.json](.github/ceph-role-images.json).
+The upstream official image remains an unmodified compatibility reference.
 
 This repository checks and publishes images for each Ceph release listed in [image/releases.py](image/releases.py):
 
@@ -50,26 +48,15 @@ image/debian/, image/ubuntu/  Role images from distribution packages
 
 Unit tests live in `tests/` next to each tool. Reports and logs go to the ignored `artifacts/` directory.
 
-## Versioned dependency roles
+## Role images
 
-The default production [roles-v2 contract](docs/ROLES_V2.md) uses essential, client,
-cephfs, rbd-aux, rgw and all. It separates ordinary client execution from
-mirror/cache and RGW administration. Existing tags and the legacy checker
-contract retain their meanings. Build with `make roles-v2-images`; select
-`--contract roles-v2` in the checker and publisher. V2 publication uses a
-separate `roles-v2-<variant>-<release>-<role>` namespace.
+The [role requirements](docs/ROLES.md) define essential, client, cephfs,
+rbd-aux, rgw and all. Essential contains MON/MGR/OSD and their daemon-local
+modules/plugins. Client supplies ordinary CLI and Python bindings; optional
+processes and RGW administration stay with their feature role.
 
-## Legacy role diagnostics
-
-| Role | Contents |
-| --- | --- |
-| `control` | MON, MGR, CLI and Python clients, cryptsetup, encrypted RBD and striper clients, RBD and CephFS mirror daemons, the RBD immutable object cache daemon, `pgrep` |
-| `osd` | OSD, BlueStore, object classes including hello/lock and plugins |
-| `rgw` | RGW and its admin CLI |
-| `mds` | CephFS MDS |
-| `all` | Every component of the four roles in one image |
-
-See [Image Requirements](docs/IMAGE_REQUIREMENTS.md) for the required runtime components and [Test Scenarios](docs/TEST_SCENARIOS.md) for validation.
+Build with `make role-images VARIANT=official` (or debian, ubuntu, alpine).
+`image/check.py` and `image/publish.py` use this contract directly.
 
 ## Checking an image
 
@@ -85,10 +72,11 @@ python3 image/check.py --image all=my-company/ceph:dev
 python3 image/check.py --image all=my-company/ceph:dev --full
 
 python3 image/check.py \
-  --image control=my-company/ceph-control:dev \
-  --image osd=my-company/ceph-osd:dev \
+  --image essential=my-company/ceph-essential:dev \
+  --image client=my-company/ceph-client:dev \
+  --image cephfs=my-company/ceph-cephfs:dev \
+  --image rbd-aux=my-company/ceph-rbd-aux:dev \
   --image rgw=my-company/ceph-rgw:dev \
-  --image mds=my-company/ceph-mds:dev \
   --full
 ```
 
@@ -101,11 +89,11 @@ make role-images        # extract, smoke test and quick check
 make role-images-full   # extract, smoke test and full check
 ```
 
-The output is `ceph-testcontainers:official-<release>-<role>` for the four roles and `all`. See [Role Images](docs/ROLE_IMAGES.md).
+The output is `ceph-testcontainers:official-<release>-<role>` for the five roles and `all`. See [Role Images](docs/ROLE_IMAGES.md).
 
 ## Images from distribution packages
 
-[image/debian](image/debian/Dockerfile) (bookworm-slim) and [image/ubuntu](image/ubuntu/Dockerfile) build the same five roles by installing only the needed packages from Ceph's own Debian and Ubuntu repositories at download.ceph.com. They are built with `make debian-images` and `make ubuntu-images`, which take `CEPH_RELEASE` (default `20.2.4`), and tagged `<distribution>-<release>-<role>`. The arm64 Ubuntu images set `TCMALLOC_STACKTRACE_METHOD=generic_fp`, because Ceph's Noble daemons crash with SIGILL in the default tcmalloc stack unwinder on some ARM64 hosts; on amd64 the same setting makes them crash, so it is not set there. Like the extracted images, each one records its packages, licenses and source pointers under `/usr/share/ceph-testcontainers/`.
+[image/debian](image/debian/Dockerfile) (bookworm-slim) and [image/ubuntu](image/ubuntu/Dockerfile) provide source runtimes for the same five roles and aggregate by installing only the needed packages from Ceph's own Debian and Ubuntu repositories at download.ceph.com. They are built with `make debian-images` and `make ubuntu-images`, which take `CEPH_RELEASE` (default `20.2.4`), and tagged `<distribution>-<release>-<role>`. The arm64 Ubuntu images set `TCMALLOC_STACKTRACE_METHOD=generic_fp`, because Ceph's Noble daemons crash with SIGILL in the default tcmalloc stack unwinder on some ARM64 hosts; on amd64 the same setting makes them crash, so it is not set there. Like the extracted images, each one records its packages, licenses and source pointers under `/usr/share/ceph-testcontainers/`.
 
 ### Experimental Alpine stable Squid
 
@@ -119,10 +107,11 @@ is used. This is a separate **19.2.4** experiment: it is not part of
 ```sh
 make alpine-images PLATFORM=linux/amd64
 python3 image/check.py --platform linux/amd64 --full \
-  --image control=ceph-testcontainers:alpine-19.2.4-control \
-  --image osd=ceph-testcontainers:alpine-19.2.4-osd \
+  --image essential=ceph-testcontainers:alpine-19.2.4-essential \
+  --image client=ceph-testcontainers:alpine-19.2.4-client \
+  --image cephfs=ceph-testcontainers:alpine-19.2.4-cephfs \
+  --image rbd-aux=ceph-testcontainers:alpine-19.2.4-rbd-aux \
   --image rgw=ceph-testcontainers:alpine-19.2.4-rgw \
-  --image mds=ceph-testcontainers:alpine-19.2.4-mds \
   --image all=ceph-testcontainers:alpine-19.2.4-all
 ```
 
@@ -131,19 +120,18 @@ alone does not establish runtime compatibility; run the checker on that host.
 The target supports the same opt-in `BUILD_CACHE_REF` and `BUILD_CACHE_WRITE`
 settings as the distribution builds above.
 
-The control and `all` images set
+The installed source runtime sets
 `CEPH_ARGS=--mgr-subinterpreter-modules=*` to restore Squid's per-module Python
 interpreters. Alpine's backported shared-interpreter default can otherwise
 dispatch a CephFS mirroring command to the wrong MGR module.
-They request an 8 MiB worker stack for `cephfs-mirror` through its ELF
+The cephfs and all images retain an 8 MiB worker stack for `cephfs-mirror` through its ELF
 `PT_GNU_STACK` header: its directory replay allocates more stack than musl's
 default. Only the stack-size field changes; executable code and stack permission
 flags are preserved. `modifications.json` records the original and modified
 hashes and sizes alongside the source manifest.
-The OSD image installs the daemon and base packages without the OSD tools and
-ceph-volume metapackage. The control image needs the parent `ceph19` package
-for the immutable object cache and parent-cache plugin, which also brings in
-the other daemons; `all` consequently reuses it. Installed package versions,
+The source runtime needs the parent `ceph19` package for the immutable object
+cache and parent-cache plugin. The assembler then selects each role's package
+closure and executable set. Installed package versions,
 SPDX license expressions, source origins and aports commits are recorded under
 `/usr/share/ceph-testcontainers/`, with Ceph's upstream `COPYING` notice under
 `/usr/share/licenses/ceph/`.
@@ -162,34 +150,39 @@ The netem helper is published as `ghcr.io/jsyoo5b/ceph-testcontainers-images:ext
 ## Published images
 
 Production images use
-`ghcr.io/jsyoo5b/ceph-testcontainers-images:roles-v2-<variant>-<release>-<role>`
+`ghcr.io/jsyoo5b/ceph-testcontainers-images:<variant>-<release>-<role>`
 for `linux/amd64` and `linux/arm64`. Roles are `essential`, `client`,
 `cephfs`, `rbd-aux`, `rgw` and the aggregate `all`. Select only the roles
-required by the feature, as documented in [Dependency roles](docs/ROLES_V2.md).
+required by the feature, as documented in [Dependency roles](docs/ROLES.md).
 
-The [roles-v2 workflow](.github/workflows/roles-v2.yml) is the production
-entry point: PRs and main pushes build and quick-check both supported
-releases, all three variants and both native architectures. A manual run
-selects one release, independently runs the complete split and aggregate
-functional suites and the RGW-without-client proof, then optionally stages
-and promotes the exact tested image identities with `publish=true`.
-Promotion requires every variant/architecture candidate; failed or skipped
-checks block it. Registry health is verified after promotion. Consumer-side
-registry pulls and native interoperability remain separate evidence.
+The [checker workflow](.github/workflows/test.yml) runs the host unit and
+extension checks. It does not build a Ceph release matrix on every PR or push.
+Reviewers can request additional image checks with a PR comment:
 
-Each release tag is an index of two platform images, also retained under
-`-linux-amd64` and `-linux-arm64` tags. The weekly
+```text
+/ci run image-quick
+/ci run image-full on 19.2.5
+/ci run image-full on all
+```
+
+Quick selects official/Tentacle/amd64 by default. Full selects all three
+variants and both native architectures for the requested releases. Only an
+owner, member or collaborator may run a command on an open same-repository
+PR. The head SHA is frozen before checkout; native jobs have a read-only token
+and cannot publish. Results appear as a commit status with the run link.
+
+The manual [images workflow](.github/workflows/images.yml) selects one release
+and runs the complete split/aggregate and RGW-without-client proofs before
+optional publication. Promotion requires all six tested native cohorts;
+failed or skipped checks block it. Publication and registry health remain
+separate from downstream consumer validation.
+
+The current qualified registry indexes are recorded in
+[the published digest map](.github/ceph-role-images.json). Consumers and
+extension checks can use these immutable references without rebuilding or
+republishing an image for a name change. The weekly
 [published image health workflow](.github/workflows/published-health.yml)
-checks the dependency-role namespace and the extension helper tags. Keep
-both platform images reachable when cleaning registry storage.
-
-The [checker workflow](.github/workflows/test.yml) runs unit and extension
-checks by default. Its former control/osd/mds/rgw campaign is available only
-through manual `legacy_images=true` for historical comparisons. These tags
-are not rebuilt or republished by ordinary PR/main CI. Existing diagnostic
-checker/build commands retain their explicit legacy contract. Netem's
-functional and post-publication tests now target the essential image that
-hosts OSDs, alongside the unmodified official source image.
+checks both native children of every pinned role and the extension tags.
 
 | Variant | Source |
 | --- | --- |
@@ -202,7 +195,7 @@ release/variant publication matrix. See [Alpine](#experimental-alpine-stable-squ
 
 ## Development
 
-`make check` runs the host unit tests of the checkers, the publisher, the functional harness and the role extraction. The release jobs depend only on `make base-check`; the extension jobs run `make extension-test`, so that neither blocks the other. [The production workflow](.github/workflows/roles-v2.yml) checks official-derived, Debian and Ubuntu dependency roles on native AMD64 and ARM64. Full publication checks cover split roles and `all` independently.
+`make check` runs the host unit tests of the checkers, the publisher, the functional harness and the role extraction. The release jobs depend only on `make base-check`; the extension jobs run `make extension-test`, so that neither blocks the other. [The manual production workflow](.github/workflows/images.yml) checks official-derived, Debian and Ubuntu dependency roles on native AMD64 and ARM64. Full publication checks cover split roles and `all` independently.
 
 ## License
 

@@ -65,7 +65,7 @@ jobs:
           targets=()
           for release in $(python3 image/releases.py list); do
             for target in "$(python3 image/releases.py official "$release")" \
-                "ghcr.io/jsyoo5b/ceph-testcontainers-images:roles-v2-official-$release-essential"; do
+                "$(python3 image/releases.py role "$release" official essential)"; do
               docker pull --platform "$platform" "$target"
               targets+=(--target "$target")
             done

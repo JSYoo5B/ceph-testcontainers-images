@@ -1,4 +1,4 @@
-"""Configure the shared, metadata-preserving assembler for roles-v2."""
+"""Configure the shared, metadata-preserving assembler for roles."""
 import os
 from pathlib import Path
 import shutil
@@ -48,7 +48,7 @@ def configure(kind):
     analyze.extra_paths = lambda: extras() | {packaging.COPYING}
     packaging.role_notices = {p.name:p.read_bytes() for p in Path('/usr/share/ceph-testcontainers').glob('modifications.json')}
     packaging.source_notice = lambda source,version: (
-        'roles-v2 runtime; see source-packages.txt for selected source packages. Extracted from '+source+'\n'+version+'\n'
+        'roles runtime; see source-packages.txt for selected source packages. Extracted from '+source+'\n'+version+'\n'
         +Path('/usr/share/ceph-testcontainers/SOURCES.txt').read_text())
     def materialize():
         selected = closure(assemble.PACKAGES)

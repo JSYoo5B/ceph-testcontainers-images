@@ -1,0 +1,79 @@
+name: CI command
+on:
+  issue_comment:
+    types: [created]
+permissions: {}
+jobs:
+  command:
+    if: github.event.issue.pull_request && contains(github.event.comment.body, '/ci')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      accepted: ${{ steps.select.outputs.accepted }}
+      sha: ${{ steps.select.outputs.sha }}
+      matrix: ${{ steps.select.outputs.matrix }}
+      context: ${{ steps.select.outputs.context }}
+      key: ${{ steps.select.outputs.key }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Read the pull request
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PULL_NUMBER: ${{ github.event.issue.number }}
+        run: gh api "repos/$GITHUB_REPOSITORY/pulls/$PULL_NUMBER" > "$RUNNER_TEMP/pull.json"
+      - name: Authorize the command and freeze the head
+        id: select
+        run: >-
+          python3 image/ci_command.py --event "$GITHUB_EVENT_PATH" --pull "$RUNNER_TEMP/pull.json"
+          --github-output "$GITHUB_OUTPUT"
+  pending:
+    needs: command
+    if: needs.command.outputs.accepted == 'true'
+    runs-on: ubuntu-24.04
+    permissions:
+      statuses: write
+    steps:
+      - env:
+          GH_TOKEN: ${{ github.token }}
+          HEAD_SHA: ${{ needs.command.outputs.sha }}
+          STATUS_CONTEXT: ${{ needs.command.outputs.context }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: >-
+          gh api "repos/$GITHUB_REPOSITORY/statuses/$HEAD_SHA" -f state=pending
+          -f context="$STATUS_CONTEXT" -f target_url="$RUN_URL" -f description='Requested image checks'
+  checks:
+    needs: [command, pending]
+    if: needs.command.outputs.accepted == 'true'
+    concurrency:
+      group: image-checks-${{ needs.command.outputs.key }}
+      cancel-in-progress: false
+    permissions:
+      contents: read
+    uses: ./.github/workflows/image-checks.yml
+    with:
+      ref: ${{ needs.command.outputs.sha }}
+      matrix: ${{ needs.command.outputs.matrix }}
+  status:
+    needs: [command, checks]
+    if: always() && needs.command.outputs.accepted == 'true'
+    runs-on: ubuntu-24.04
+    permissions:
+      statuses: write
+    steps:
+      - env:
+          GH_TOKEN: ${{ github.token }}
+          HEAD_SHA: ${{ needs.command.outputs.sha }}
+          STATUS_CONTEXT: ${{ needs.command.outputs.context }}
+          RESULT: ${{ needs.checks.result }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          state=error
+          if [ "$RESULT" = success ]; then state=success; fi
+          if [ "$RESULT" = failure ]; then state=failure; fi
+          gh api "repos/$GITHUB_REPOSITORY/statuses/$HEAD_SHA" -f state="$state" \
+            -f context="$STATUS_CONTEXT" -f target_url="$RUN_URL" -f description='Requested image checks finished'

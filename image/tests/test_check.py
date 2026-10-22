@@ -99,7 +99,7 @@ class ImageContractTests(unittest.TestCase):
                 mock.patch.object(check.subprocess, "run", return_value=subprocess.CompletedProcess(
                     [], 0, "CHECK\tpassed\tshell\nVERSION\tceph\tceph version 20.2.4 (abc)\n", "")):
             image = {"platform": "linux/arm64", "image_id": "fixed"}
-            check.probe_image("control", image, check.arguments(["--image", "control=image"]), Path(temporary))
+            check.probe_image("essential", image, check.arguments(["--image", "essential=image"]), Path(temporary))
         self.assertEqual(image["status"], "failed")
         self.assertIn("did not finish", image["error"])
 
@@ -139,7 +139,7 @@ class ImageContractTests(unittest.TestCase):
                 mock.patch.object(check, "inspect_image", side_effect=[
                     {"platform": "linux/arm64"}, {"platform": "linux/amd64"}]), \
                 contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
-            code = check.main(["--image", "control=a", "--image", "osd=b", "--output-dir", temporary])
+            code = check.main(["--image", "essential=a", "--image", "client=b", "--output-dir", temporary])
             report = json.loads((Path(temporary) / "check-report.json").read_text())
         probe.assert_not_called()
         self.assertEqual(code, 1)
@@ -230,7 +230,7 @@ class ProcessInspectionProbeTests(unittest.TestCase):
 class ParentCachePluginProbeTests(unittest.TestCase):
     """Runs the control probe's Python block against a stub plugin directory."""
 
-    def run_probe(self, plugin, role="control"):
+    def run_probe(self, plugin, role="all"):
         script = (check.HERE / "check-runtime.sh").read_text()
         start = script.index("python3 - \"$role\" <<'PY' || failed=1\n") + len("python3 - \"$role\" <<'PY' || failed=1\n")
         block = script[start:script.index("\nPY\n", start)]

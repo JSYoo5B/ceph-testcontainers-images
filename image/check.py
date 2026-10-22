@@ -21,7 +21,7 @@ import suite  # noqa: E402
 sys.path.insert(0, str(HERE / "roles"))
 import contract
 
-ROLES = ("control", "osd", "rgw", "mds", "all")
+ROLES = contract.ROLES + ("all",)
 VERSION = re.compile(r"ceph version (\S+) \(([^)]+)\)")
 
 
@@ -38,9 +38,8 @@ def positive_number(value):
 
 def arguments(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--contract", choices=("legacy", "roles-v2"), default="legacy")
     parser.add_argument("--image", action="append", required=True, metavar="ROLE=REF",
-                        help="Repeat for any of control, osd, rgw, mds, all; extra daemons are allowed")
+                        help="Repeat for essential, client, cephfs, rbd-aux, rgw or all; extra daemons are allowed")
     parser.add_argument("--platform", choices=("linux/arm64", "linux/amd64"),
                         help="Reject other platforms; otherwise record each local image's platform")
     parser.add_argument("--output-dir", type=Path, help="Fresh report/log directory (default: artifacts/image-check-UUID)")
@@ -59,7 +58,7 @@ def image_arguments(values):
     images = {}
     for value in values:
         role, separator, reference = value.partition("=")
-        if not separator or role not in ROLES + contract.ROLES or not reference.strip() or reference.startswith("-"):
+        if not separator or role not in ROLES or not reference.strip() or reference.startswith("-"):
             raise CheckError("Expected ROLE=REF with role in " + ", ".join(ROLES))
         if role in images:
             raise CheckError("Duplicate image role: " + role)
@@ -67,12 +66,12 @@ def image_arguments(values):
     return images
 
 
-def runtime_sets(images, scenarios=None, version="legacy"):
+def runtime_sets(images, scenarios=None):
     result = {}
-    roles = contract.ROLES if version == "roles-v2" else ROLES[:-1]
-    mixed = contract.required(scenarios) if version == "roles-v2" and scenarios else set(roles)
-    if version == "roles-v2" and set(images) - set(contract.ROLES + ("all",)):
-        raise CheckError("Legacy and roles-v2 images cannot be mixed")
+    roles = contract.ROLES
+    mixed = contract.required(scenarios) if scenarios else set(roles)
+    if set(images) - set(ROLES):
+        raise CheckError("Unknown image role")
     if mixed.issubset(images):
         result["mixed"] = {role: images[role] for role in roles if role in images}
     if "all" in images:
@@ -158,7 +157,7 @@ def probe_image(role, image, args, output):
     try:
         run(["docker", "create", "--name", container, "--pull=never", "--network=none", "--user=0:0", "--interactive",
              "--hostname=ceph-image-check", "--add-host=ceph-image-check:127.0.0.1",
-             "--platform", image["platform"], "--entrypoint=/bin/sh", image["image_id"], "-s", "--", role] + ([args.contract] if args.contract == "roles-v2" else []))
+             "--platform", image["platform"], "--entrypoint=/bin/sh", image["image_id"], "-s", "--", role])
         result = subprocess.run(["docker", "start", "--attach", "--interactive", container],
                                 input=(HERE / "check-runtime.sh").read_text(), capture_output=True,
                                 text=True, timeout=args.probe_timeout)
@@ -218,10 +217,10 @@ def save(output, report):
 def main(argv=None):
     args = arguments(argv)
     references = image_arguments(args.image)
-    allowed = contract.ROLES + ("all",) if args.contract == "roles-v2" else ROLES
+    allowed = ROLES
     if set(references) - set(allowed):
         raise CheckError("Image roles do not match selected contract")
-    sets = runtime_sets(references, args.scenario, args.contract) if args.full else {}
+    sets = runtime_sets(references, args.scenario) if args.full else {}
     if not shutil.which("docker"):
         raise CheckError("Docker CLI must be installed")
     output = (args.output_dir or Path("artifacts") / ("image-check-" + uuid.uuid4().hex)).resolve()
@@ -232,7 +231,7 @@ def main(argv=None):
               "requested_scenarios": args.scenario or (list(suite.SCENARIOS) if args.full else []),
               "started_at": datetime.now(timezone.utc).isoformat(), "status": "running",
               "preflight": "running", "scenarios": "pending" if sets else "not_requested",
-              "images": {}, "functional": {}, "contract": args.contract,
+              "images": {}, "functional": {}, "contract": "roles",
               "contract_sha256": hashlib.sha256((HERE / "check-runtime.sh").read_bytes()).hexdigest(),
               "functional_sha256": functional_sha256(),
               "checker_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest()}

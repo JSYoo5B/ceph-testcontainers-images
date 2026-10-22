@@ -1,55 +1,57 @@
-.PHONY: check base-check extension-test checker-test functional-test roles-test image-check official-check role-images role-images-full debian-images ubuntu-images alpine-images extension-images extension-selectors extension-check
-
-# Release inputs live in image/releases.py; CEPH_RELEASE selects one of them.
+.PHONY: check base-check checker-test functional-test roles-test extension-test extension-images extension-selectors extension-check image-check official-check role-images role-images-full debian-images ubuntu-images alpine-images
 CEPH_RELEASE ?= 20.2.4
 OFFICIAL_IMAGE ?= $(shell python3 image/releases.py official $(CEPH_RELEASE))
-CEPH_SOURCE_IMAGE ?= $(OFFICIAL_IMAGE)
-ROLE_REPOSITORY ?= ceph-testcontainers
+IMAGE_REPOSITORY ?= ceph-testcontainers
+PLATFORM ?= linux/amd64
+VARIANT ?= official
+ROLE_TAG = $(VARIANT)-$(if $(filter alpine,$(VARIANT)),19.2.4,$(CEPH_RELEASE))
+ROLE_SOURCE = $(IMAGE_REPOSITORY):$(ROLE_TAG)-source
+ROLE_CHECK ?= quick
+ROLE_OUTPUT ?= artifacts/$(ROLE_TAG)-$(subst /,-,$(PLATFORM))
 
-# Host unit tests only; no Docker. Release images depend only on base-check,
-# so that an extension defect never blocks them.
 check: base-check extension-test
-
 base-check: checker-test functional-test roles-test
-
-extension-test:
-	python3 -m unittest discover -s image/extensions/tests -v
-
 checker-test:
 	python3 -m unittest discover -s image/tests -v
 	python3 image/releases.py official $(CEPH_RELEASE) >/dev/null
-
 functional-test:
 	python3 -m unittest discover -s image/functional/tests -v
-
 roles-test:
 	python3 -m unittest discover -s image/roles/tests -v
-
-# Example: make image-check IMAGE_CHECK_ARGS='--image all=my-ceph:dev --full'
+extension-test:
+	python3 -m unittest discover -s image/extensions/tests -v
 image-check:
 	python3 image/check.py $(IMAGE_CHECK_ARGS)
-
-# Quick and full check of the official image; it must always pass.
 official-check:
 	python3 image/check.py --image "all=$(OFFICIAL_IMAGE)" --full
 
-# Role images extracted from the official image.
+# Distribution Dockerfiles provide an installed source runtime. Only the
+# dependency assembler below builds the published role images.
 role-images:
-	python3 image/roles/build.py --source-image "$(CEPH_SOURCE_IMAGE)" --repository "$(ROLE_REPOSITORY)" --check quick
+	@case "$(VARIANT)" in official|debian|ubuntu|alpine) ;; *) exit 2 ;; esac
+	@if [ "$(VARIANT)" = official ]; then \
+		source="$(OFFICIAL_IMAGE)"; backend=rpm; docker pull --platform "$(PLATFORM)" "$$source" || exit 1; \
+	else \
+		build_args=""; backend=deb; \
+		if [ "$(VARIANT)" = alpine ]; then backend=apk; else \
+			build_args="$$(python3 image/releases.py build-args $(CEPH_RELEASE) $(VARIANT))" || exit 1; fi; \
+		$(call registry_cache,-source) \
+		docker buildx build --load --platform "$(PLATFORM)" --provenance=false --target all $$build_args $$cache_args \
+			-t "$(ROLE_SOURCE)" image/$(VARIANT) || exit 1; source="$(ROLE_SOURCE)"; \
+	fi; \
+	python3 image/roles/build.py --package-backend $$backend --source-runtime-env \
+		--source-image "$$source" --skip-pull --platform "$(PLATFORM)" --repository "$(IMAGE_REPOSITORY)" \
+		--tag "$(ROLE_TAG)" --check $(ROLE_CHECK) --output-dir "$(ROLE_OUTPUT)"
 
 role-images-full:
-	python3 image/roles/build.py --source-image "$(CEPH_SOURCE_IMAGE)" --repository "$(ROLE_REPOSITORY)" --check full
+	$(MAKE) role-images ROLE_CHECK=full
 
-# Alternative role images built from distribution packages.
-IMAGE_REPOSITORY ?= ceph-testcontainers
-PLATFORM ?= linux/arm64
+debian-images ubuntu-images alpine-images: %-images:
+	$(MAKE) role-images VARIANT=$*
 
-# Optional registry cache, separate from the tested/published image tags.
-# Use a docker-container Buildx builder for registry cache export. Each role
-# gets its own stable tag so the five exports cannot overwrite one another.
+# The optional extension uses a separate build cache and publication contract.
 BUILD_CACHE_REF ?=
 BUILD_CACHE_WRITE ?= false
-
 define registry_cache
 cache_args=""; \
 if [ -n "$(BUILD_CACHE_REF)" ]; then \
@@ -60,24 +62,6 @@ if [ -n "$(BUILD_CACHE_REF)" ]; then \
 	fi; \
 fi;
 endef
-
-debian-images ubuntu-images: %-images:
-	build_args="$$(python3 image/releases.py build-args $(CEPH_RELEASE) $*)" || exit 1; \
-	for role in control osd rgw mds all; do \
-		$(call registry_cache,-$$role) \
-		docker buildx build --load --platform "$(PLATFORM)" --provenance=false --target $$role $$build_args \
-			$$cache_args -t "$(IMAGE_REPOSITORY):$*-$(CEPH_RELEASE)-$$role" image/$* || exit 1; \
-	done
-
-# Experimental stable Alpine Squid is a separate release from the published
-# matrix. Keep this version paired with image/alpine/Dockerfile; CEPH_RELEASE
-# intentionally continues to select only the existing published variants.
-alpine-images:
-	for role in control osd rgw mds all; do \
-		$(call registry_cache,-$$role) \
-		docker buildx build --load --platform "$(PLATFORM)" --provenance=false --target $$role \
-			$$cache_args -t "$(IMAGE_REPOSITORY):alpine-19.2.4-$$role" image/alpine || exit 1; \
-	done
 
 # Opt-in extension helpers, built and checked apart from the role images
 # (docs/EXTENSIONS.md). The check needs NET_ADMIN for its own helper containers.
@@ -100,25 +84,3 @@ extension-selectors:
 extension-check:
 	python3 image/extension_check.py --extension netem --image "$(EXTENSION_IMAGE)" \
 		--functional --target "$(OFFICIAL_IMAGE)" $(addprefix --selector ,$(shell $(EXTENSION_SELECTORS))) --rate --packet-faults
-
-
-# roles-v2 never overwrites legacy role tags. Distribution source images retain
-# package-manager metadata only during extraction; final roles share tar layers.
-V2_VARIANT ?= official
-V2_TAG = roles-v2-$(V2_VARIANT)-$(if $(filter alpine,$(V2_VARIANT)),19.2.4,$(CEPH_RELEASE))
-V2_SOURCE = $(IMAGE_REPOSITORY):$(V2_TAG)-source
-.PHONY: roles-v2-images
-roles-v2-images:
-	@case "$(V2_VARIANT)" in official|debian|ubuntu|alpine) ;; *) exit 2 ;; esac
-	@if [ "$(V2_VARIANT)" = official ]; then \
-		source="$(OFFICIAL_IMAGE)"; backend=rpm; docker pull --platform "$(PLATFORM)" "$$source" || exit 1; \
-	else \
-		build_args=""; backend=deb; \
-		if [ "$(V2_VARIANT)" = alpine ]; then backend=apk; else \
-			build_args="$$(python3 image/releases.py build-args $(CEPH_RELEASE) $(V2_VARIANT))" || exit 1; fi; \
-		docker buildx build --load --platform "$(PLATFORM)" --provenance=false --target all $$build_args \
-			-t "$(V2_SOURCE)" image/$(V2_VARIANT) || exit 1; source="$(V2_SOURCE)"; \
-	fi; \
-	python3 image/roles/build.py --contract roles-v2 --package-backend $$backend --source-runtime-env \
-		--source-image "$$source" --skip-pull --platform "$(PLATFORM)" --repository "$(IMAGE_REPOSITORY)" \
-		--tag "$(V2_TAG)" --check quick

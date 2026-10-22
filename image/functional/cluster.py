@@ -185,12 +185,7 @@ class Cluster:
     def __init__(self, docker, name, images, osds=2):
         self.docker = docker
         self.name = name
-        self.v2 = "essential" in images
         self.images = dict(images)
-        if self.v2:
-            self.images.update(control=images["essential"], osd=images["essential"])
-            if "cephfs" in images:
-                self.images["mds"] = images["cephfs"]
         self.admin_container = None
         self.osd_count = osds
         self.prefix = "tc-" + docker.session[:8] + "-" + name
@@ -258,13 +253,13 @@ class Cluster:
 
     def start(self, extra_networks=()):
         self.docker("network", "create", "--label", self.docker.label(), self.network)
-        mon = self.container("mon", self.images["control"], MON_SCRIPT,
+        mon = self.container("mon", self.images["essential"], MON_SCRIPT,
                              env=[("TC_FSID", self.fsid), ("TC_OSD_BLOCK_BYTES", OSD_BLOCK_BYTES)])
         wait("MON " + self.name, lambda: self.exec(mon, "ceph", "--connect-timeout", "5", "mon", "stat",
                                                    timeout=30), timeout=120)
         self.conf = self.exec(mon, "cat", "/etc/ceph/ceph.conf")
         self.admin_keyring = self.exec(mon, "cat", "/etc/ceph/ceph.client.admin.keyring")
-        self.container("client", self.images.get("client", self.images["control"]), CLIENT_SCRIPT, env=self.shared_env(),
+        self.container("client", self.images.get("client", self.images["essential"]), CLIENT_SCRIPT, env=self.shared_env(),
                        networks=extra_networks)
         self.start_mgr()
         for _ in range(self.osd_count):
@@ -278,7 +273,7 @@ class Cluster:
 
     def start_mgr(self, name="x"):
         keyring = self.auth("mgr." + name, "mon", "allow profile mgr", "osd", "allow *", "mds", "allow *")
-        self.container("mgr-" + name, self.images["control"], MGR_SCRIPT, env=self.shared_env() + [
+        self.container("mgr-" + name, self.images["essential"], MGR_SCRIPT, env=self.shared_env() + [
             ("TC_ID", name), ("TC_KEYRING", keyring), ("TC_DATA_DIR", "/var/lib/ceph/mgr/ceph-" + name)])
         wait("MGR " + self.name, lambda: self.ceph("mgr", "dump")["available"], timeout=180)
 
@@ -288,7 +283,7 @@ class Cluster:
         self.write_file("/tmp/osd-" + osd_uuid + ".json", json.dumps({"cephx_secret": secret}))
         osd_id = int(self.client("ceph", "osd", "new", osd_uuid, "-i", "/tmp/osd-" + osd_uuid + ".json").strip())
         keyring = "[osd.%d]\n\tkey = %s\n" % (osd_id, secret)
-        name = self.container("osd-%d" % osd_id, self.images["osd"], OSD_SCRIPT, env=self.shared_env() + [
+        name = self.container("osd-%d" % osd_id, self.images["essential"], OSD_SCRIPT, env=self.shared_env() + [
             ("TC_ID", osd_id), ("TC_OSD_UUID", osd_uuid), ("TC_KEYRING", keyring),
             ("TC_DATA_DIR", "/var/lib/ceph/osd/ceph-%d" % osd_id)])
         self.osds[osd_id] = name
@@ -335,7 +330,7 @@ class Cluster:
         self.client("ceph", "fs", "new", filesystem, filesystem + "_metadata", filesystem + "_data")
         keyring = self.auth("mds." + name, "mon", "allow profile mds", "osd", "allow rwx", "mds", "allow",
                             "mgr", "allow profile mds")
-        self.container("mds-" + name, self.images["mds"], MDS_SCRIPT, env=self.shared_env() + [
+        self.container("mds-" + name, self.images["cephfs"], MDS_SCRIPT, env=self.shared_env() + [
             ("TC_ID", name), ("TC_KEYRING", keyring), ("TC_DATA_DIR", "/var/lib/ceph/mds/ceph-" + name)])
 
         def active():
@@ -355,8 +350,6 @@ class Cluster:
              timeout=240)
 
     def admin_client(self):
-        if not self.v2:
-            return self.prefix + "-client"
         if self.admin_container is None:
             self.admin_container = self.container("rgw-admin", self.images["rgw"], CLIENT_SCRIPT, env=self.shared_env())
         return self.admin_container
@@ -365,6 +358,6 @@ class Cluster:
         return self.exec(container or self.prefix + "-rgw", "radosgw-admin", *args)
 
     def start_mirror(self, daemon, name, keyring, networks):
-        image = self.images["cephfs" if daemon == "cephfs-mirror" else "rbd-aux"] if self.v2 else self.images["control"]
+        image = self.images["cephfs" if daemon == "cephfs-mirror" else "rbd-aux"]
         return self.container(daemon, image, MIRROR_SCRIPT, env=self.shared_env() + [
             ("TC_DAEMON", daemon), ("TC_NAME", name), ("TC_KEYRING", keyring)], networks=networks)

@@ -20,7 +20,7 @@ LABEL org.opencontainers.image.source="https://github.com/JSYoo5B/ceph-testconta
       org.opencontainers.image.description="Experimental Ceph Squid role image from Alpine stable packages" \
       io.ceph-testcontainers.source-notice="/usr/share/ceph-testcontainers/SOURCES.txt"
 
-FROM common AS control
+FROM common AS all
 # The cache daemon and librbd parent-cache plugin belong to the ceph19 parent
 # package, which also installs the other daemons. Do not silently omit them.
 RUN apk add --no-cache "ceph19=${CEPH_PACKAGE_VERSION}" "ceph19-radosgw=${CEPH_PACKAGE_VERSION}" \
@@ -72,24 +72,4 @@ notice.mkdir(parents=True, exist_ok=True)
     'reason': 'CephFS mirror uses a stack allocation larger than the musl default',
 }, indent=2) + '\n')
 PY
-LABEL io.ceph-testcontainers.role="control"
-
-FROM common AS osd
-# The classic daemon plus base provide BlueStore, object classes and plugins;
-# the ceph19-osd metapackage additionally pulls ceph-volume and disk tools.
-RUN apk add --no-cache "ceph19-osd-daemon=${CEPH_PACKAGE_VERSION}" "ceph19-base=${CEPH_PACKAGE_VERSION}" \
-    && sh /usr/local/lib/ceph-testcontainers/write-sources.sh
-LABEL io.ceph-testcontainers.role="osd"
-
-FROM common AS rgw
-RUN apk add --no-cache "ceph19-radosgw=${CEPH_PACKAGE_VERSION}" \
-    && sh /usr/local/lib/ceph-testcontainers/write-sources.sh
-LABEL io.ceph-testcontainers.role="rgw"
-
-FROM common AS mds
-RUN apk add --no-cache "ceph19-mds=${CEPH_PACKAGE_VERSION}" \
-    && sh /usr/local/lib/ceph-testcontainers/write-sources.sh
-LABEL io.ceph-testcontainers.role="mds"
-
-FROM control AS all
 LABEL io.ceph-testcontainers.role="all"
