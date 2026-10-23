@@ -363,11 +363,16 @@ class FakeCaptureEngine:
     """A Docker stand-in for one capture scenario; each option breaks one step."""
 
     def __init__(self, test, uid=1000, early_exit=None, invalid_filter_refused=True, net_raw_refused=True,
-                 keeps_excluded=False):
+                 keeps_excluded=False, unprivileged=None, clock=None, ready_delay=0, exit_delay=0, block=0):
         self.test, self.uid, self.early_exit = test, uid, early_exit
         self.invalid_filter_refused, self.net_raw_refused = invalid_filter_refused, net_raw_refused
         self.keeps_excluded = keeps_excluded
-        self.captures, self.calls = {}, []
+        # (exit code, output, state) of the control without NET_RAW.
+        self.unprivileged = unprivileged
+        # A synthetic clock: a readiness or exit read takes its delay, and a
+        # state read that blocks for block seconds times out at its bound.
+        self.clock, self.ready_delay, self.exit_delay, self.block = clock, ready_delay, exit_delay, block
+        self.captures, self.calls, self.state_timeouts = {}, [], []
 
     def __call__(self, *command, timeout=120, check_exit=True):
         self.calls.append(list(command))
@@ -380,9 +385,13 @@ class FakeCaptureEngine:
             return 0, json.dumps([{"NetworkSettings": {"Networks": {network: {
                 "IPAddress": address, "MacAddress": "02:42:ac:1e:00:02"}}}}])
         if command[:2] == ("container", "inspect"):
+            if self.unprivileged:
+                return 0, json.dumps(self.unprivileged[2])
             return 0, json.dumps({"ExitCode": 255 if self.net_raw_refused else 1, "Error": "",
                                   "StartedAt": "2026-10-23T00:00:00Z"})
         if command[0] == "start":
+            if self.unprivileged:
+                return self.unprivileged[:2]
             if self.net_raw_refused:
                 return 255, "exec /usr/bin/tcpdump: operation not permitted\n"
             return 1, "tcpdump: can't parse filter expression\n"
@@ -416,7 +425,17 @@ class FakeCaptureEngine:
                 capture["stopped"] = True
             return 0, ""
         if script == extension_check.CAPTURE_STATE:
-            return 0, json.dumps(self.state(command[-1]))
+            self.state_timeouts.append(timeout)
+            if self.block:
+                if timeout < self.block:
+                    self.clock.now += timeout
+                    raise extension_check.CheckError("Docker command timed out", "timeout")
+                self.clock.now += self.block
+            state = self.state(command[-1])
+            if self.clock:
+                self.clock.now += self.exit_delay if state["status"] is not None else (
+                    self.ready_delay if not self.captures[command[-1]]["exchanged"] else 0)
+            return 0, json.dumps(state)
         if command[2] == "tcpdump" and "-d" in command:
             return 0, "(000) ret #0\n"
         if command[2] == "tcpdump":
@@ -444,6 +463,23 @@ class FakeCaptureEngine:
                 "size": len(capture["data"])}
 
 
+def outcome(result):
+    return result["status"], result.get("failure_stage"), result.get("failure_kind")
+
+
+class Clock:
+    """time.monotonic and time.sleep on a synthetic timeline."""
+
+    def __init__(self):
+        self.now = 1000.0
+
+    def monotonic(self):
+        return self.now
+
+    def sleep(self, seconds):
+        self.now += seconds
+
+
 class CaptureScenarioTests(unittest.TestCase):
     """The capture scenario's steps and failure kinds, with Docker replaced by a fake engine."""
 
@@ -452,14 +488,17 @@ class CaptureScenarioTests(unittest.TestCase):
         self.addCleanup(directory.cleanup)
         self.output = Path(directory.name)
 
-    def scenario(self, engine):
+    def scenario(self, engine, clock=None):
         target = {"reference": "quay.io/ceph/ceph:v20.2.4", "image_id": "sha256:" + "d" * 64,
                   "platform": "linux/amd64"}
         cleanup = {"status": "passed", "leftovers": [], "errors": []}
+        timing = (mock.patch.object(extension_check.time, "monotonic", side_effect=clock.monotonic),
+                  mock.patch.object(extension_check.time, "sleep", side_effect=clock.sleep)) if clock else \
+            (mock.patch.object(extension_check, "CAPTURE_READY_TIMEOUT", 1),
+             mock.patch.object(extension_check.time, "sleep"))
         with mock.patch.object(extension_check, "docker", side_effect=engine), \
                 mock.patch.object(extension_check, "cleanup", return_value=cleanup) as removed, \
-                mock.patch.object(extension_check, "CAPTURE_READY_TIMEOUT", 1), \
-                mock.patch.object(extension_check.time, "sleep"):
+                timing[0], timing[1]:
             result = extension_check.capture_scenario(dict(HELPER), target, "abcdef012345", self.output / "run")
         removed.assert_called_once()
         return result
@@ -501,6 +540,53 @@ class CaptureScenarioTests(unittest.TestCase):
                 self.assertEqual((result["status"], result["failure_stage"], result["failure_kind"]),
                                  ("failed", stage, kind))
                 shutil.rmtree(self.output / "run")
+
+    def test_only_the_runtime_exec_refusal_passes_the_control_without_net_raw(self):
+        started = {"ExitCode": 1, "Error": "", "StartedAt": "2026-10-23T00:00:00Z"}
+        unstarted = {"ExitCode": 255, "Error": "", "StartedAt": "0001-01-01T00:00:00Z"}
+        for name, unprivileged, kind in (
+                # tcpdump started without NET_RAW and reported its own permission error.
+                ("tcpdump's own permission error", (1, "tcpdump: eth0: You don't have permission to perform this "
+                                                       "capture on that device\n", started), "capture_failure"),
+                # The expected exit and message from a container that never started.
+                ("unstarted container", (255, "exec /usr/bin/tcpdump: operation not permitted\n", unstarted),
+                 "checker_failure"),
+                ("runtime error", (255, "exec /usr/bin/tcpdump: operation not permitted\n",
+                                   dict(unstarted, StartedAt="2026-10-23T00:00:00Z", Error="OCI runtime error")),
+                 "checker_failure")):
+            with self.subTest(name=name):
+                self.addCleanup(shutil.rmtree, self.output / "run", ignore_errors=True)
+                result = self.scenario(FakeCaptureEngine(self, unprivileged=unprivileged))
+                shutil.rmtree(self.output / "run")
+                self.assertEqual(outcome(result), ("failed", "refusals", kind))
+
+    def test_waits_are_judged_on_the_synthetic_clock(self):
+        # Within the 15-second budgets, the scenario passes on the synthetic clock too.
+        clock = Clock()
+        result = self.scenario(FakeCaptureEngine(self, clock=clock, ready_delay=5, exit_delay=5), clock)
+        self.assertEqual(result["status"], "passed", result.get("error"))
+
+    def test_late_readiness_or_exit_is_not_accepted(self):
+        for name, options, stage in (("readiness at 20s", {"ready_delay": 20}, "capture:traffic"),
+                                     ("exit at 20s", {"exit_delay": 20}, "capture:traffic")):
+            with self.subTest(name=name):
+                self.addCleanup(shutil.rmtree, self.output / "run", ignore_errors=True)
+                clock = Clock()
+                result = self.scenario(FakeCaptureEngine(self, clock=clock, **options), clock)
+                shutil.rmtree(self.output / "run")
+                self.assertEqual(outcome(result), ("failed", stage, "capture_failure"))
+                self.assertIn("within 15s", result["error"])
+
+    def test_a_blocked_state_read_is_bounded_by_the_time_left(self):
+        clock = Clock()
+        start = clock.now
+        engine = FakeCaptureEngine(self, clock=clock, block=120)
+        result = self.scenario(engine, clock)
+        self.assertEqual(outcome(result), ("failed", "capture:traffic", "timeout"))
+        self.assertTrue(engine.state_timeouts)
+        self.assertTrue(all(timeout <= extension_check.CAPTURE_READY_TIMEOUT for timeout in engine.state_timeouts),
+                        engine.state_timeouts)
+        self.assertLessEqual(clock.now - start, extension_check.CAPTURE_READY_TIMEOUT)
 
     def test_a_docker_failure_is_a_checker_failure(self):
         def engine(*command, timeout=120, check_exit=True):

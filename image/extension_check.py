@@ -507,31 +507,41 @@ def probe(extension, image, args, output):
 EXEC_REFUSED = re.compile(r"exec (/[^\s:]*/)?tcpdump: operation not permitted")
 
 
+def exec_refusal(container, timeout=120):
+    """Start a created container whose entrypoint is tcpdump, without NET_RAW.
+    Only the runtime's refusal to execute tcpdump counts as refused: the
+    container must have started (no Docker or runtime setup error) and exited
+    with runc's status 255 and its exec message alone, not with an error of
+    tcpdump itself. ran is false when Docker or the runtime never ran the
+    container's process, which says nothing about the image."""
+    code, text = docker("start", "--attach", container, timeout=timeout, check_exit=False)
+    state = json.loads(docker("container", "inspect", "--format", "{{json .State}}", container,
+                              timeout=timeout)[1])
+    state = {key: state.get(key) for key in ("ExitCode", "Error", "StartedAt")}
+    started = bool(state["StartedAt"]) and not state["StartedAt"].startswith("0001-")
+    ran = started and not state["Error"] and code == state["ExitCode"]
+    refused = ran and state["ExitCode"] == 255 and EXEC_REFUSED.fullmatch(text.strip()) is not None
+    return {"exit_code": code, "output": text, "state": state, "ran": ran, "refused": refused}
+
+
 def capture_refusal(image, output):
     """Without NET_RAW, the capture helper's tcpdump must not start at all:
     the kernel refuses to execute a file capability that the bounding set
-    lacks. Only that refusal passes: the container must have started (no
-    Docker or runtime setup error) and exited with runc's status 255 and its
-    exec message alone, not with an error of tcpdump itself."""
+    lacks. Only the refusal described by exec_refusal() passes."""
     container = "ceph-extension-check-" + uuid.uuid4().hex
     result = {"name": "refused-without-net_raw"}
     try:
         docker("create", "--name", container, "--label", LABEL + "=quick", "--pull=never", "--network=none",
                "--cap-drop=ALL", "--platform", image["platform"], "--entrypoint=tcpdump", image["image_id"],
                "--version")
-        code, text = docker("start", "--attach", container, check_exit=False)
-        state = json.loads(docker("container", "inspect", "--format", "{{json .State}}", container)[1])
-        (output / "refusal.log").write_text(text)
-        result.update(exit_code=code, state={key: state.get(key) for key in ("ExitCode", "Error", "StartedAt")})
-        started = bool(state.get("StartedAt")) and not state.get("StartedAt", "").startswith("0001-")
-        if not started or state.get("Error") or code != state.get("ExitCode"):
-            # Docker or the runtime never ran the container's process: the
-            # engine could not run the check, which says nothing about the image.
+        refusal = exec_refusal(container)
+        (output / "refusal.log").write_text(refusal["output"])
+        result.update(exit_code=refusal["exit_code"], state=refusal["state"])
+        if not refusal["ran"]:
             raise CheckError("The refusal container did not run: docker start exited %s, state %s: %s"
-                             % (code, json.dumps(result["state"]), text.strip()[:500]))
-        refused = state.get("ExitCode") == 255 and EXEC_REFUSED.fullmatch(text.strip()) is not None
-        result["status"] = "passed" if refused else "failed"
-        if not refused:
+                             % (refusal["exit_code"], json.dumps(refusal["state"]), refusal["output"].strip()[:500]))
+        result["status"] = "passed" if refusal["refused"] else "failed"
+        if not refusal["refused"]:
             result.update(failure_stage="quick:refused-without-net_raw", failure_kind="quick_failure")
     except check.CheckError as error:
         # A container that Docker could not create, start or inspect says
@@ -2152,44 +2162,59 @@ def capture_problems(kind, state, data, peer, target, snaplen, packets):
     return summary, problems
 
 
-def capture_state(capturer, base):
-    return json.loads(docker("exec", capturer, "python3", "-c", CAPTURE_STATE, base)[1])
+def budget(deadline, what):
+    """The seconds left before deadline; none left fails the wait."""
+    left = deadline - time.monotonic()
+    if left <= 0:
+        raise CheckError(what, "capture_failure")
+    return left
+
+
+def capture_state(capturer, base, deadline, what):
+    return json.loads(docker("exec", capturer, "python3", "-c", CAPTURE_STATE, base,
+                             timeout=budget(deadline, what))[1])
 
 
 def start_capture(capturer, base, interface, expression, packets):
     """Start tcpdump in the background and wait for its readiness line and
-    output file; a tcpdump that exits first fails with its own kind."""
-    docker("exec", "--detach", capturer, "sh", "-c", CAPTURE_WRAPPER, base, "-p", "-i", interface, "-s",
-           str(CAPTURE_SNAPLEN), "-c", str(packets), "--immediate-mode", "-U", "-w", base + ".pcap", expression)
+    output file; a tcpdump that exits first fails with its own kind. Every
+    Docker call is bounded by the time left, and readiness counts only when
+    it was observed before the deadline."""
     deadline = time.monotonic() + CAPTURE_READY_TIMEOUT
+    late = "tcpdump was not ready within %ds" % CAPTURE_READY_TIMEOUT
+    docker("exec", "--detach", capturer, "sh", "-c", CAPTURE_WRAPPER, base, "-p", "-i", interface, "-s",
+           str(CAPTURE_SNAPLEN), "-c", str(packets), "--immediate-mode", "-U", "-w", base + ".pcap", expression,
+           timeout=budget(deadline, late))
     while True:
-        state = capture_state(capturer, base)
+        state = capture_state(capturer, base, deadline, late)
+        observed = time.monotonic()
         if state["status"] is not None:
             raise CheckError("tcpdump exited with %d before it was ready: %s" % (state["status"],
                                                                                  state["stderr"].strip()[:500]),
                              classify_capture(state["status"], state["stderr"]))
+        if observed > deadline:
+            raise CheckError(late + ": " + state["stderr"].strip()[:500], "capture_failure")
         if capture_ready(state["stderr"], interface, CAPTURE_SNAPLEN) and state["size"] is not None and state["pid"]:
             return state
-        if time.monotonic() > deadline:
-            raise CheckError("tcpdump was not ready within %ds: %s" % (CAPTURE_READY_TIMEOUT,
-                                                                       state["stderr"].strip()[:500]),
-                             "capture_failure")
-        time.sleep(0.2)
+        time.sleep(min(0.2, max(deadline - time.monotonic(), 0)))
 
 
 def finish_capture(capturer, base, stop):
-    """Send SIGTERM when stop is set, then wait for tcpdump's exit status."""
-    state = capture_state(capturer, base)
-    if stop:
-        docker("exec", capturer, "python3", "-c", CAPTURE_SIGNAL, str(state["pid"]))
+    """Send SIGTERM when stop is set, then wait for tcpdump's exit status.
+    The first read, the signal and every later read are bounded by the time
+    left, and an exit counts only when it was observed before the deadline."""
     deadline = time.monotonic() + CAPTURE_STOP_TIMEOUT
-    while state["status"] is None:
+    late = "tcpdump did not exit within %ds%s" % (CAPTURE_STOP_TIMEOUT, " of SIGTERM" if stop else "")
+    state = capture_state(capturer, base, deadline, late)
+    if stop:
+        docker("exec", capturer, "python3", "-c", CAPTURE_SIGNAL, str(state["pid"]), timeout=budget(deadline, late))
+    while True:
         if time.monotonic() > deadline:
-            raise CheckError("tcpdump did not exit within %ds%s" % (CAPTURE_STOP_TIMEOUT,
-                                                                   " of SIGTERM" if stop else ""), "capture_failure")
-        time.sleep(0.2)
-        state = capture_state(capturer, base)
-    return state
+            raise CheckError(late, "capture_failure")
+        if state["status"] is not None:
+            return state
+        time.sleep(min(0.2, max(deadline - time.monotonic(), 0)))
+        state = capture_state(capturer, base, deadline, late)
 
 
 def retrieve(capturer, base, directory):
@@ -2247,14 +2272,15 @@ def refused_capture(names, label, interface, helper):
     docker("create", "--name", names["unprivileged"], "--label", label, "--pull=never",
            "--network", "container:" + names["target"], "--cap-drop=ALL", "--platform", helper["platform"],
            "--entrypoint=tcpdump", helper["image_id"], "-i", interface, *common, expression)
-    code, text = docker("start", "--attach", names["unprivileged"], timeout=30, check_exit=False)
-    state = json.loads(docker("container", "inspect", "--format", "{{json .State}}", names["unprivileged"])[1])
-    if state.get("Error") or code != state.get("ExitCode"):
-        raise CheckError("The control without NET_RAW did not run: docker start exited %s: %s"
-                         % (code, text.strip()[:500]))
-    controls["without_net_raw"] = {"expected": "permission_denied", "exit_code": code, "output": text.strip()[:500],
-                                   "kind": "permission_denied" if code == 255 and EXEC_REFUSED.fullmatch(text.strip())
-                                   else (classify_capture(code, text) if code else None)}
+    refusal = exec_refusal(names["unprivileged"], timeout=30)
+    if not refusal["ran"]:
+        raise CheckError("The control without NET_RAW did not run: docker start exited %s, state %s: %s"
+                         % (refusal["exit_code"], json.dumps(refusal["state"]), refusal["output"].strip()[:500]))
+    # Only the runtime's exec refusal passes; a tcpdump that started and
+    # reported a permission error of its own did run without NET_RAW.
+    controls["without_net_raw"] = {"expected": "permission_denied", "exit_code": refusal["exit_code"],
+                                   "output": refusal["output"].strip()[:500], "state": refusal["state"],
+                                   "kind": "permission_denied" if refusal["refused"] else "not_refused"}
     for control in controls.values():
         control["status"] = "passed" if control["kind"] == control["expected"] and \
             "listening on" not in control["output"] else "failed"
