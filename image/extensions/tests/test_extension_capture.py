@@ -359,11 +359,68 @@ class CaptureEvidenceTests(unittest.TestCase):
                 self.assertEqual(extension_check.classify_capture(code, text), kind)
 
 
+# A final record whose header promises 60 bytes, of which 10 were written.
+CUT_RECORD = struct.pack("<IIII", 1, 0, 60, 60) + b"\x00" * 10
+
+
+class PartialCaptureTests(unittest.TestCase):
+    """Partial evidence: tcpdump killed with SIGKILL, or the target lost while it ran."""
+
+    def problems(self, kind, data, status, stderr=READY_LINE, loss=None):
+        state = {"status": status, "stderr": stderr, "pid": 42, "size": len(data)}
+        return extension_check.partial_problems(kind, state, data, PEER, TARGET, SNAPLEN,
+                                                extension_check.CAPTURE_PACKETS, loss)
+
+    def test_a_killed_capture_keeps_its_complete_records(self):
+        summary, problems = self.problems("abrupt", capture_file(*FLOW), 137)
+        self.assertEqual(problems, [])
+        self.assertEqual((summary["records"], summary["cut_tail"], summary["complete"]), (len(FLOW), False, "partial"))
+        self.assertEqual(set(summary["statistics"].values()), {None}, "unprinted statistics stay unknown")
+        summary, problems = self.problems("abrupt", capture_file(*FLOW) + CUT_RECORD, 137)
+        self.assertEqual((problems, summary["cut_tail"]), ([], True))
+
+    def test_a_cut_tail_never_hides_an_invalid_record_header(self):
+        for name, microseconds, included, original in (("caplen over snaplen", 0, SNAPLEN + 1, SNAPLEN + 1),
+                                                       ("caplen over original", 0, 60, 59),
+                                                       ("microseconds out of range", 1000000, 60, 60)):
+            with self.subTest(name=name):
+                cut = struct.pack("<IIII", 1, microseconds, included, original) + b"\x00" * 10
+                summary, problems = self.problems("abrupt", capture_file(*FLOW) + cut, 137)
+                self.assertTrue(summary["cut_tail"])
+                self.assertNotEqual(problems, [])
+
+    def test_abrupt_controls_fail(self):
+        for name, data, status, stderr in (
+                ("status 0", capture_file(*FLOW), 0, READY_LINE),
+                ("statistics after SIGKILL", capture_file(*FLOW), 137, READY_LINE + statistics(len(FLOW))),
+                ("no record", capture_file(), 137, READY_LINE),
+                ("excluded flow kept", capture_file(*FLOW, OTHER), 137, READY_LINE),
+                ("bad header", b"\x0a\x0d\x0d\x0a" + capture_file(*FLOW)[4:], 137, READY_LINE)):
+            with self.subTest(name=name):
+                self.assertNotEqual(self.problems("abrupt", data, status, stderr)[1], [])
+
+    def test_a_lost_target_ends_the_evidence(self):
+        lost = {"end": "exited", "interfaces": []}
+        summary, problems = self.problems("target_loss", capture_file(*FLOW), 1,
+                                          READY_LINE + "tcpdump: pcap_loop: The interface disappeared\n", lost)
+        self.assertEqual(problems, [])
+        self.assertEqual(summary["loss"], lost)
+        running = {"end": "kept running", "interfaces": []}
+        self.assertEqual(self.problems("target_loss", capture_file(*FLOW), 0, READY_LINE + statistics(len(FLOW)),
+                                       running)[1], [])
+        for name, status, loss in (("interface still there", 1, {"end": "exited", "interfaces": [{"name": "eth0"}]}),
+                                   ("clean exit after the loss", 0, lost)):
+            with self.subTest(name=name):
+                self.assertNotEqual(self.problems("target_loss", capture_file(*FLOW), status, READY_LINE, loss)[1], [])
+
+
 class FakeCaptureEngine:
     """A Docker stand-in for one capture scenario; each option breaks one step."""
 
     def __init__(self, test, uid=1000, early_exit=None, invalid_filter_refused=True, net_raw_refused=True,
-                 keeps_excluded=False, unprivileged=None, clock=None, ready_delay=0, exit_delay=0, block=0):
+                 keeps_excluded=False, unprivileged=None, clock=None, ready_delay=0, exit_delay=0, block=0,
+                 killed_status=137, killed_statistics=False, cut_tail=False, loss_end="exited", loss_status=1,
+                 interface_survives=False):
         self.test, self.uid, self.early_exit = test, uid, early_exit
         self.invalid_filter_refused, self.net_raw_refused = invalid_filter_refused, net_raw_refused
         self.keeps_excluded = keeps_excluded
@@ -373,6 +430,12 @@ class FakeCaptureEngine:
         # state read that blocks for block seconds times out at its bound.
         self.clock, self.ready_delay, self.exit_delay, self.block = clock, ready_delay, exit_delay, block
         self.captures, self.calls, self.state_timeouts = {}, [], []
+        # How an abrupt end and a lost target look: the killed tcpdump's
+        # status and statistics, a cut final record, and whether tcpdump
+        # exits or keeps running once the target's interface is gone.
+        self.killed_status, self.killed_statistics, self.cut_tail = killed_status, killed_statistics, cut_tail
+        self.loss_end, self.loss_status, self.interface_survives = loss_end, loss_status, interface_survives
+        self.target_killed = False
 
     def __call__(self, *command, timeout=120, check_exit=True):
         self.calls.append(list(command))
@@ -395,6 +458,10 @@ class FakeCaptureEngine:
             if self.net_raw_refused:
                 return 255, "exec /usr/bin/tcpdump: operation not permitted\n"
             return 1, "tcpdump: can't parse filter expression\n"
+        if command[0] == "kill":
+            self.test.assertTrue(command[1].endswith("-target"))
+            self.target_killed = True
+            return 0, ""
         if command[0] == "cp":
             base = command[1].split(":", 1)[1][:-len(".pcap")]
             Path(command[2]).write_bytes(self.captures[base]["data"])
@@ -405,7 +472,7 @@ class FakeCaptureEngine:
             base = command[6]
             self.test.assertTrue(command[2].endswith("-capturer"))
             self.test.assertEqual(command[3:6], ("sh", "-c", extension_check.CAPTURE_WRAPPER))
-            self.captures[base] = {"args": command[7:], "stopped": False, "exchanged": False}
+            self.captures[base] = {"args": command[7:], "stopped": False, "killed": False, "exchanged": False}
             self.latest = base
             return 0, ""
         script = command[command.index("-c") + 1] if "-c" in command and command[2] == "python3" else None
@@ -414,6 +481,8 @@ class FakeCaptureEngine:
         if script == extension_check.NAMESPACE:
             return 0, "net:[%d]\n" % (2 if role == "peer" else 1)
         if script == extension_check.CAPTURE_INTERFACE:
+            if self.target_killed and not self.interface_survives:
+                return 0, "[]"
             return 0, json.dumps([{"name": "eth0", "index": 5}])
         if script == extension_check.READY:
             return 0, ""
@@ -421,8 +490,8 @@ class FakeCaptureEngine:
             self.captures[self.latest]["exchanged"] = True
             return 0, json.dumps([{"port": int(port), "received": 1000} for port in command[7:]])
         if script == extension_check.CAPTURE_SIGNAL:
-            for capture in self.captures.values():
-                capture["stopped"] = True
+            self.test.assertIn(command[-1], ("SIGTERM", "SIGKILL"))
+            self.captures[self.latest]["killed" if command[-1] == "SIGKILL" else "stopped"] = True
             return 0, ""
         if script == extension_check.CAPTURE_STATE:
             self.state_timeouts.append(timeout)
@@ -456,6 +525,19 @@ class FakeCaptureEngine:
             frames = FLOW + ((OTHER,) if self.keeps_excluded else ())
         else:
             frames = ()
+        if kind == "abrupt" and capture["killed"]:
+            capture["data"] = capture_file(*FLOW) + (CUT_RECORD if self.cut_tail else b"")
+            return {"stderr": READY_LINE + (statistics(len(FLOW)) if self.killed_statistics else ""), "pid": 42,
+                    "status": self.killed_status, "size": len(capture["data"])}
+        if kind == "target_loss" and self.target_killed:
+            capture["data"] = capture_file(*FLOW)
+            if self.loss_end == "exited":
+                return {"stderr": READY_LINE + "tcpdump: pcap_loop: The interface disappeared\n", "pid": 42,
+                        "status": self.loss_status, "size": len(capture["data"])}
+            if capture["stopped"]:
+                return {"stderr": READY_LINE + statistics(len(FLOW)), "pid": 42, "status": 0,
+                        "size": len(capture["data"])}
+            return {"stderr": READY_LINE, "pid": 42, "status": None, "size": len(capture["data"])}
         if not (capture["stopped"] or kind == "bound" and capture["exchanged"]):
             return {"stderr": READY_LINE, "pid": 42, "status": None, "size": 24}
         capture["data"] = capture_file(*frames)
@@ -494,7 +576,7 @@ class CaptureScenarioTests(unittest.TestCase):
         cleanup = {"status": "passed", "leftovers": [], "errors": []}
         timing = (mock.patch.object(extension_check.time, "monotonic", side_effect=clock.monotonic),
                   mock.patch.object(extension_check.time, "sleep", side_effect=clock.sleep)) if clock else \
-            (mock.patch.object(extension_check, "CAPTURE_READY_TIMEOUT", 1),
+            (mock.patch.multiple(extension_check, CAPTURE_READY_TIMEOUT=1, CAPTURE_STOP_TIMEOUT=1),
              mock.patch.object(extension_check.time, "sleep"))
         with mock.patch.object(extension_check, "docker", side_effect=engine), \
                 mock.patch.object(extension_check, "cleanup", return_value=cleanup) as removed, \
@@ -507,7 +589,7 @@ class CaptureScenarioTests(unittest.TestCase):
         engine = FakeCaptureEngine(self)
         result = self.scenario(engine)
         self.assertEqual(result["status"], "passed", result.get("error"))
-        self.assertEqual(set(result["captures"]), {"traffic", "empty", "bound"})
+        self.assertEqual(set(result["captures"]), {"traffic", "empty", "bound", "abrupt", "target_loss"})
         self.assertEqual({name: control["status"] for name, control in result["refusals"].items()},
                          dict.fromkeys(("invalid_filter", "unavailable_interface", "without_net_raw"), "passed"))
         runs = [call for call in engine.calls if call[0] == "run"]
@@ -540,6 +622,43 @@ class CaptureScenarioTests(unittest.TestCase):
                 self.assertEqual((result["status"], result["failure_stage"], result["failure_kind"]),
                                  ("failed", stage, kind))
                 shutil.rmtree(self.output / "run")
+
+    def test_the_target_is_lost_only_after_every_other_capture_and_control(self):
+        engine = FakeCaptureEngine(self)
+        result = self.scenario(engine)
+        self.assertEqual(result["status"], "passed", result.get("error"))
+        commands = [call[0] for call in engine.calls]
+        self.assertGreater(commands.index("kill"), max(i for i, command in enumerate(commands) if command == "start"))
+        self.assertEqual(result["captures"]["abrupt"]["stop"], "SIGKILL")
+        self.assertEqual(result["captures"]["target_loss"]["summary"]["loss"], {"end": "exited", "interfaces": []})
+        shutil.rmtree(self.output / "run")
+        for end in ("exited", "kept running"):
+            with self.subTest(end=end):
+                self.addCleanup(shutil.rmtree, self.output / "run", ignore_errors=True)
+                result = self.scenario(FakeCaptureEngine(self, loss_end=end))
+                shutil.rmtree(self.output / "run")
+                self.assertEqual(result["status"], "passed", result.get("error"))
+                self.assertEqual(result["captures"]["target_loss"]["summary"]["loss"]["end"], end)
+
+    def test_a_target_loss_that_keeps_running_passes_on_the_synthetic_clock(self):
+        # tcpdump keeps running past the whole observation window; the last
+        # running state is kept and the SIGTERM branch ends it.
+        clock = Clock()
+        result = self.scenario(FakeCaptureEngine(self, clock=clock, loss_end="kept running"), clock)
+        self.assertEqual(result["status"], "passed", result.get("error"))
+        self.assertEqual(result["captures"]["target_loss"]["summary"]["loss"]["end"], "kept running")
+
+    def test_partial_capture_failures_keep_their_stage(self):
+        for name, engine, stage in (
+                ("killed tcpdump exits 0", FakeCaptureEngine(self, killed_status=0), "capture:abrupt"),
+                ("killed tcpdump prints statistics", FakeCaptureEngine(self, killed_statistics=True), "capture:abrupt"),
+                ("interface survives", FakeCaptureEngine(self, interface_survives=True), "capture:target_loss"),
+                ("clean exit after the loss", FakeCaptureEngine(self, loss_status=0), "capture:target_loss")):
+            with self.subTest(name=name):
+                self.addCleanup(shutil.rmtree, self.output / "run", ignore_errors=True)
+                result = self.scenario(engine)
+                shutil.rmtree(self.output / "run")
+                self.assertEqual(outcome(result), ("failed", stage, "capture_failure"))
 
     def test_only_the_runtime_exec_refusal_passes_the_control_without_net_raw(self):
         started = {"ExitCode": 1, "Error": "", "StartedAt": "2026-10-23T00:00:00Z"}
