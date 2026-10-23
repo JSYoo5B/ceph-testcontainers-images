@@ -379,6 +379,16 @@ class PartialCaptureTests(unittest.TestCase):
         summary, problems = self.problems("abrupt", capture_file(*FLOW) + CUT_RECORD, 137)
         self.assertEqual((problems, summary["cut_tail"]), ([], True))
 
+    def test_a_cut_tail_never_hides_an_invalid_record_header(self):
+        for name, microseconds, included, original in (("caplen over snaplen", 0, SNAPLEN + 1, SNAPLEN + 1),
+                                                       ("caplen over original", 0, 60, 59),
+                                                       ("microseconds out of range", 1000000, 60, 60)):
+            with self.subTest(name=name):
+                cut = struct.pack("<IIII", 1, microseconds, included, original) + b"\x00" * 10
+                summary, problems = self.problems("abrupt", capture_file(*FLOW) + cut, 137)
+                self.assertTrue(summary["cut_tail"])
+                self.assertNotEqual(problems, [])
+
     def test_abrupt_controls_fail(self):
         for name, data, status, stderr in (
                 ("status 0", capture_file(*FLOW), 0, READY_LINE),
@@ -629,6 +639,14 @@ class CaptureScenarioTests(unittest.TestCase):
                 shutil.rmtree(self.output / "run")
                 self.assertEqual(result["status"], "passed", result.get("error"))
                 self.assertEqual(result["captures"]["target_loss"]["summary"]["loss"]["end"], end)
+
+    def test_a_target_loss_that_keeps_running_passes_on_the_synthetic_clock(self):
+        # tcpdump keeps running past the whole observation window; the last
+        # running state is kept and the SIGTERM branch ends it.
+        clock = Clock()
+        result = self.scenario(FakeCaptureEngine(self, clock=clock, loss_end="kept running"), clock)
+        self.assertEqual(result["status"], "passed", result.get("error"))
+        self.assertEqual(result["captures"]["target_loss"]["summary"]["loss"]["end"], "kept running")
 
     def test_partial_capture_failures_keep_their_stage(self):
         for name, engine, stage in (

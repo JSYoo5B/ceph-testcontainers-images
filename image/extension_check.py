@@ -2065,14 +2065,16 @@ def parse_pcap(data, snaplen):
             problems.append("a record header is cut at byte %d" % offset)
             break
         _, microseconds, included, original = struct.unpack_from("<IIII", data, offset)
+        # A complete record header is checked even when its data is cut, so
+        # that a cut tail never hides an invalid header.
+        if microseconds >= 1000000 or included > snaplen or included > original:
+            problems.append("record %d has %d of %d bytes at %d us" % (len(records), included, original,
+                                                                       microseconds))
         frame = data[offset + PCAP_RECORD:offset + PCAP_RECORD + included]
         offset += PCAP_RECORD + included
         if len(frame) != included:
             problems.append("a record is cut at byte %d" % (offset - included))
             break
-        if microseconds >= 1000000 or included > snaplen or included > original:
-            problems.append("record %d has %d of %d bytes at %d us" % (len(records), included, original,
-                                                                       microseconds))
         records.append((frame, original))
     return records, problems
 
@@ -2267,11 +2269,18 @@ def wait_status(capturer, base, timeout):
     state, still running, when timeout has passed."""
     deadline = time.monotonic() + timeout
     late = "the capture's state was not read within %ds" % timeout
-    while True:
+    state = capture_state(capturer, base, deadline, late)
+    while state["status"] is None:
+        # Expiry is tested before another poll, which could not start once
+        # no time is left; a failed or blocked read still raises.
+        left = deadline - time.monotonic()
+        if left <= 0:
+            break
+        time.sleep(min(0.2, left))
+        if time.monotonic() >= deadline:
+            break
         state = capture_state(capturer, base, deadline, late)
-        if state["status"] is not None or time.monotonic() > deadline:
-            return state
-        time.sleep(min(0.2, max(deadline - time.monotonic(), 0)))
+    return state
 
 
 def retrieve(capturer, base, directory):
