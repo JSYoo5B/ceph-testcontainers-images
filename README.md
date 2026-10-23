@@ -145,7 +145,7 @@ make extension-images   # build the netem helper
 make extension-check    # check it, including a delay inside an official-image container
 ```
 
-The netem helper is published as `ghcr.io/jsyoo5b/ceph-testcontainers-images:extension-netem-v1` for `linux/amd64` and `linux/arm64`. It is checked and published apart from the release images below, and neither blocks the other.
+The netem helper is published as `ghcr.io/jsyoo5b/ceph-testcontainers-images:extension-netem-v1` for `linux/amd64` and `linux/arm64`. A publication run from the default branch publishes the packet-capture helper the same way as `ghcr.io/jsyoo5b/ceph-testcontainers-images:extension-capture-v1`. Each helper is checked and published apart from the other and from the release images below, and none blocks another.
 
 ## Published images
 

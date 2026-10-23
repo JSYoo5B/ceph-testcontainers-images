@@ -1,17 +1,27 @@
 name: published extension
 
-# Checks published extension helpers by digest, as consumers pull them: the
-# contract, the kernel feature, a delay, every selector profile, the bandwidth
-# profile and the packet-fault profile inside a container of every release's
-# official and OSD role image (docs/EXTENSIONS.md).
+# Checks a published extension helper by digest, as consumers pull it
+# (docs/EXTENSIONS.md). The netem helper: the contract, the kernel feature, a
+# delay, every selector profile, the bandwidth profile and the packet-fault
+# profile inside a container of every release's official and OSD role image.
+# The capture helper: the contract and every capture and negative control in
+# the namespace of a container of every release's official image.
 on:
   workflow_call:
     inputs:
+      extension:
+        required: true
+        type: string
       images:
         required: true
         type: string
   workflow_dispatch:
     inputs:
+      extension:
+        description: The published helper to check
+        required: true
+        type: choice
+        options: [netem, capture]
       images:
         description: 'JSON digest map: extension -> architecture -> sha256 digest'
         required: true
@@ -23,6 +33,7 @@ permissions:
 
 jobs:
   published-extension:
+    if: inputs.extension == 'netem'
     strategy:
       fail-fast: false
       matrix:
@@ -43,23 +54,11 @@ jobs:
       - name: Pull the published digest and check it in Ceph targets
         env:
           PUBLISHED_IMAGES: ${{ inputs.images }}
+          IMAGE_EXTENSION: ${{ inputs.extension }}
           IMAGE_ARCHITECTURE: ${{ matrix.architecture }}
         run: |
-          reference="$(python3 - <<'PY'
-          import json, os, re, sys
-          sys.path.insert(0, 'image')
-          import extension_check
-          images = json.loads(os.environ['PUBLISHED_IMAGES'])
-          if set(images) != set(extension_check.PUBLISHED):
-              raise ValueError('Provide a digest map for every extension')
-          for extension, platforms in images.items():
-              if set(platforms) != {'amd64', 'arm64'}:
-                  raise ValueError('Provide both architectures for ' + extension)
-              if any(not re.fullmatch(r'sha256:[0-9a-f]{64}', str(digest)) for digest in platforms.values()):
-                  raise ValueError('Image references must be immutable sha256 digests')
-          print('ghcr.io/jsyoo5b/ceph-testcontainers-images@' + images['netem'][os.environ['IMAGE_ARCHITECTURE']])
-          PY
-          )"
+          reference="$(python3 image/publish.py published-reference --extension "$IMAGE_EXTENSION" \
+            --architecture "$IMAGE_ARCHITECTURE" --images "$PUBLISHED_IMAGES")"
           platform="linux/$IMAGE_ARCHITECTURE"
           docker pull --platform "$platform" "$reference"
           targets=()
@@ -81,6 +80,59 @@ jobs:
         if: always()
         with:
           name: published-extension-${{ matrix.architecture }}-check
+          retention-days: 30
+          path: |
+            ${{ runner.temp }}/published-extension-digests.json
+            ${{ runner.temp }}/published-extension/
+          if-no-files-found: warn
+
+  published-capture-extension:
+    if: inputs.extension == 'capture'
+    strategy:
+      fail-fast: false
+      matrix:
+        architecture: [amd64, arm64]
+        include:
+          - architecture: amd64
+            runner: ubuntu-24.04
+          - architecture: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.9'
+      - run: make extension-test
+      - name: Pull the published digest and capture in Ceph targets' namespaces
+        env:
+          PUBLISHED_IMAGES: ${{ inputs.images }}
+          IMAGE_EXTENSION: ${{ inputs.extension }}
+          IMAGE_ARCHITECTURE: ${{ matrix.architecture }}
+        run: |
+          reference="$(python3 image/publish.py published-reference --extension "$IMAGE_EXTENSION" \
+            --architecture "$IMAGE_ARCHITECTURE" --images "$PUBLISHED_IMAGES")"
+          platform="linux/$IMAGE_ARCHITECTURE"
+          docker pull --platform "$platform" "$reference"
+          targets=()
+          for release in $(python3 image/releases.py list); do
+            target="$(python3 image/releases.py official "$release")"
+            docker pull --platform "$platform" "$target"
+            targets+=(--target "$target")
+          done
+          echo "$PUBLISHED_IMAGES" > "$RUNNER_TEMP/published-extension-digests.json"
+          python3 image/extension_check.py --extension capture --image "$reference" --platform "$platform" \
+            --functional "${targets[@]}" --output-dir "$RUNNER_TEMP/published-extension"
+      - name: Keep raw captures out of the artifacts
+        id: raw-captures
+        if: always()
+        run: python3 image/publish.py check-artifacts --directory "$RUNNER_TEMP/published-extension"
+      # Uploaded only after the guard found no raw capture in the directory.
+      - uses: actions/upload-artifact@v4
+        if: always() && steps.raw-captures.outcome == 'success'
+        with:
+          name: published-capture-extension-${{ matrix.architecture }}-check
           retention-days: 30
           path: |
             ${{ runner.temp }}/published-extension-digests.json

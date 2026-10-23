@@ -59,7 +59,7 @@ The functional check below verifies these on every engine it runs on.
 
 The packet-capture helper records packets in the network namespace of a target container, below Ceph. A module starts the helper in that namespace (Docker network mode `container:<target>`), runs `tcpdump` there and retrieves the capture file. The target keeps its own image and capabilities. The helper contains no Ceph component, and nothing in it decodes, decrypts or judges Ceph Messenger traffic: that belongs to the consumers ([ceph-testcontainers-go#52](https://github.com/JSYoo5B/ceph-testcontainers-go/issues/52) collects and structurally validates the files).
 
-This section defines contract 1, its quick check and its functional check, which [image/extension_check.py](../image/extension_check.py) runs. Publication comes in a later change. Until then no helper image is published, and the functional check's results are evidence for the engines it ran on, not a support claim.
+This section defines contract 1, its quick check and its functional check, which [image/extension_check.py](../image/extension_check.py) runs. The reference helper is published as `extension-capture-v1` (see [Published helpers](#packet-capture-helper)). The functional check's results are evidence for the engines it ran on, not a support claim for others.
 
 ### Image contract
 
@@ -125,13 +125,15 @@ The functional check does not yet cover a target that restarts during a capture 
 
 ### Reference helper
 
-[image/extensions/capture](../image/extensions/capture) builds on the pinned `debian:bookworm-slim` base of the Debian role images with Debian's `tcpdump` and `python3`. `setcap` gives `tcpdump` its file capability during the build and is removed again; the image runs as Debian's `tcpdump` user. `/usr/share/ceph-testcontainers/SOURCES.txt` and `source-packages.txt` list every package with its source package and version. CI builds it and runs the quick and the functional check, with the official image of every supported release as targets, on native runners of both architectures; it is not published.
+[image/extensions/capture](../image/extensions/capture) builds on the pinned `debian:bookworm-slim` base of the Debian role images with Debian's `tcpdump` and `python3`. `setcap` gives `tcpdump` its file capability during the build and is removed again; the image runs as Debian's `tcpdump` user. `/usr/share/ceph-testcontainers/SOURCES.txt` and `source-packages.txt` list every package with its source package and version. CI builds it and runs the quick and the functional check, with the official image of every supported release as targets, on native runners of both architectures, and publishes exactly the image that passed (see [Published helpers](#packet-capture-helper)).
 
 Debian's `tcpdump` drops root privileges to its `tcpdump` user and changes the ownership of its output file when it starts as root. With `NET_RAW` alone it then fails (`Couldn't change ownership of savefile`), and `-Z root` fails as well. Running it unprivileged with the file capability avoids both, so contract 1 asks for `NET_RAW` only, not `CHOWN`, `SETUID` or `SETGID`.
 
 ### Raw captures
 
 A capture can hold payloads, addresses and identifiers. Text and JSON redaction do not sanitize a pcap. A module keeps capture files only where its caller selected them, and publishing checker artifacts that contain packets needs a deliberate artifact policy.
+
+This repository has no such policy, so CI never uploads a raw capture. The checker keeps capture files out of its report directory. Before CI uploads a capture report directory, `python3 image/publish.py check-artifacts --directory <dir>` fails when any file below it is named `*.pcap*` or starts with a classic pcap or pcapng magic number, and staging a capture helper for publication refuses a report directory that holds one. The report upload runs only when that check succeeded (`steps.raw-captures.outcome == 'success'`), so a failed check leaves the directory unuploaded, while a safe report is still uploaded after an earlier checker failure.
 
 ## Checking an extension image
 
@@ -300,21 +302,23 @@ The receiver's counters show that the selected packets were reordered, duplicate
 
 On a native Linux Docker Engine (amd64, checksum, scatter-gather, TSO and GSO on and GRO off on both ends), the published `extension-netem-v1` helper passed every stage against the official images and the OSD role images of 20.2.4 and 19.2.5. In two runs, every selected transfer of 8 MB raised its effect's counter by 113 or more over IPv4 and IPv6: reorder 241 to 315, duplicate 113 to 140, corrupt 332 to 987, and composed 1796 to 1969 D-SACKs with 1039 to 1269 checksum errors. Baseline, unselected and restored transfers raised a counter by at most 5, and every transfer kept its exact bytes and SHA-256. tc reported every requested probability and correlation, gap 1 with the reorder, and kept the duplicate's correlation only with the delay encoding: `netem duplicate 3% 10%` installed a correlation of 0. A test image whose `tc` rejects `corrupt` (`What is "corrupt"?`) failed the profile at the parser stage with `image_unsupported`, while its baseline delay scenario and bandwidth profile still passed.
 
-## Published helper
+## Published helpers
+
+Each helper tag lists `linux/amd64` and `linux/arm64`; `<tag>-linux-<architecture>` selects one platform. The contract version is part of the tag, so a later incompatible contract gets a new tag. Each helper is staged, promoted and checked again on its own: a failure of one helper never blocks the other, and neither blocks the release images.
+
+Publication runs only from a manual run of the [checker workflow](../.github/workflows/test.yml) with `publish`. For each architecture, the job that built the helper and passed its functional check uploads that exact image under a `ci-<run>-<attempt>-` candidate tag. Promotion requires the candidates of both architectures from the same run and revision, verifies their configuration, platform, layers and extension label, points the platform tags and then the index at those digests, and checks that the index lists exactly the two tested digests. A platform whose check failed uploads no candidate, so nothing is promoted. [published-extension.yml](../.github/workflows/published-extension.yml) then pulls each platform by digest and runs the same functional check again. The weekly published image health workflow runs `python3 image/publish.py extension-health`, which fails when a helper tag no longer lists both platform images.
+
+### netem helper
 
 ```text
 ghcr.io/jsyoo5b/ceph-testcontainers-images:extension-netem-v1
 ```
 
-The tag lists `linux/amd64` and `linux/arm64`; `extension-netem-v1-linux-<architecture>` selects one platform. The contract version is part of the tag, so a later incompatible contract gets a new tag.
-
 - Built from [image/extensions/netem](../image/extensions/netem) on the pinned `debian:bookworm-slim` base of the Debian role images, with Debian's `iproute2` and `python3` (iproute2 6.1.0 and Python 3.11.2 when this was written). The `linux/arm64` image is 45 MB compressed and 155 MB unpacked.
 - `/usr/share/ceph-testcontainers/SOURCES.txt` and `source-packages.txt` list every package with its source package and version.
-- CI checks the helper functionally on native runners of both architectures, with every selector profile, the bandwidth profile, the packet-fault profile, and the official image and the published OSD role image of every release in [image/releases.py](../image/releases.py) as targets. Publication requires every target, every selector profile, the bandwidth profile and the packet-fault profile to pass and clean up on both architectures. A manual run with `publish` uploads the exact tested images, promotes the tag only when both architectures passed in the same run, and then checks the published digests again the same way.
-- The helper is checked and published apart from the release images. Its failure never blocks them, and theirs never blocks it.
-- The weekly published image health workflow also runs `python3 image/publish.py extension-health`, which fails when the helper tag no longer lists both platform images.
+- CI checks the helper functionally on native runners of both architectures, with every selector profile, the bandwidth profile, the packet-fault profile, and the official image and the published OSD role image of every release in [image/releases.py](../image/releases.py) as targets. Publication requires every target, every selector profile, the bandwidth profile and the packet-fault profile to pass and clean up on both architectures.
 
-### Engine coverage
+#### Engine coverage
 
 | Engine | Platforms | Evidence |
 | --- | --- | --- |
@@ -333,6 +337,33 @@ The other way to provide `tc` is to add it to the role images and run `tc` insid
 - The official image and custom Ceph images could never be targets.
 
 The helper avoids all three, at the cost of one more small image and one more container per delayed target. No case seen so far needs the role-image route.
+
+### packet-capture helper
+
+```text
+ghcr.io/jsyoo5b/ceph-testcontainers-images:extension-capture-v1
+```
+
+The tag exists once a manual run with `publish` on the default branch has passed; its capture jobs stage candidates only on that branch.
+
+- Built from [image/extensions/capture](../image/extensions/capture) as described under [Reference helper](#reference-helper), with Debian's `tcpdump` and `python3`. `/usr/share/ceph-testcontainers/SOURCES.txt` and `source-packages.txt` list every package with its source package and version, and the candidate records the tcpdump and libpcap version that the quick check read.
+- Publication requires, on each architecture, a passing functional report from the current checker and probe: the quick check including the refusal without `NET_RAW`, the reference labels, and for the official image of every release in [image/releases.py](../image/releases.py), a scenario with the checked helper image on that platform in which the traffic, empty, bound, abrupt and target-loss captures pass, the invalid-filter, missing-interface and missing-`NET_RAW` controls fail with their own kinds, and cleanup leaves nothing behind.
+- The published digests are checked again the same way, with the official image of every release as targets. No raw capture is uploaded at any stage (see [Raw captures](#raw-captures)).
+
+What the publication claims: on Docker Engine on GitHub-hosted Ubuntu 24.04 runners, natively on `amd64` and `arm64`, this exact image met contract 1 and the functional scenario above in a container of the official image of each supported release, as the image's own non-root user with `NET_RAW` alone, on an internal IPv4 bridge.
+
+What it does not claim:
+
+- Any other engine: rootless Docker, Podman, Docker Desktop and its Enhanced Container Isolation, or a Linux host with a different kernel or security profile. Run the functional check there before relying on the helper.
+- Targets other than the official images: the role images and custom Ceph images are not checked targets.
+- What the functional check does not cover: a target that restarts during a capture, byte limits other than the packet bound, and IPv6 targets. A tcpdump that keeps running after a target loss and a cut final record are accepted by the checker and covered by synthetic fixtures only; the hosted runs so far ended with tcpdump exiting and no cut record.
+- Anything about the captured traffic: decoding or judging Ceph Messenger traffic is left to the consumers.
+
+#### Engine coverage
+
+| Engine | Platforms | Evidence |
+| --- | --- | --- |
+| Docker Engine on GitHub-hosted Ubuntu 24.04 runners | `amd64`, `arm64` | Quick and functional check with the official 20.2.4 and 19.2.5 images on pull requests and pushes to the default branch, before every publication and on the published digests |
 
 ## Not in contract 1
 
