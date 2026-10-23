@@ -55,11 +55,11 @@ The functional check below verifies these on every engine it runs on.
 - When the target restarts, Docker gives it a new namespace (a new `SandboxID`) without the qdisc. A helper that is still running stays in the old namespace, where the target's interface no longer exists.
 - The delay applies to packets that leave through the target's interface. A request and its answer cross it once each way, so a TCP request to a delayed target takes at least the delay, typically twice the delay (the SYN-ACK and the answer).
 
-## packet-capture helper (contract 1, quick check only)
+## packet-capture helper (contract 1)
 
 The packet-capture helper records packets in the network namespace of a target container, below Ceph. A module starts the helper in that namespace (Docker network mode `container:<target>`), runs `tcpdump` there and retrieves the capture file. The target keeps its own image and capabilities. The helper contains no Ceph component, and nothing in it decodes, decrypts or judges Ceph Messenger traffic: that belongs to the consumers ([ceph-testcontainers-go#52](https://github.com/JSYoo5B/ceph-testcontainers-go/issues/52) collects and structurally validates the files).
 
-This section defines contract 1 and its quick check, which [image/extension_check.py](../image/extension_check.py) runs today. The functional check (readiness, bidirectional capture and filter exclusion in a target's namespace, graceful stop, bounds, and the negative cases) and publication come in a later change. Until then no helper image is published and no engine support is claimed.
+This section defines contract 1, its quick check and its functional check, which [image/extension_check.py](../image/extension_check.py) runs. Publication comes in a later change. Until then no helper image is published, and the functional check's results are evidence for the engines it ran on, not a support claim.
 
 ### Image contract
 
@@ -93,11 +93,37 @@ python3 image/extension_check.py --extension capture --image my-registry/capture
 
 The quick probe ([check-capture.sh](../image/extensions/capture/check-capture.sh)) runs as the image's own user in a container with no network and `NET_RAW` alone. Besides the executables, version, user, file capability, filter and supervisor checks, it captures on the loopback with the options above: it waits for the readiness line, sends one UDP datagram to port 7000 and one to port 7001, each with its own payload, stops tcpdump with `SIGTERM`, and requires exit status 0, `1 packet captured`, the statistics, and a classic pcap header (version 2.4, snaplen 128, Ethernet link type). It then decodes every record's Ethernet, IPv4 and UDP headers: the file must hold exactly the datagram to port 7000 with its payload, and not the one to port 7001. The probe uses only the contract's executables and shell builtins. A separate container without any capability must then fail to start `tcpdump --version` in exactly the way the runtime refuses an executable whose file capability the bounding set lacks: the container started, exited with status 255 and printed only `exec .../tcpdump: operation not permitted`. A permission error of tcpdump itself does not pass and fails the image. A container whose process Docker or the runtime never ran (not started, a runtime state error, or a `docker start` status that differs from the container's) fails the check as `checker_failure`, which says nothing about the image. `extension-report.json` keeps every check, the tcpdump version and the cleanup.
 
-These are checks of the image on one engine without a network. They do not show capture in another container's namespace, filter exclusion of real peer traffic, bounds, target loss or behavior on other engines.
+These are checks of the image on one engine without a network. They do not show capture in another container's namespace, filter exclusion of real peer traffic or behavior on other engines; the functional check below covers the first two.
+
+### Functional check
+
+```sh
+make capture-functional-check            # in a container of the official image
+python3 image/extension_check.py --extension capture --image my-registry/capture-helper:dev \
+  --functional --target quay.io/ceph/ceph:v20.2.4
+```
+
+After the quick check, each `--target` gets its own scenario on a private bridge (`docker network create --internal`) that the checker owns:
+
+1. A container of the target image idles in `sleep infinity` with its own image and capabilities. A server from the helper image joins its namespace without any capability and answers on TCP ports 7000 (selected) and 7001 (excluded). A peer from the helper image on the bridge sends the requests.
+2. The capturing helper joins the target's namespace (`--network container:<target>`) as the image's own user with `--cap-drop=ALL --cap-add=NET_RAW`, and no other option. The checker requires a non-root UID, the target's namespace, and the interface that carries the target's MAC address, found through sysfs.
+3. The filter `tcp port 7000 and host <peer>` must compile with `tcpdump -y EN10MB -d`.
+4. Each capture runs `tcpdump -p -i <interface> -s 128 -c <packets> --immediate-mode -U -w <file> <filter>` in the background under `sh`, which records its PID and exit status. The checker waits for the readiness line with the requested interface, `EN10MB` and snaplen, and for the output file, before any traffic. A tcpdump that exits first fails with the kind of its error.
+5. The traffic capture: the peer exchanges a request and a 1000-byte answer on port 7000, then on port 7001, both verified by the peer. `SIGTERM` must end tcpdump with exit status 0 and its three statistics. The file must be classic pcap (microsecond magic, version 2.4, snaplen 128, Ethernet) with whole records within the snaplen, as many as `packets captured`, and within the bound of 24 + `<packets>` × (16 + 128) bytes. Every record must be IPv4 TCP between the peer and the target's port 7000: the SYN, the SYN-ACK, the request payload and the answer's payload, with the answer cut at the snaplen. A record of port 7001 or of any other flow fails.
+6. The empty capture: the same filter while the peer uses port 7001 only. It must stop the same way with `0 packets captured` and a 24-byte file, the header alone. This is a valid result, distinct from a failed start.
+7. The bound capture: `-c 3` with traffic on port 7000. tcpdump must exit on its own with status 0 and exactly three records of the selected flow.
+8. Negative controls in the same namespace: an invalid filter (`invalid_filter`), an interface that does not exist (`unavailable_interface`), and the helper without `NET_RAW`, which the runtime must refuse to execute as in the quick check (`permission_denied`). Each must fail before readiness with its own kind.
+9. Every container and the network carry the scenario's label and are removed; cleanup passes only when no labelled container or network remains.
+
+A failure records its stage (`setup`, `capture:traffic`, `capture:empty`, `capture:bound`, `refusals` or `cleanup`) and kind. A Docker command that fails, or a peer exchange that fails, is a `checker_failure`, which says nothing about the image. A root helper is `image_unsupported`. A tcpdump that fails to start is `invalid_filter`, `unavailable_interface`, `permission_denied`, `loading_failure` or `capture_failure`. A capture that starts but misses its evidence, and a negative control that does not fail as required, are `capture_failure`. A statistic that tcpdump did not print is `null` in the report, never zero.
+
+The raw capture files never enter the report directory: the checker copies each into a temporary directory, decodes it, and reports only its size, SHA-256, statistics and decoded summary (record counts per direction, the flow's markers and the records cut at the snaplen). CI uploads that directory as an artifact.
+
+The functional check does not yet cover abrupt stops with partial output, a target that stops or restarts during a capture, byte limits other than the packet bound, IPv6 targets, or other engines such as rootless Docker or Podman.
 
 ### Reference helper
 
-[image/extensions/capture](../image/extensions/capture) builds on the pinned `debian:bookworm-slim` base of the Debian role images with Debian's `tcpdump` and `python3`. `setcap` gives `tcpdump` its file capability during the build and is removed again; the image runs as Debian's `tcpdump` user. `/usr/share/ceph-testcontainers/SOURCES.txt` and `source-packages.txt` list every package with its source package and version. CI builds it and runs the quick check on native runners of both architectures; it is not published.
+[image/extensions/capture](../image/extensions/capture) builds on the pinned `debian:bookworm-slim` base of the Debian role images with Debian's `tcpdump` and `python3`. `setcap` gives `tcpdump` its file capability during the build and is removed again; the image runs as Debian's `tcpdump` user. `/usr/share/ceph-testcontainers/SOURCES.txt` and `source-packages.txt` list every package with its source package and version. CI builds it and runs the quick and the functional check, with the official image of every supported release as targets, on native runners of both architectures; it is not published.
 
 Debian's `tcpdump` drops root privileges to its `tcpdump` user and changes the ownership of its output file when it starts as root. With `NET_RAW` alone it then fails (`Couldn't change ownership of savefile`), and `-Z root` fails as well. Running it unprivileged with the file capability avoids both, so contract 1 asks for `NET_RAW` only, not `CHOWN`, `SETUID` or `SETGID`.
 
@@ -312,4 +338,4 @@ The helper avoids all three, at the cost of one more small image and one more co
 - A reorder gap other than 1, and a reorder with jitter or a rate.
 - A separate rate for each selected peer, and shaping with another qdisc such as `tbf` or `htb`.
 - Receiver-side delay through IFB. Selectors also do not cover IPv6 extension headers or fragments, IPv4 options or IPv4-mapped addresses.
-- `ss` and `nft` for socket destruction and peer-specific filtering. Each becomes its own contract with its own checks; packet capture has its own [contract](#packet-capture-helper-contract-1-quick-check-only).
+- `ss` and `nft` for socket destruction and peer-specific filtering. Each becomes its own contract with its own checks; packet capture has its own [contract](#packet-capture-helper-contract-1).

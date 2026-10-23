@@ -102,8 +102,8 @@ jobs:
           if-no-files-found: warn
 
   capture-extension:
-    # The packet-capture helper has only its quick check so far; it is built
-    # and checked here and never published.
+    # The packet-capture helper is built, checked quickly and functionally in
+    # the namespace of each release's official image, and never published.
     strategy:
       fail-fast: false
       matrix:
@@ -114,7 +114,7 @@ jobs:
           - architecture: arm64
             runner: ubuntu-24.04-arm
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 30
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -125,10 +125,16 @@ jobs:
           driver: docker-container
       - name: Build the helper
         run: make capture-image PLATFORM="linux/${{ matrix.architecture }}" IMAGE_REPOSITORY=ceph-check
-      - name: Check the capture contract
+      - name: Check the capture contract and capture in Ceph targets' namespaces
         run: |
+          targets=()
+          for release in $(python3 image/releases.py list); do
+            reference="$(python3 image/releases.py official "$release")"
+            docker pull --platform "linux/${{ matrix.architecture }}" "$reference"
+            targets+=(--target "$reference")
+          done
           python3 image/extension_check.py --extension capture --image ceph-check:extension-capture \
-            --platform "linux/${{ matrix.architecture }}" --output-dir "$RUNNER_TEMP/capture"
+            --platform "linux/${{ matrix.architecture }}" --functional "${targets[@]}" --output-dir "$RUNNER_TEMP/capture"
       - uses: actions/upload-artifact@v4
         if: always()
         with:
