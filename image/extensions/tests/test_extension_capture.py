@@ -3,6 +3,7 @@ import io
 import json
 from pathlib import Path
 import re
+import shutil
 import struct
 import subprocess
 import sys
@@ -29,13 +30,16 @@ class CaptureQuickCheckTests(unittest.TestCase):
         self.addCleanup(directory.cleanup)
         self.output = Path(directory.name)
 
-    def test_only_the_quick_check_is_offered_for_capture(self):
+    def test_capture_offers_the_functional_check_but_no_netem_profile(self):
         self.assertEqual(extension_check.arguments(["--extension", "capture", "--image", "x"]).extension, "capture")
+        args = extension_check.arguments(["--extension", "capture", "--image", "x", "--functional", "--target", "t"])
+        self.assertEqual((args.functional, args.target), (True, ["t"]))
         stderr = io.StringIO()
-        for extra in (["--functional", "--target", "t"], ["--rate"], ["--packet-faults"]):
+        for extra in (["--functional"], ["--functional", "--target", "t", "--selector", "ipv4-tcp-u32"],
+                      ["--rate"], ["--packet-faults"]):
             with self.subTest(extra=extra), contextlib.redirect_stderr(stderr), self.assertRaises(SystemExit):
                 extension_check.arguments(["--extension", "capture", "--image", "x", *extra])
-        self.assertIn("only the quick check", stderr.getvalue())
+        self.assertIn("they belong to netem", stderr.getvalue())
 
     def run_probe(self, extension):
         """The docker create arguments of a probe, which then passes."""
@@ -225,6 +229,401 @@ class CaptureOracleTests(unittest.TestCase):
             with self.subTest(tool=tool):
                 self.assertIsNone(re.search(r"(^|[;&|(`]|\$\(|\bthen|\bdo|\belse)\s*%s\b" % tool, shell, re.M),
                                   tool + " is not a contract executable")
+
+
+PEER, TARGET = "172.30.0.3", "172.30.0.2"
+SNAPLEN = extension_check.CAPTURE_SNAPLEN
+READY_LINE = "tcpdump: listening on eth0, link-type EN10MB (Ethernet), snapshot length %d bytes\n" % SNAPLEN
+
+
+def tcp_frame(source, destination, sport, dport, flags, payload=b""):
+    """An Ethernet/IPv4/TCP frame without options."""
+    tcp = struct.pack(">HHIIBBHHH", sport, dport, 1, 1, 5 << 4, flags, 65535, 0, 0) + payload
+    ip = struct.pack(">BBHHHBBH4s4s", 0x45, 0, 20 + len(tcp), 1, 0, 64, 6, 0,
+                     extension_check.ipaddress.IPv4Address(source).packed,
+                     extension_check.ipaddress.IPv4Address(destination).packed)
+    return b"\x00" * 12 + b"\x08\x00" + ip + tcp
+
+
+def capture_file(*frames, snaplen=SNAPLEN):
+    """A classic pcap that cuts every frame at the snaplen, as tcpdump does."""
+    data = struct.pack("<IHHiIII", 0xa1b2c3d4, 2, 4, 0, 0, snaplen, 1)
+    for frame in frames:
+        included = frame[:snaplen]
+        data += struct.pack("<IIII", 1, 0, len(included), len(frame)) + included
+    return data
+
+
+PORT, EXCLUDED = extension_check.CAPTURE_PORT, extension_check.CAPTURE_EXCLUDED_PORT
+RESPONSE = (extension_check.capture_token(PORT) * 60)[:extension_check.CAPTURE_RESPONSE]
+SYN = tcp_frame(PEER, TARGET, 40000, PORT, 0x02)
+SYN_ACK = tcp_frame(TARGET, PEER, PORT, 40000, 0x12)
+ACK = tcp_frame(PEER, TARGET, 40000, PORT, 0x10)
+REQUEST = tcp_frame(PEER, TARGET, 40000, PORT, 0x18, extension_check.capture_request(PORT))
+ANSWER = tcp_frame(TARGET, PEER, PORT, 40000, 0x18, RESPONSE)
+FLOW = (SYN, SYN_ACK, ACK, REQUEST, ANSWER, tcp_frame(PEER, TARGET, 40000, PORT, 0x11),
+        tcp_frame(TARGET, PEER, PORT, 40000, 0x11))
+OTHER = tcp_frame(PEER, TARGET, 40001, EXCLUDED, 0x02)
+
+
+def statistics(captured, received=None):
+    return "%d packet%s captured\n%d packets received by filter\n0 packets dropped by kernel\n" % (
+        captured, "" if captured == 1 else "s", captured if received is None else received)
+
+
+def finished(captured, status=0, stderr=None):
+    return {"status": status, "stderr": READY_LINE + (statistics(captured) if stderr is None else stderr),
+            "pid": 42, "size": 24}
+
+
+class CaptureEvidenceTests(unittest.TestCase):
+    """The functional oracle on synthetic captures: each control below fails
+    the unchanged evidence that a real capture must provide."""
+
+    def problems(self, kind, data, state=None, packets=extension_check.CAPTURE_PACKETS):
+        records = len(extension_check.parse_pcap(data, SNAPLEN)[0])
+        return extension_check.capture_problems(kind, state or finished(records), data, PEER, TARGET, SNAPLEN,
+                                                packets)
+
+    def test_the_selected_flow_in_both_directions_passes(self):
+        summary, problems = self.problems("traffic", capture_file(*FLOW))
+        self.assertEqual(problems, [])
+        self.assertEqual((summary["records"], summary["to_target"], summary["from_target"], summary["truncated"]),
+                         (7, 4, 3, 1))
+        self.assertEqual(summary["seen"], ["request", "response", "syn", "syn_ack"])
+        self.assertIsNone(summary["statistics"]["dropped_by_interface"])
+
+    def test_traffic_controls_fail(self):
+        no_answer = [frame for frame in FLOW if frame[34:36] != struct.pack(">H", PORT)]
+        for name, data in (
+                ("excluded flow kept", capture_file(*FLOW, OTHER)),
+                ("other peer kept", capture_file(*FLOW, tcp_frame("172.30.0.9", TARGET, 40002, PORT, 0x02))),
+                ("not TCP", capture_file(*FLOW, b"\xff" * 12 + b"\x08\x06" + b"\x00" * 28)),
+                ("one direction", capture_file(*no_answer)),
+                ("no SYN-ACK", capture_file(*(frame for frame in FLOW if frame != SYN_ACK))),
+                ("no request payload", capture_file(*(frame for frame in FLOW if frame != REQUEST))),
+                ("nothing cut at the snaplen", capture_file(*(frame for frame in FLOW if frame != ANSWER),
+                                                            tcp_frame(TARGET, PEER, PORT, 40000, 0x18,
+                                                                      RESPONSE[:40]))),
+                ("other header snaplen", capture_file(*FLOW, snaplen=SNAPLEN * 2)),
+                ("cut record", capture_file(*FLOW)[:-5]),
+                ("pcapng", b"\x0a\x0d\x0d\x0a" + capture_file(*FLOW)[4:]),
+                ("empty", capture_file())):
+            with self.subTest(name=name):
+                self.assertNotEqual(self.problems("traffic", data)[1], [])
+
+    def test_stop_and_statistics_controls_fail(self):
+        data = capture_file(*FLOW)
+        for name, state in (("killed", finished(7, status=143)), ("no statistics", finished(7, stderr="")),
+                            ("count differs", finished(6)),
+                            ("no kernel drops", finished(7, stderr="7 packets captured\n7 packets received by filter\n"))):
+            with self.subTest(name=name):
+                self.assertNotEqual(self.problems("traffic", data, state)[1], [])
+
+    def test_an_empty_capture_is_a_header_alone(self):
+        self.assertEqual(self.problems("empty", capture_file())[1], [])
+        for name, data in (("a record", capture_file(OTHER)), ("no file content", b""),
+                           ("other link type", capture_file()[:20] + struct.pack("<I", 113))):
+            with self.subTest(name=name):
+                self.assertNotEqual(self.problems("empty", data)[1], [])
+
+    def test_the_packet_bound_holds_exactly_its_packets(self):
+        bound = extension_check.CAPTURE_BOUND
+        self.assertEqual(self.problems("bound", capture_file(*FLOW[:bound]), packets=bound)[1], [])
+        self.assertNotEqual(self.problems("bound", capture_file(*FLOW[:bound + 1]), packets=bound)[1], [])
+        self.assertNotEqual(self.problems("bound", capture_file(*FLOW[:bound - 1]), packets=bound)[1], [])
+
+    def test_readiness_needs_the_requested_interface_link_type_and_snaplen(self):
+        self.assertTrue(extension_check.capture_ready(READY_LINE, "eth0", SNAPLEN))
+        for line in (READY_LINE.replace("eth0", "lo"), READY_LINE.replace("EN10MB (Ethernet)", "LINUX_SLL2 (Linux)"),
+                     READY_LINE.replace(str(SNAPLEN), "262144"), "tcpdump: verbose output suppressed\n", ""):
+            with self.subTest(line=line):
+                self.assertFalse(extension_check.capture_ready(line, "eth0", SNAPLEN))
+
+    def test_missing_statistics_are_unknown_not_zero(self):
+        self.assertEqual(extension_check.capture_statistics("1 packet captured\n3 packets received by filter\n"),
+                         {"captured": 1, "received_by_filter": 3, "dropped_by_kernel": None,
+                          "dropped_by_interface": None})
+
+    def test_capture_failures_are_classified(self):
+        for code, text, kind in (
+                (1, "tcpdump: can't parse filter expression: syntax error\n", "invalid_filter"),
+                (1, "tcpdump: ctc-missing0: No such device exists\n(SIOCGIFHWADDR: No such device)\n",
+                 "unavailable_interface"),
+                (1, "tcpdump: eth0: You don't have permission to perform this capture on that device\n",
+                 "permission_denied"),
+                (255, "exec /usr/bin/tcpdump: operation not permitted\n", "permission_denied"),
+                (127, "tcpdump: error while loading shared libraries: libpcap.so.0.8\n", "loading_failure"),
+                (1, "tcpdump: pcap_loop: The interface disappeared\n", "capture_failure")):
+            with self.subTest(text=text):
+                self.assertEqual(extension_check.classify_capture(code, text), kind)
+
+
+class FakeCaptureEngine:
+    """A Docker stand-in for one capture scenario; each option breaks one step."""
+
+    def __init__(self, test, uid=1000, early_exit=None, invalid_filter_refused=True, net_raw_refused=True,
+                 keeps_excluded=False, unprivileged=None, clock=None, ready_delay=0, exit_delay=0, block=0):
+        self.test, self.uid, self.early_exit = test, uid, early_exit
+        self.invalid_filter_refused, self.net_raw_refused = invalid_filter_refused, net_raw_refused
+        self.keeps_excluded = keeps_excluded
+        # (exit code, output, state) of the control without NET_RAW.
+        self.unprivileged = unprivileged
+        # A synthetic clock: a readiness or exit read takes its delay, and a
+        # state read that blocks for block seconds times out at its bound.
+        self.clock, self.ready_delay, self.exit_delay, self.block = clock, ready_delay, exit_delay, block
+        self.captures, self.calls, self.state_timeouts = {}, [], []
+
+    def __call__(self, *command, timeout=120, check_exit=True):
+        self.calls.append(list(command))
+        name = next((arg for arg in command if isinstance(arg, str) and arg.startswith("ceph-extension-check-")
+                     and arg.count("-") >= 4), "")
+        role = name.rsplit("-", 1)[-1]
+        if command[:2] == ("container", "inspect") and "--format" not in command:
+            network = name.rsplit("-", 1)[0]
+            address = {"target": TARGET, "peer": PEER}[role]
+            return 0, json.dumps([{"NetworkSettings": {"Networks": {network: {
+                "IPAddress": address, "MacAddress": "02:42:ac:1e:00:02"}}}}])
+        if command[:2] == ("container", "inspect"):
+            if self.unprivileged:
+                return 0, json.dumps(self.unprivileged[2])
+            return 0, json.dumps({"ExitCode": 255 if self.net_raw_refused else 1, "Error": "",
+                                  "StartedAt": "2026-10-23T00:00:00Z"})
+        if command[0] == "start":
+            if self.unprivileged:
+                return self.unprivileged[:2]
+            if self.net_raw_refused:
+                return 255, "exec /usr/bin/tcpdump: operation not permitted\n"
+            return 1, "tcpdump: can't parse filter expression\n"
+        if command[0] == "cp":
+            base = command[1].split(":", 1)[1][:-len(".pcap")]
+            Path(command[2]).write_bytes(self.captures[base]["data"])
+            return 0, ""
+        if command[0] != "exec":
+            return 0, ""
+        if command[1] == "--detach":
+            base = command[6]
+            self.test.assertTrue(command[2].endswith("-capturer"))
+            self.test.assertEqual(command[3:6], ("sh", "-c", extension_check.CAPTURE_WRAPPER))
+            self.captures[base] = {"args": command[7:], "stopped": False, "exchanged": False}
+            self.latest = base
+            return 0, ""
+        script = command[command.index("-c") + 1] if "-c" in command and command[2] == "python3" else None
+        if script == extension_check.CAPTURE_UID:
+            return 0, json.dumps([self.uid, self.uid])
+        if script == extension_check.NAMESPACE:
+            return 0, "net:[%d]\n" % (2 if role == "peer" else 1)
+        if script == extension_check.CAPTURE_INTERFACE:
+            return 0, json.dumps([{"name": "eth0", "index": 5}])
+        if script == extension_check.READY:
+            return 0, ""
+        if script == extension_check.CAPTURE_EXCHANGE:
+            self.captures[self.latest]["exchanged"] = True
+            return 0, json.dumps([{"port": int(port), "received": 1000} for port in command[7:]])
+        if script == extension_check.CAPTURE_SIGNAL:
+            for capture in self.captures.values():
+                capture["stopped"] = True
+            return 0, ""
+        if script == extension_check.CAPTURE_STATE:
+            self.state_timeouts.append(timeout)
+            if self.block:
+                if timeout < self.block:
+                    self.clock.now += timeout
+                    raise extension_check.CheckError("Docker command timed out", "timeout")
+                self.clock.now += self.block
+            state = self.state(command[-1])
+            if self.clock:
+                self.clock.now += self.exit_delay if state["status"] is not None else (
+                    self.ready_delay if not self.captures[command[-1]]["exchanged"] else 0)
+            return 0, json.dumps(state)
+        if command[2] == "tcpdump" and "-d" in command:
+            return 0, "(000) ret #0\n"
+        if command[2] == "tcpdump":
+            if extension_check.CAPTURE_INVALID_FILTER in command:
+                return (1, "tcpdump: can't parse filter expression: syntax error\n") if self.invalid_filter_refused \
+                    else (0, READY_LINE + statistics(1))
+            return 1, "tcpdump: ctc-missing0: No such device exists\n(SIOCGIFHWADDR: No such device)\n"
+        raise AssertionError("unexpected docker call: %r" % (command,))
+
+    def state(self, base):
+        capture = self.captures[base]
+        kind = base.rsplit("-", 1)[-1]
+        if self.early_exit:
+            return {"stderr": self.early_exit, "pid": 42, "status": 1, "size": None}
+        if kind == "bound":
+            frames = FLOW[:extension_check.CAPTURE_BOUND]
+        elif kind == "traffic":
+            frames = FLOW + ((OTHER,) if self.keeps_excluded else ())
+        else:
+            frames = ()
+        if not (capture["stopped"] or kind == "bound" and capture["exchanged"]):
+            return {"stderr": READY_LINE, "pid": 42, "status": None, "size": 24}
+        capture["data"] = capture_file(*frames)
+        return {"stderr": READY_LINE + statistics(len(frames)), "pid": 42, "status": 0,
+                "size": len(capture["data"])}
+
+
+def outcome(result):
+    return result["status"], result.get("failure_stage"), result.get("failure_kind")
+
+
+class Clock:
+    """time.monotonic and time.sleep on a synthetic timeline."""
+
+    def __init__(self):
+        self.now = 1000.0
+
+    def monotonic(self):
+        return self.now
+
+    def sleep(self, seconds):
+        self.now += seconds
+
+
+class CaptureScenarioTests(unittest.TestCase):
+    """The capture scenario's steps and failure kinds, with Docker replaced by a fake engine."""
+
+    def setUp(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.output = Path(directory.name)
+
+    def scenario(self, engine, clock=None):
+        target = {"reference": "quay.io/ceph/ceph:v20.2.4", "image_id": "sha256:" + "d" * 64,
+                  "platform": "linux/amd64"}
+        cleanup = {"status": "passed", "leftovers": [], "errors": []}
+        timing = (mock.patch.object(extension_check.time, "monotonic", side_effect=clock.monotonic),
+                  mock.patch.object(extension_check.time, "sleep", side_effect=clock.sleep)) if clock else \
+            (mock.patch.object(extension_check, "CAPTURE_READY_TIMEOUT", 1),
+             mock.patch.object(extension_check.time, "sleep"))
+        with mock.patch.object(extension_check, "docker", side_effect=engine), \
+                mock.patch.object(extension_check, "cleanup", return_value=cleanup) as removed, \
+                timing[0], timing[1]:
+            result = extension_check.capture_scenario(dict(HELPER), target, "abcdef012345", self.output / "run")
+        removed.assert_called_once()
+        return result
+
+    def test_a_scenario_that_meets_the_contract_passes(self):
+        engine = FakeCaptureEngine(self)
+        result = self.scenario(engine)
+        self.assertEqual(result["status"], "passed", result.get("error"))
+        self.assertEqual(set(result["captures"]), {"traffic", "empty", "bound"})
+        self.assertEqual({name: control["status"] for name, control in result["refusals"].items()},
+                         dict.fromkeys(("invalid_filter", "unavailable_interface", "without_net_raw"), "passed"))
+        runs = [call for call in engine.calls if call[0] == "run"]
+        capturer = next(call for call in runs if call[call.index("--name") + 1].endswith("-capturer"))
+        self.assertEqual([arg for arg in capturer if arg.startswith("--cap")], ["--cap-drop=ALL", "--cap-add=NET_RAW"])
+        self.assertFalse(any(arg.startswith("--user") or arg == "--privileged" for arg in capturer))
+        self.assertEqual(capturer[capturer.index("--network") + 1], "container:ceph-extension-check-abcdef012345-target")
+        self.assertIn("--internal", next(call for call in engine.calls if call[:2] == ["network", "create"]))
+        traffic = engine.captures["/tmp/capture-traffic"]["args"]
+        self.assertEqual(traffic[traffic.index("-i") + 1], "eth0")
+        self.assertEqual(traffic[traffic.index("-s") + 1], str(SNAPLEN))
+        self.assertEqual(traffic[-1], "tcp port %d and host %s" % (PORT, PEER))
+        self.assertFalse(list(self.output.rglob("*.pcap")), "raw captures stay out of the report directory")
+
+    def test_failures_keep_their_kind(self):
+        for name, engine, stage, kind in (
+                ("root helper", FakeCaptureEngine(self, uid=0), "setup", "image_unsupported"),
+                ("invalid filter", FakeCaptureEngine(self, early_exit="tcpdump: can't parse filter expression\n"),
+                 "capture:traffic", "invalid_filter"),
+                ("missing interface", FakeCaptureEngine(self, early_exit="tcpdump: eth0: No such device exists\n"),
+                 "capture:traffic", "unavailable_interface"),
+                ("excluded flow kept", FakeCaptureEngine(self, keeps_excluded=True), "capture:traffic",
+                 "capture_failure"),
+                ("invalid filter accepted", FakeCaptureEngine(self, invalid_filter_refused=False), "refusals",
+                 "capture_failure"),
+                ("starts without NET_RAW", FakeCaptureEngine(self, net_raw_refused=False), "refusals",
+                 "capture_failure")):
+            with self.subTest(name=name):
+                result = self.scenario(engine)
+                self.assertEqual((result["status"], result["failure_stage"], result["failure_kind"]),
+                                 ("failed", stage, kind))
+                shutil.rmtree(self.output / "run")
+
+    def test_only_the_runtime_exec_refusal_passes_the_control_without_net_raw(self):
+        started = {"ExitCode": 1, "Error": "", "StartedAt": "2026-10-23T00:00:00Z"}
+        unstarted = {"ExitCode": 255, "Error": "", "StartedAt": "0001-01-01T00:00:00Z"}
+        for name, unprivileged, kind in (
+                # tcpdump started without NET_RAW and reported its own permission error.
+                ("tcpdump's own permission error", (1, "tcpdump: eth0: You don't have permission to perform this "
+                                                       "capture on that device\n", started), "capture_failure"),
+                # The expected exit and message from a container that never started.
+                ("unstarted container", (255, "exec /usr/bin/tcpdump: operation not permitted\n", unstarted),
+                 "checker_failure"),
+                ("runtime error", (255, "exec /usr/bin/tcpdump: operation not permitted\n",
+                                   dict(unstarted, StartedAt="2026-10-23T00:00:00Z", Error="OCI runtime error")),
+                 "checker_failure")):
+            with self.subTest(name=name):
+                self.addCleanup(shutil.rmtree, self.output / "run", ignore_errors=True)
+                result = self.scenario(FakeCaptureEngine(self, unprivileged=unprivileged))
+                shutil.rmtree(self.output / "run")
+                self.assertEqual(outcome(result), ("failed", "refusals", kind))
+
+    def test_waits_are_judged_on_the_synthetic_clock(self):
+        # Within the 15-second budgets, the scenario passes on the synthetic clock too.
+        clock = Clock()
+        result = self.scenario(FakeCaptureEngine(self, clock=clock, ready_delay=5, exit_delay=5), clock)
+        self.assertEqual(result["status"], "passed", result.get("error"))
+
+    def test_late_readiness_or_exit_is_not_accepted(self):
+        for name, options, stage in (("readiness at 20s", {"ready_delay": 20}, "capture:traffic"),
+                                     ("exit at 20s", {"exit_delay": 20}, "capture:traffic")):
+            with self.subTest(name=name):
+                self.addCleanup(shutil.rmtree, self.output / "run", ignore_errors=True)
+                clock = Clock()
+                result = self.scenario(FakeCaptureEngine(self, clock=clock, **options), clock)
+                shutil.rmtree(self.output / "run")
+                self.assertEqual(outcome(result), ("failed", stage, "capture_failure"))
+                self.assertIn("within 15s", result["error"])
+
+    def test_a_blocked_state_read_is_bounded_by_the_time_left(self):
+        clock = Clock()
+        start = clock.now
+        engine = FakeCaptureEngine(self, clock=clock, block=120)
+        result = self.scenario(engine, clock)
+        self.assertEqual(outcome(result), ("failed", "capture:traffic", "timeout"))
+        self.assertTrue(engine.state_timeouts)
+        self.assertTrue(all(timeout <= extension_check.CAPTURE_READY_TIMEOUT for timeout in engine.state_timeouts),
+                        engine.state_timeouts)
+        self.assertLessEqual(clock.now - start, extension_check.CAPTURE_READY_TIMEOUT)
+
+    def test_a_docker_failure_is_a_checker_failure(self):
+        def engine(*command, timeout=120, check_exit=True):
+            raise extension_check.CheckError("Command failed: docker network create")
+
+        result = self.scenario(engine)
+        self.assertEqual((result["status"], result["failure_stage"], result["failure_kind"]),
+                         ("failed", "setup", "checker_failure"))
+
+    def run_main(self, results):
+        image = dict(HELPER, labels={})
+
+        def probe(extension, checked, args, output):
+            checked.update(status="passed", checks=[], cleanup={"status": "passed", "errors": []})
+
+        refusal = {"name": "refused-without-net_raw", "status": "passed", "cleanup": {"status": "passed"}}
+        output = self.output / ("main-%d" % len(list(self.output.iterdir())))
+        with mock.patch.object(extension_check.check, "inspect_image", return_value=dict(image)), \
+                mock.patch.object(extension_check, "docker", return_value=(0, json.dumps([{"Config": {}}]))), \
+                mock.patch.object(extension_check, "environment", return_value={}), \
+                mock.patch.object(extension_check, "probe", side_effect=probe), \
+                mock.patch.object(extension_check, "capture_refusal", return_value=refusal), \
+                mock.patch.object(extension_check, "capture_scenario", side_effect=results) as scenario, \
+                mock.patch("sys.stdout"), mock.patch("sys.stderr"):
+            code = extension_check.main(["--extension", "capture", "--image", "x", "--functional", "--target", "t",
+                                         "--output-dir", str(output)])
+        scenario.assert_called_once()
+        return code, json.loads((output / "extension-report.json").read_text())
+
+    def test_the_report_carries_the_scenario_outcome(self):
+        passed = {"status": "passed", "cleanup": {"status": "passed", "leftovers": []}}
+        code, report = self.run_main([passed])
+        self.assertEqual((code, report["status"], report["level"]), (0, "passed", "functional"))
+        for kind in ("invalid_filter", "permission_denied", "capture_failure", "checker_failure"):
+            with self.subTest(kind=kind):
+                code, report = self.run_main([{"status": "failed", "failure_kind": kind}])
+                self.assertEqual((code, report["status"], report["failure_kind"]), (1, "failed", kind))
 
 
 class CapturePublicationTests(unittest.TestCase):

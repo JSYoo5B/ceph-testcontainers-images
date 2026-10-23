@@ -16,6 +16,15 @@ a rate limits only the selected peers of each target's egress.
 netem's reorder, duplicate and corrupt with correlations, and with
 --functional each fault's effect on the selected peers of each target's
 egress, observed in the receiver's kernel counters.
+
+For the packet-capture helper, --functional runs a capture scenario with each
+--target: a helper in the target container's namespace on a private bridge,
+as the image's own user with NET_RAW alone, captures TCP between a peer and
+that namespace with an explicit interface, filter and snaplen. It checks the
+readiness line, the selected flow in both directions without an excluded
+flow, a stop by SIGTERM with the file flushed and the statistics, a valid
+empty capture, the packet bound, and that an invalid filter, a missing
+interface and a missing NET_RAW are refused, each with its own kind.
 """
 import argparse
 from datetime import datetime, timezone
@@ -24,8 +33,11 @@ import ipaddress
 import json
 from pathlib import Path
 import re
+import shutil
+import struct
 import subprocess
 import sys
+import tempfile
 import time
 import uuid
 
@@ -43,8 +55,8 @@ EXTENSIONS = {"netem": {"contract": "1", "probe": HERE / "extensions" / "netem" 
 # The helpers that image/publish.py publishes. A helper joins only once its
 # functional check gates publication.
 PUBLISHED = tuple(name for name, spec in EXTENSIONS.items() if spec["published"])
-# The checks that exist only for the netem helper so far.
-NETEM_ONLY = ("functional", "target", "selector", "rate", "packet_faults")
+# The checks that exist only for the netem helper.
+NETEM_ONLY = ("selector", "rate", "packet_faults")
 LABEL = "io.ceph-testcontainers.extension-check"
 HANDLE = "c7e1:"
 PORT = 7000
@@ -419,8 +431,8 @@ def arguments(argv=None):
     if args.selector and not args.functional:
         parser.error("--selector requires --functional")
     if args.extension != "netem" and any(getattr(args, option) for option in NETEM_ONLY):
-        parser.error("--extension " + args.extension + " has only the quick check so far; --functional, --target, "
-                     "--selector, --rate and --packet-faults belong to netem")
+        parser.error("--extension " + args.extension + " has no --selector, --rate or --packet-faults; "
+                     "they belong to netem")
     if args.image.startswith("-") or any(target.startswith("-") for target in args.target):
         parser.error("image references cannot start with -")
     return args
@@ -495,31 +507,41 @@ def probe(extension, image, args, output):
 EXEC_REFUSED = re.compile(r"exec (/[^\s:]*/)?tcpdump: operation not permitted")
 
 
+def exec_refusal(container, timeout=120):
+    """Start a created container whose entrypoint is tcpdump, without NET_RAW.
+    Only the runtime's refusal to execute tcpdump counts as refused: the
+    container must have started (no Docker or runtime setup error) and exited
+    with runc's status 255 and its exec message alone, not with an error of
+    tcpdump itself. ran is false when Docker or the runtime never ran the
+    container's process, which says nothing about the image."""
+    code, text = docker("start", "--attach", container, timeout=timeout, check_exit=False)
+    state = json.loads(docker("container", "inspect", "--format", "{{json .State}}", container,
+                              timeout=timeout)[1])
+    state = {key: state.get(key) for key in ("ExitCode", "Error", "StartedAt")}
+    started = bool(state["StartedAt"]) and not state["StartedAt"].startswith("0001-")
+    ran = started and not state["Error"] and code == state["ExitCode"]
+    refused = ran and state["ExitCode"] == 255 and EXEC_REFUSED.fullmatch(text.strip()) is not None
+    return {"exit_code": code, "output": text, "state": state, "ran": ran, "refused": refused}
+
+
 def capture_refusal(image, output):
     """Without NET_RAW, the capture helper's tcpdump must not start at all:
     the kernel refuses to execute a file capability that the bounding set
-    lacks. Only that refusal passes: the container must have started (no
-    Docker or runtime setup error) and exited with runc's status 255 and its
-    exec message alone, not with an error of tcpdump itself."""
+    lacks. Only the refusal described by exec_refusal() passes."""
     container = "ceph-extension-check-" + uuid.uuid4().hex
     result = {"name": "refused-without-net_raw"}
     try:
         docker("create", "--name", container, "--label", LABEL + "=quick", "--pull=never", "--network=none",
                "--cap-drop=ALL", "--platform", image["platform"], "--entrypoint=tcpdump", image["image_id"],
                "--version")
-        code, text = docker("start", "--attach", container, check_exit=False)
-        state = json.loads(docker("container", "inspect", "--format", "{{json .State}}", container)[1])
-        (output / "refusal.log").write_text(text)
-        result.update(exit_code=code, state={key: state.get(key) for key in ("ExitCode", "Error", "StartedAt")})
-        started = bool(state.get("StartedAt")) and not state.get("StartedAt", "").startswith("0001-")
-        if not started or state.get("Error") or code != state.get("ExitCode"):
-            # Docker or the runtime never ran the container's process: the
-            # engine could not run the check, which says nothing about the image.
+        refusal = exec_refusal(container)
+        (output / "refusal.log").write_text(refusal["output"])
+        result.update(exit_code=refusal["exit_code"], state=refusal["state"])
+        if not refusal["ran"]:
             raise CheckError("The refusal container did not run: docker start exited %s, state %s: %s"
-                             % (code, json.dumps(result["state"]), text.strip()[:500]))
-        refused = state.get("ExitCode") == 255 and EXEC_REFUSED.fullmatch(text.strip()) is not None
-        result["status"] = "passed" if refused else "failed"
-        if not refused:
+                             % (refusal["exit_code"], json.dumps(refusal["state"]), refusal["output"].strip()[:500]))
+        result["status"] = "passed" if refusal["refused"] else "failed"
+        if not refusal["refused"]:
             result.update(failure_stage="quick:refused-without-net_raw", failure_kind="quick_failure")
     except check.CheckError as error:
         # A container that Docker could not create, start or inspect says
@@ -1863,6 +1885,491 @@ def fault_problems(result):
     return problems
 
 
+# Functional check of the packet-capture helper (docs/EXTENSIONS.md). A
+# capturing helper joins a target container's namespace on a private bridge
+# as the image's own user with NET_RAW alone; a peer on the bridge exchanges
+# TCP with a server in that namespace on the selected and on an excluded port.
+CAPTURE_PORT, CAPTURE_EXCLUDED_PORT = 7000, 7001
+CAPTURE_SNAPLEN = 128
+CAPTURE_PACKETS = 1000
+CAPTURE_BOUND = 3
+CAPTURE_RESPONSE = 1000
+CAPTURE_READY_TIMEOUT = 15
+CAPTURE_STOP_TIMEOUT = 15
+CAPTURE_MISSING_INTERFACE = "ctc-missing0"
+CAPTURE_INVALID_FILTER = "tcp portx %d" % CAPTURE_PORT
+PCAP_HEADER = 24
+PCAP_RECORD = 16
+
+
+def capture_request(port):
+    return b"capture-request-%d\n" % port
+
+
+def capture_token(port):
+    return b"capture-response-%d-" % port
+
+
+# Answers each request line on every port given with argv[1] bytes of the
+# port's own token; runs in the target's namespace without any capability.
+CAPTURE_SERVER = """import socket, sys, threading
+size = int(sys.argv[1])
+def serve(port):
+    s = socket.socket()
+    s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    s.bind(("0.0.0.0", port))
+    s.listen(16)
+    token = b"capture-response-%d-" % port
+    body = (token * (size // len(token) + 1))[:size]
+    while True:
+        c, _ = s.accept()
+        try:
+            data = b""
+            while not data.endswith(b"\\n"):
+                chunk = c.recv(256)
+                if not chunk:
+                    break
+                data += chunk
+            if data:
+                c.sendall(body)
+        except OSError:
+            pass
+        finally:
+            c.close()
+for port in sys.argv[2:]:
+    threading.Thread(target=serve, args=(int(port),)).start()
+"""
+
+# One request and its whole answer per port given, from the peer.
+CAPTURE_EXCHANGE = """import json, socket, sys
+host, size = sys.argv[1], int(sys.argv[2])
+results = []
+for port in map(int, sys.argv[3:]):
+    token = b"capture-response-%d-" % port
+    with socket.create_connection((host, port), timeout=10) as c:
+        c.sendall(b"capture-request-%d\\n" % port)
+        data = b""
+        while True:
+            chunk = c.recv(4096)
+            if not chunk:
+                break
+            data += chunk
+    if data != (token * (size // len(token) + 1))[:size]:
+        raise SystemExit("port %d answered %d unexpected bytes" % (port, len(data)))
+    results.append({"port": port, "received": len(data)})
+print(json.dumps(results))
+"""
+
+# The interface of the namespace with the given MAC address, from sysfs.
+CAPTURE_INTERFACE = """import json, os, sys
+found = []
+for name in sorted(os.listdir("/sys/class/net")):
+    try:
+        with open("/sys/class/net/%s/address" % name) as f:
+            address = f.read().strip()
+        with open("/sys/class/net/%s/ifindex" % name) as f:
+            index = int(f.read())
+    except OSError:
+        continue
+    if address == sys.argv[1].lower():
+        found.append({"name": name, "index": index})
+print(json.dumps(found))
+"""
+
+# The capture runs under sh, which records tcpdump's PID and, once it ends,
+# its exit status; $0 is the base path of the capture's files.
+CAPTURE_WRAPPER = 'tcpdump "$@" 2>"$0.stderr" & echo $! >"$0.pid"; wait $!; echo $? >"$0.status"'
+
+# The capture's standard error, PID, exit status and output size.
+CAPTURE_STATE = """import json, os, sys
+base = sys.argv[1]
+def read(suffix):
+    try:
+        with open(base + suffix) as f:
+            return f.read()
+    except OSError:
+        return None
+def number(text):
+    return int(text) if text and text.endswith("\\n") and text.strip().isdigit() else None
+size = os.path.getsize(base + ".pcap") if os.path.exists(base + ".pcap") else None
+print(json.dumps({"stderr": read(".stderr") or "", "pid": number(read(".pid")),
+                  "status": number(read(".status")), "size": size}))
+"""
+
+CAPTURE_SIGNAL = "import os, signal, sys; os.kill(int(sys.argv[1]), signal.SIGTERM)"
+CAPTURE_UID = "import json, os; print(json.dumps([os.getuid(), os.geteuid()]))"
+
+READY_LINE = re.compile(r"tcpdump: listening on (\S+), link-type (\S+) .*, snapshot length (\d+) bytes")
+STATISTICS = {"captured": "captured", "received_by_filter": "received by filter",
+              "dropped_by_kernel": "dropped by kernel", "dropped_by_interface": "dropped by interface"}
+# tcpdump prints these three after a capture; the last is unknown when missing.
+REQUIRED_STATISTICS = ("captured", "received_by_filter", "dropped_by_kernel")
+
+
+def capture_ready(stderr, interface, snaplen):
+    """Whether tcpdump announced the requested interface, Ethernet and snaplen."""
+    for line in stderr.splitlines():
+        match = READY_LINE.fullmatch(line.strip())
+        if match and match.groups() == (interface, "EN10MB", str(snaplen)):
+            return True
+    return False
+
+
+def capture_statistics(stderr):
+    """tcpdump's closing statistics; one that it did not print is None (unknown), never zero."""
+    statistics = dict.fromkeys(STATISTICS)
+    for line in stderr.splitlines():
+        for key, label in STATISTICS.items():
+            match = re.fullmatch(r"(\d+) packets? " + label, line.strip())
+            if match:
+                statistics[key] = int(match.group(1))
+    return statistics
+
+
+def classify_capture(code, stderr):
+    """The kind of a tcpdump that failed to capture."""
+    text = stderr.lower()
+    if "can't parse filter expression" in text:
+        return "invalid_filter"
+    if "no such device" in text or "doesn't exist" in text:
+        return "unavailable_interface"
+    if "operation not permitted" in text or "permission" in text:
+        return "permission_denied"
+    if "error while loading shared libraries" in text or "executable file not found" in text or code in (126, 127):
+        return "loading_failure"
+    return "capture_failure"
+
+
+def parse_pcap(data, snaplen):
+    """The records of a classic pcap file as (included bytes, original length),
+    with the problems of its header and records."""
+    problems, records = [], []
+    if len(data) < PCAP_HEADER:
+        return records, ["%d bytes, shorter than a pcap header" % len(data)]
+    magic, major, minor, _, _, header_snaplen, link = struct.unpack_from("<IHHiIII", data)
+    if magic != 0xa1b2c3d4:
+        problems.append("magic %#x is not classic microsecond pcap" % magic)
+    if (major, minor) != (2, 4):
+        problems.append("version %d.%d" % (major, minor))
+    if header_snaplen != snaplen:
+        problems.append("snaplen %d, requested %d" % (header_snaplen, snaplen))
+    if link != 1:
+        problems.append("link type %d, not Ethernet" % link)
+    if problems:
+        return records, problems
+    offset = PCAP_HEADER
+    while offset < len(data):
+        if offset + PCAP_RECORD > len(data):
+            problems.append("a record header is cut at byte %d" % offset)
+            break
+        _, microseconds, included, original = struct.unpack_from("<IIII", data, offset)
+        frame = data[offset + PCAP_RECORD:offset + PCAP_RECORD + included]
+        offset += PCAP_RECORD + included
+        if len(frame) != included:
+            problems.append("a record is cut at byte %d" % (offset - included))
+            break
+        if microseconds >= 1000000 or included > snaplen or included > original:
+            problems.append("record %d has %d of %d bytes at %d us" % (len(records), included, original,
+                                                                       microseconds))
+        records.append((frame, original))
+    return records, problems
+
+
+def tcp_segment(frame):
+    """(source, destination, source port, destination port, flags, payload) of
+    an Ethernet/IPv4/TCP frame, or None."""
+    if len(frame) < 14 + 20 or frame[12:14] != b"\x08\x00" or frame[14] >> 4 != 4:
+        return None
+    header = (frame[14] & 0x0f) * 4
+    if frame[14 + 9] != 6 or len(frame) < 14 + header + 20:
+        return None
+    tcp = 14 + header
+    source, destination = (str(ipaddress.IPv4Address(frame[14 + 12:14 + 16])),
+                           str(ipaddress.IPv4Address(frame[14 + 16:14 + 20])))
+    sport, dport = struct.unpack_from(">HH", frame, tcp)
+    flags = frame[tcp + 13]
+    payload = frame[tcp + (frame[tcp + 12] >> 4) * 4:]
+    return source, destination, sport, dport, flags, payload
+
+
+def capture_flow(records, peer, target, snaplen):
+    """Summary and problems of a capture that must hold only the TCP flow
+    between the peer and the target's selected port, in both directions."""
+    summary = {"records": len(records), "to_target": 0, "from_target": 0, "truncated": 0}
+    problems = []
+    seen = set()
+    for index, (frame, original) in enumerate(records):
+        segment = tcp_segment(frame)
+        if segment is None:
+            problems.append("record %d is not IPv4 TCP" % index)
+            continue
+        source, destination, sport, dport, flags, payload = segment
+        if (source, destination, dport) == (peer, target, CAPTURE_PORT):
+            summary["to_target"] += 1
+            if flags & 0x12 == 0x02:
+                seen.add("syn")
+            if payload.startswith(capture_request(CAPTURE_PORT)):
+                seen.add("request")
+        elif (source, destination, sport) == (target, peer, CAPTURE_PORT):
+            summary["from_target"] += 1
+            if flags & 0x12 == 0x12:
+                seen.add("syn_ack")
+            if payload.startswith(capture_token(CAPTURE_PORT)):
+                seen.add("response")
+        else:
+            problems.append("record %d is outside the filter: %s:%d > %s:%d" % (index, source, sport,
+                                                                                 destination, dport))
+        if len(frame) == snaplen < original:
+            summary["truncated"] += 1
+    summary["seen"] = sorted(seen)
+    return summary, problems
+
+
+def capture_problems(kind, state, data, peer, target, snaplen, packets):
+    """Summary and problems of one finished capture: kind is "traffic" (the
+    selected flow both ways and nothing else), "empty" (a valid file without
+    records) or "bound" (exactly `packets` records of the selected flow)."""
+    problems = []
+    if state["status"] != 0:
+        problems.append("tcpdump exited with %s" % state["status"])
+    statistics = capture_statistics(state["stderr"])
+    missing = [key for key in REQUIRED_STATISTICS if statistics[key] is None]
+    if missing:
+        problems.append("no statistics for " + ", ".join(missing))
+    records, pcap_problems = parse_pcap(data, snaplen)
+    problems += pcap_problems
+    limit = PCAP_HEADER + packets * (PCAP_RECORD + snaplen)
+    if len(data) > limit:
+        problems.append("%d bytes, over the bound of %d" % (len(data), limit))
+    summary, flow_problems = capture_flow(records, peer, target, snaplen)
+    problems += flow_problems
+    summary.update(bytes=len(data), sha256=hashlib.sha256(data).hexdigest(), statistics=statistics,
+                   byte_bound=limit)
+    if statistics["captured"] is not None and statistics["captured"] != len(records):
+        problems.append("%d packets captured, %d records" % (statistics["captured"], len(records)))
+    if kind == "traffic":
+        absent = {"syn", "syn_ack", "request", "response"} - set(summary["seen"])
+        if absent:
+            problems.append("the selected flow lacks " + ", ".join(sorted(absent)))
+        if not summary["truncated"]:
+            problems.append("no record was cut at the snaplen")
+    elif kind == "empty":
+        if records or len(data) != PCAP_HEADER:
+            problems.append("an empty capture holds %d records in %d bytes" % (len(records), len(data)))
+    elif kind == "bound":
+        if len(records) != packets:
+            problems.append("%d records, bound %d" % (len(records), packets))
+    return summary, problems
+
+
+def budget(deadline, what):
+    """The seconds left before deadline; none left fails the wait."""
+    left = deadline - time.monotonic()
+    if left <= 0:
+        raise CheckError(what, "capture_failure")
+    return left
+
+
+def capture_state(capturer, base, deadline, what):
+    return json.loads(docker("exec", capturer, "python3", "-c", CAPTURE_STATE, base,
+                             timeout=budget(deadline, what))[1])
+
+
+def start_capture(capturer, base, interface, expression, packets):
+    """Start tcpdump in the background and wait for its readiness line and
+    output file; a tcpdump that exits first fails with its own kind. Every
+    Docker call is bounded by the time left, and readiness counts only when
+    it was observed before the deadline."""
+    deadline = time.monotonic() + CAPTURE_READY_TIMEOUT
+    late = "tcpdump was not ready within %ds" % CAPTURE_READY_TIMEOUT
+    docker("exec", "--detach", capturer, "sh", "-c", CAPTURE_WRAPPER, base, "-p", "-i", interface, "-s",
+           str(CAPTURE_SNAPLEN), "-c", str(packets), "--immediate-mode", "-U", "-w", base + ".pcap", expression,
+           timeout=budget(deadline, late))
+    while True:
+        state = capture_state(capturer, base, deadline, late)
+        observed = time.monotonic()
+        if state["status"] is not None:
+            raise CheckError("tcpdump exited with %d before it was ready: %s" % (state["status"],
+                                                                                 state["stderr"].strip()[:500]),
+                             classify_capture(state["status"], state["stderr"]))
+        if observed > deadline:
+            raise CheckError(late + ": " + state["stderr"].strip()[:500], "capture_failure")
+        if capture_ready(state["stderr"], interface, CAPTURE_SNAPLEN) and state["size"] is not None and state["pid"]:
+            return state
+        time.sleep(min(0.2, max(deadline - time.monotonic(), 0)))
+
+
+def finish_capture(capturer, base, stop):
+    """Send SIGTERM when stop is set, then wait for tcpdump's exit status.
+    The first read, the signal and every later read are bounded by the time
+    left, and an exit counts only when it was observed before the deadline."""
+    deadline = time.monotonic() + CAPTURE_STOP_TIMEOUT
+    late = "tcpdump did not exit within %ds%s" % (CAPTURE_STOP_TIMEOUT, " of SIGTERM" if stop else "")
+    state = capture_state(capturer, base, deadline, late)
+    if stop:
+        docker("exec", capturer, "python3", "-c", CAPTURE_SIGNAL, str(state["pid"]), timeout=budget(deadline, late))
+    while True:
+        if time.monotonic() > deadline:
+            raise CheckError(late, "capture_failure")
+        if state["status"] is not None:
+            return state
+        time.sleep(min(0.2, max(deadline - time.monotonic(), 0)))
+        state = capture_state(capturer, base, deadline, late)
+
+
+def retrieve(capturer, base, directory):
+    """The finished capture file. It stays out of the report directory: only
+    its size, hash and decoded summary are reported."""
+    local = Path(directory) / (Path(base).name + ".pcap")
+    docker("cp", capturer + ":" + base + ".pcap", str(local))
+    return local.read_bytes()
+
+
+def exchange(peer, target_address, ports, output):
+    code, text = docker("exec", peer, "python3", "-c", CAPTURE_EXCHANGE, target_address, str(CAPTURE_RESPONSE),
+                        *map(str, ports), check_exit=False)
+    with (output / "exchanges.log").open("a") as log:
+        log.write("%s: %s" % (",".join(map(str, ports)), text))
+    if code:
+        raise CheckError("The peer's exchange failed: " + text.strip()[:500], "checker_failure")
+    return json.loads(text.strip().splitlines()[-1])
+
+
+def run_capture(names, kind, interface, peer, target, ports, packets, directory, output):
+    """One capture in the target's namespace, from readiness to the decoded file."""
+    base = "/tmp/capture-" + kind
+    expression = "tcp port %d and host %s" % (CAPTURE_PORT, peer)
+    result = {"interface": interface, "filter": expression, "snaplen": CAPTURE_SNAPLEN, "packets": packets,
+              "stop": "packet bound" if kind == "bound" else "SIGTERM"}
+    ready = start_capture(names["capturer"], base, interface, expression, packets)
+    result["ready"] = [line for line in ready["stderr"].splitlines() if READY_LINE.fullmatch(line.strip())]
+    result["exchanges"] = exchange(names["peer"], target, ports, output)
+    time.sleep(0.5)
+    state = finish_capture(names["capturer"], base, stop=kind != "bound")
+    result.update(exit_code=state["status"], stderr=[line.strip() for line in state["stderr"].splitlines()])
+    data = retrieve(names["capturer"], base, directory)
+    summary, problems = capture_problems(kind, state, data, peer, target, CAPTURE_SNAPLEN, packets)
+    result.update(summary=summary, problems=problems, status="failed" if problems else "passed")
+    return result
+
+
+def refused_capture(names, label, interface, helper):
+    """Negative controls in the target's namespace: an invalid filter, an
+    interface that does not exist, and a helper without NET_RAW. Each must
+    fail before readiness with its own kind."""
+    common = ["-p", "-s", str(CAPTURE_SNAPLEN), "-c", "1", "-w", "/tmp/refused.pcap"]
+    expression = "tcp port %d" % CAPTURE_PORT
+    controls = {}
+    for name, arguments, expected in (
+            ("invalid_filter", ["-i", interface, *common, CAPTURE_INVALID_FILTER], "invalid_filter"),
+            ("unavailable_interface", ["-i", CAPTURE_MISSING_INTERFACE, *common, expression],
+             "unavailable_interface")):
+        code, text = docker("exec", names["capturer"], "tcpdump", *arguments, timeout=30, check_exit=False)
+        controls[name] = {"expected": expected, "exit_code": code, "output": text.strip()[:500],
+                          "kind": classify_capture(code, text) if code else None}
+    # The capability is missing from the bounding set: the runtime refuses to
+    # execute tcpdump, as in the quick check, but inside the target's namespace.
+    docker("create", "--name", names["unprivileged"], "--label", label, "--pull=never",
+           "--network", "container:" + names["target"], "--cap-drop=ALL", "--platform", helper["platform"],
+           "--entrypoint=tcpdump", helper["image_id"], "-i", interface, *common, expression)
+    refusal = exec_refusal(names["unprivileged"], timeout=30)
+    if not refusal["ran"]:
+        raise CheckError("The control without NET_RAW did not run: docker start exited %s, state %s: %s"
+                         % (refusal["exit_code"], json.dumps(refusal["state"]), refusal["output"].strip()[:500]))
+    # Only the runtime's exec refusal passes; a tcpdump that started and
+    # reported a permission error of its own did run without NET_RAW.
+    controls["without_net_raw"] = {"expected": "permission_denied", "exit_code": refusal["exit_code"],
+                                   "output": refusal["output"].strip()[:500], "state": refusal["state"],
+                                   "kind": "permission_denied" if refusal["refused"] else "not_refused"}
+    for control in controls.values():
+        control["status"] = "passed" if control["kind"] == control["expected"] and \
+            "listening on" not in control["output"] else "failed"
+    return controls
+
+
+def capture_scenario(helper, target, run, output):
+    """Capture between a peer and a container of the target image on a
+    private bridge, from a helper in the target's namespace; then the
+    negative controls; then remove every owned container and the network."""
+    label = LABEL + "=" + run
+    network = "ceph-extension-check-" + run
+    names = {role: network + "-" + role for role in ("target", "server", "capturer", "peer", "unprivileged")}
+    result = {"reference": target["reference"], "image_id": target["image_id"], "helper_image_id": helper["image_id"],
+              "platform": helper["platform"], "status": "running", "stage": "setup"}
+    output.mkdir()
+    directory = tempfile.mkdtemp(prefix="capture-")
+    common = ["--detach", "--label", label, "--pull=never", "--platform", helper["platform"]]
+    try:
+        docker("network", "create", "--internal", "--label", label, network)
+        docker("run", "--detach", "--label", label, "--pull=never", "--platform", target["platform"],
+               "--name", names["target"], "--network", network, "--entrypoint=sleep", target["image_id"], "infinity")
+        endpoint = json.loads(docker("container", "inspect", names["target"])[1])[0]["NetworkSettings"]["Networks"][network]
+        shared = "container:" + names["target"]
+        docker("run", *common, "--name", names["server"], "--network", shared, "--cap-drop=ALL",
+               "--entrypoint=python3", helper["image_id"], "-c", CAPTURE_SERVER, str(CAPTURE_RESPONSE),
+               str(CAPTURE_PORT), str(CAPTURE_EXCLUDED_PORT))
+        docker("run", *common, "--name", names["peer"], "--network", network, "--cap-drop=ALL",
+               "--entrypoint=sleep", helper["image_id"], "infinity")
+        # The image's own user, with NET_RAW alone and nothing else.
+        docker("run", *common, "--name", names["capturer"], "--network", shared, "--cap-drop=ALL",
+               "--cap-add=NET_RAW", "--entrypoint=sleep", helper["image_id"], "infinity")
+        uid, euid = json.loads(docker("exec", names["capturer"], "python3", "-c", CAPTURE_UID)[1])
+        result["capturer"] = {"uid": uid, "euid": euid, "caps": ["NET_RAW"]}
+        if 0 in (uid, euid):
+            raise CheckError("The capturing helper runs as root", "image_unsupported")
+        namespaces = {role: docker("exec", names[role], "python3", "-c", NAMESPACE)[1].strip()
+                      for role in ("server", "capturer", "peer")}
+        if namespaces["server"] != namespaces["capturer"] or namespaces["peer"] == namespaces["capturer"]:
+            raise CheckError("The helpers are not in the expected namespaces: " + json.dumps(namespaces))
+        found = json.loads(docker("exec", names["capturer"], "python3", "-c", CAPTURE_INTERFACE,
+                                  endpoint["MacAddress"])[1])
+        if len(found) != 1:
+            raise CheckError("Expected one interface with %s, found %s" % (endpoint["MacAddress"], json.dumps(found)))
+        interface = found[0]["name"]
+        target_address = endpoint["IPAddress"]
+        peer_address = json.loads(docker("container", "inspect", names["peer"])[1])[0][
+            "NetworkSettings"]["Networks"][network]["IPAddress"]
+        result.update(interface=dict(found[0], address=target_address), peer_address=peer_address)
+        for port in (CAPTURE_PORT, CAPTURE_EXCLUDED_PORT):
+            code, text = docker("exec", names["peer"], "python3", "-c", READY, target_address, str(port),
+                                check_exit=False)
+            if code:
+                raise CheckError("The server in the target's namespace did not answer: " + text.strip())
+        expression = "tcp port %d and host %s" % (CAPTURE_PORT, peer_address)
+        code, text = docker("exec", names["capturer"], "tcpdump", "-y", "EN10MB", "-d", expression, check_exit=False)
+        if code:
+            raise CheckError("The filter did not compile: " + text.strip()[:500], classify_capture(code, text))
+        result["captures"] = {}
+        for kind, ports, packets in (("traffic", (CAPTURE_PORT, CAPTURE_EXCLUDED_PORT), CAPTURE_PACKETS),
+                                     ("empty", (CAPTURE_EXCLUDED_PORT,), CAPTURE_PACKETS),
+                                     ("bound", (CAPTURE_PORT,), CAPTURE_BOUND)):
+            result["stage"] = "capture:" + kind
+            result["captures"][kind] = run_capture(names, kind, interface, peer_address, target_address, ports,
+                                                   packets, directory, output)
+            if result["captures"][kind]["status"] != "passed":
+                raise CheckError("The %s capture failed: %s" % (kind, "; ".join(result["captures"][kind]["problems"])),
+                                 "capture_failure")
+        result["stage"] = "refusals"
+        result["refusals"] = refused_capture(names, label, interface, helper)
+        failed = [name for name, control in result["refusals"].items() if control["status"] != "passed"]
+        if failed:
+            raise CheckError("Negative controls did not fail as expected: " + ", ".join(failed), "capture_failure")
+        del result["stage"]
+        result["status"] = "passed"
+    except (check.CheckError, KeyError, ValueError, TypeError) as error:
+        result.update(status="failed", error=str(error), failure_stage=result["stage"],
+                      failure_kind=getattr(error, "kind", "checker_failure"))
+    finally:
+        shutil.rmtree(directory, ignore_errors=True)
+        result["cleanup"] = cleanup(label, output)
+        if result["cleanup"]["status"] != "passed":
+            result["status"] = "failed"
+            result.setdefault("failure_kind", "checker_failure")
+            result.setdefault("failure_stage", "cleanup")
+        (output / "result.json").write_text(json.dumps(result, indent=2) + "\n")
+    return result
+
+
 def run_cleanup(errors, *command):
     """One cleanup command; its failure is recorded, not raised."""
     try:
@@ -2055,7 +2562,22 @@ def main(argv=None):
             print("Checking that tc parses netem's reorder, duplicate and corrupt with correlations", flush=True)
             report["packet_faults"] = {"status": "running", "parser": faults_parser(image, output)}
             save(output, report)
-        if args.functional:
+        if args.functional and args.extension == "capture":
+            report["environment"] = environment()
+            for reference in args.target:
+                target = check.inspect_image(reference, args.platform)
+                if target["platform"] != image["platform"]:
+                    raise CheckError("The target and the helper must use one platform: " + reference)
+                print("Capturing in the namespace of a container of " + reference, flush=True)
+                run = uuid.uuid4().hex[:12]
+                report["targets"][reference] = capture_scenario(image, target, run, output / ("capture-" + run))
+                save(output, report)
+            failed = [reference for reference, result in report["targets"].items() if result["status"] != "passed"]
+            if failed:
+                kinds = {report["targets"][reference].get("failure_kind", "capture_failure") for reference in failed}
+                raise CheckError("The capture scenario failed for: " + ", ".join(failed),
+                                 kinds.pop() if len(kinds) == 1 else "capture_failure")
+        elif args.functional:
             report["environment"] = environment()
             print("Checking netem on this engine's kernel", flush=True)
             report["kernel"] = kernel(image, output)
