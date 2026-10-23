@@ -148,6 +148,7 @@ jobs:
           python3 image/extension_check.py --extension capture --image ceph-check:extension-capture \
             --platform "linux/${{ matrix.architecture }}" --functional "${targets[@]}" --output-dir "$RUNNER_TEMP/capture"
       - name: Keep raw captures out of the artifacts
+        id: raw-captures
         if: always()
         run: python3 image/publish.py check-artifacts --directory "$RUNNER_TEMP/capture"
       - name: Upload the exact tested helper
@@ -164,8 +165,10 @@ jobs:
           retention-days: 30
           path: ${{ runner.temp }}/capture-candidate/extension-candidate.json
           if-no-files-found: error
+      # A report directory is uploaded only after the guard found no raw
+      # capture in it, also after an earlier checker failure.
       - uses: actions/upload-artifact@v4
-        if: always()
+        if: always() && steps.raw-captures.outcome == 'success'
         with:
           name: extension-capture-${{ matrix.architecture }}-check
           retention-days: ${{ inputs.publish && 30 || job.status == 'failure' && 14 || 7 }}

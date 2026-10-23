@@ -133,7 +133,7 @@ Debian's `tcpdump` drops root privileges to its `tcpdump` user and changes the o
 
 A capture can hold payloads, addresses and identifiers. Text and JSON redaction do not sanitize a pcap. A module keeps capture files only where its caller selected them, and publishing checker artifacts that contain packets needs a deliberate artifact policy.
 
-This repository has no such policy, so CI never uploads a raw capture. The checker keeps capture files out of its report directory. Before CI uploads a capture report directory, `python3 image/publish.py check-artifacts --directory <dir>` fails when any file below it is named `*.pcap*` or starts with a classic pcap or pcapng magic number, and staging a capture helper for publication refuses a report directory that holds one.
+This repository has no such policy, so CI never uploads a raw capture. The checker keeps capture files out of its report directory. Before CI uploads a capture report directory, `python3 image/publish.py check-artifacts --directory <dir>` fails when any file below it is named `*.pcap*` or starts with a classic pcap or pcapng magic number, and staging a capture helper for publication refuses a report directory that holds one. The report upload runs only when that check succeeded (`steps.raw-captures.outcome == 'success'`), so a failed check leaves the directory unuploaded, while a safe report is still uploaded after an earlier checker failure.
 
 ## Checking an extension image
 

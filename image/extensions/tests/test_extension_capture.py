@@ -754,6 +754,28 @@ def section(text, start, end=None):
     return text[begin:text.index(end, begin)] if end else text[begin:]
 
 
+def step_eligible(condition, guard_id, outcome, job_failed):
+    """Whether a step with this `if:` runs, for the conditions these
+    workflows use: always(), success(), steps.<id>.outcome == '<value>' and
+    &&. An unsupported condition fails the test instead of guessing."""
+    terms = [term.strip() for term in condition.split("&&")]
+    result = True
+    has_status = False
+    for term in terms:
+        if term == "always()":
+            has_status = True
+        elif term == "success()":
+            has_status = True
+            result = result and not job_failed
+        else:
+            match = re.fullmatch(r"steps\.([\w-]+)\.outcome == '(\w+)'", term)
+            if not match:
+                raise AssertionError("unsupported workflow condition: " + condition)
+            result = result and (match.group(1) == guard_id and outcome == match.group(2))
+    # Without a status function, GitHub adds success().
+    return result and (has_status or not job_failed)
+
+
 class CapturePublicationTests(unittest.TestCase):
     """What a capture report must show before its helper can be published,
     with the scenario results of the actual checker on a fake engine."""
@@ -864,12 +886,28 @@ class CapturePublicationTests(unittest.TestCase):
 
     def test_raw_captures_are_refused_before_any_artifact_upload(self):
         job = section((WORKFLOWS / "test.yml").read_text(), "  capture-extension:", "  promote-extension:")
-        guard = job.index("publish.py check-artifacts --directory \"$RUNNER_TEMP/capture\"")
-        self.assertIn("if: always()", job[job.rindex("      - ", 0, guard):guard])
-        self.assertLess(guard, job.index("actions/upload-artifact"))
         published = section((WORKFLOWS / "published-extension.yml").read_text(), "  published-capture-extension:")
-        guard = published.index("publish.py check-artifacts")
-        self.assertLess(guard, published.index("actions/upload-artifact"))
+        for name, steps, directory in ((("test.yml", job.split("      - "), "$RUNNER_TEMP/capture/")),
+                                       ("published-extension.yml", published.split("      - "),
+                                        "$RUNNER_TEMP/published-extension/")):
+            with self.subTest(workflow=name):
+                guard = next(index for index, step in enumerate(steps) if "publish.py check-artifacts" in step)
+                self.assertIn("if: always()\n", steps[guard])
+                guard_id = re.search(r"^\s*id: (\S+)$", steps[guard], re.M).group(1)
+                uploads = [step for step in steps if "actions/upload-artifact" in step
+                           and directory.replace("$RUNNER_TEMP", "${{ runner.temp }}") in step]
+                self.assertTrue(uploads)
+                for upload in uploads:
+                    self.assertGreater(steps.index(upload), guard)
+                    condition = re.search(r"^\s*if: (.+)$", upload, re.M).group(1)
+                    # Safe reports still upload after an earlier checker
+                    # failure; a failed or skipped guard makes the upload
+                    # ineligible.
+                    self.assertTrue(step_eligible(condition, guard_id, "success", job_failed=True))
+                    for outcome in ("failure", "skipped", "cancelled"):
+                        self.assertFalse(step_eligible(condition, guard_id, outcome, job_failed=True), outcome)
+        # The previous condition alone uploads after a failed guard.
+        self.assertTrue(step_eligible("always()", "raw-captures", "failure", job_failed=True))
 
     def test_promotion_takes_only_both_capture_candidates_and_checks_the_published_digests(self):
         workflow = (WORKFLOWS / "test.yml").read_text()

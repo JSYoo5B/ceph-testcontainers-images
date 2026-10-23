@@ -125,10 +125,12 @@ jobs:
           python3 image/extension_check.py --extension capture --image "$reference" --platform "$platform" \
             --functional "${targets[@]}" --output-dir "$RUNNER_TEMP/published-extension"
       - name: Keep raw captures out of the artifacts
+        id: raw-captures
         if: always()
         run: python3 image/publish.py check-artifacts --directory "$RUNNER_TEMP/published-extension"
+      # Uploaded only after the guard found no raw capture in the directory.
       - uses: actions/upload-artifact@v4
-        if: always()
+        if: always() && steps.raw-captures.outcome == 'success'
         with:
           name: published-capture-extension-${{ matrix.architecture }}-check
           retention-days: 30
