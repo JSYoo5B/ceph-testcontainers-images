@@ -1996,7 +1996,9 @@ print(json.dumps({"stderr": read(".stderr") or "", "pid": number(read(".pid")),
                   "status": number(read(".status")), "size": size}))
 """
 
-CAPTURE_SIGNAL = "import os, signal, sys; os.kill(int(sys.argv[1]), signal.SIGTERM)"
+CAPTURE_SIGNAL = "import os, signal, sys; os.kill(int(sys.argv[1]), getattr(signal, sys.argv[2]))"
+# The wrapper's status of a tcpdump ended by SIGKILL: 128 + 9.
+CAPTURE_KILLED = 137
 CAPTURE_UID = "import json, os; print(json.dumps([os.getuid(), os.geteuid()]))"
 
 READY_LINE = re.compile(r"tcpdump: listening on (\S+), link-type (\S+) .*, snapshot length (\d+) bytes")
@@ -2162,6 +2164,48 @@ def capture_problems(kind, state, data, peer, target, snaplen, packets):
     return summary, problems
 
 
+def cut_tail(problems):
+    """Split a cut final record off the problems of parse_pcap(): an abrupt
+    end may leave one, which is partial output, not a malformed file."""
+    cut = [problem for problem in problems if problem.startswith(("a record header is cut", "a record is cut"))]
+    return [problem for problem in problems if problem not in cut], bool(cut)
+
+
+def partial_problems(kind, state, data, peer, target, snaplen, packets, loss=None):
+    """Summary and problems of a capture that did not end through SIGTERM:
+    "abrupt" (tcpdump killed with SIGKILL) or "target_loss" (the target
+    container killed while tcpdump ran). Its evidence is partial: a valid
+    header, complete records of the selected flow only, at most one cut final
+    record, and statistics that stay unknown when tcpdump printed none."""
+    problems = []
+    statistics = capture_statistics(state["stderr"])
+    records, pcap_problems = parse_pcap(data, snaplen)
+    pcap_problems, cut = cut_tail(pcap_problems)
+    problems += pcap_problems
+    limit = PCAP_HEADER + packets * (PCAP_RECORD + snaplen)
+    if len(data) > limit:
+        problems.append("%d bytes, over the bound of %d" % (len(data), limit))
+    summary, flow_problems = capture_flow(records, peer, target, snaplen)
+    problems += flow_problems
+    summary.update(bytes=len(data), sha256=hashlib.sha256(data).hexdigest(), statistics=statistics,
+                   byte_bound=limit, cut_tail=cut, complete="partial")
+    if not records:
+        problems.append("no complete record of the traffic before the %s" % ("kill" if kind == "abrupt" else "loss"))
+    if kind == "abrupt":
+        if state["status"] != CAPTURE_KILLED:
+            problems.append("tcpdump ended with %s, not %d after SIGKILL" % (state["status"], CAPTURE_KILLED))
+        printed = [key for key, value in statistics.items() if value is not None]
+        if printed:
+            problems.append("a killed tcpdump printed statistics: " + ", ".join(printed))
+    else:
+        summary["loss"] = loss
+        if loss["interfaces"]:
+            problems.append("the target's interface is still in the namespace after its container was killed")
+        if loss["end"] == "exited" and state["status"] == 0:
+            problems.append("tcpdump ended with status 0 after it lost its interface")
+    return summary, problems
+
+
 def budget(deadline, what):
     """The seconds left before deadline; none left fails the wait."""
     left = deadline - time.monotonic()
@@ -2207,7 +2251,8 @@ def finish_capture(capturer, base, stop):
     late = "tcpdump did not exit within %ds%s" % (CAPTURE_STOP_TIMEOUT, " of SIGTERM" if stop else "")
     state = capture_state(capturer, base, deadline, late)
     if stop:
-        docker("exec", capturer, "python3", "-c", CAPTURE_SIGNAL, str(state["pid"]), timeout=budget(deadline, late))
+        docker("exec", capturer, "python3", "-c", CAPTURE_SIGNAL, str(state["pid"]), "SIGTERM",
+               timeout=budget(deadline, late))
     while True:
         if time.monotonic() > deadline:
             raise CheckError(late, "capture_failure")
@@ -2215,6 +2260,18 @@ def finish_capture(capturer, base, stop):
             return state
         time.sleep(min(0.2, max(deadline - time.monotonic(), 0)))
         state = capture_state(capturer, base, deadline, late)
+
+
+def wait_status(capturer, base, timeout):
+    """The capture's state once tcpdump has an exit status, or its last
+    state, still running, when timeout has passed."""
+    deadline = time.monotonic() + timeout
+    late = "the capture's state was not read within %ds" % timeout
+    while True:
+        state = capture_state(capturer, base, deadline, late)
+        if state["status"] is not None or time.monotonic() > deadline:
+            return state
+        time.sleep(min(0.2, max(deadline - time.monotonic(), 0)))
 
 
 def retrieve(capturer, base, directory):
@@ -2235,20 +2292,46 @@ def exchange(peer, target_address, ports, output):
     return json.loads(text.strip().splitlines()[-1])
 
 
-def run_capture(names, kind, interface, peer, target, ports, packets, directory, output):
+CAPTURE_STOPS = {"traffic": "SIGTERM", "empty": "SIGTERM", "bound": "packet bound", "abrupt": "SIGKILL",
+                 "target_loss": "target container killed"}
+
+
+def run_capture(names, kind, interface, peer, target, ports, packets, directory, output, mac=None):
     """One capture in the target's namespace, from readiness to the decoded file."""
     base = "/tmp/capture-" + kind
     expression = "tcp port %d and host %s" % (CAPTURE_PORT, peer)
     result = {"interface": interface, "filter": expression, "snaplen": CAPTURE_SNAPLEN, "packets": packets,
-              "stop": "packet bound" if kind == "bound" else "SIGTERM"}
-    ready = start_capture(names["capturer"], base, interface, expression, packets)
+              "stop": CAPTURE_STOPS[kind]}
+    capturer = names["capturer"]
+    ready = start_capture(capturer, base, interface, expression, packets)
     result["ready"] = [line for line in ready["stderr"].splitlines() if READY_LINE.fullmatch(line.strip())]
     result["exchanges"] = exchange(names["peer"], target, ports, output)
     time.sleep(0.5)
-    state = finish_capture(names["capturer"], base, stop=kind != "bound")
+    loss = None
+    if kind == "abrupt":
+        docker("exec", capturer, "python3", "-c", CAPTURE_SIGNAL, str(ready["pid"]), "SIGKILL",
+               timeout=CAPTURE_STOP_TIMEOUT)
+        state = finish_capture(capturer, base, stop=False)
+    elif kind == "target_loss":
+        # The target's own process ends, which takes its endpoint out of the
+        # namespace that the helper joined; tcpdump keeps its file open.
+        docker("kill", names["target"], timeout=CAPTURE_STOP_TIMEOUT)
+        state = wait_status(capturer, base, CAPTURE_STOP_TIMEOUT)
+        loss = {"end": "exited" if state["status"] is not None else "kept running"}
+        loss["interfaces"] = json.loads(docker("exec", capturer, "python3", "-c", CAPTURE_INTERFACE, mac,
+                                               timeout=CAPTURE_STOP_TIMEOUT)[1])
+        if state["status"] is None:
+            # A tcpdump that kept running is stopped as usual; its file then
+            # still ends at the loss.
+            state = finish_capture(capturer, base, stop=True)
+    else:
+        state = finish_capture(capturer, base, stop=kind != "bound")
     result.update(exit_code=state["status"], stderr=[line.strip() for line in state["stderr"].splitlines()])
-    data = retrieve(names["capturer"], base, directory)
-    summary, problems = capture_problems(kind, state, data, peer, target, CAPTURE_SNAPLEN, packets)
+    data = retrieve(capturer, base, directory)
+    if kind in ("abrupt", "target_loss"):
+        summary, problems = partial_problems(kind, state, data, peer, target, CAPTURE_SNAPLEN, packets, loss)
+    else:
+        summary, problems = capture_problems(kind, state, data, peer, target, CAPTURE_SNAPLEN, packets)
     result.update(summary=summary, problems=problems, status="failed" if problems else "passed")
     return result
 
@@ -2342,7 +2425,8 @@ def capture_scenario(helper, target, run, output):
         result["captures"] = {}
         for kind, ports, packets in (("traffic", (CAPTURE_PORT, CAPTURE_EXCLUDED_PORT), CAPTURE_PACKETS),
                                      ("empty", (CAPTURE_EXCLUDED_PORT,), CAPTURE_PACKETS),
-                                     ("bound", (CAPTURE_PORT,), CAPTURE_BOUND)):
+                                     ("bound", (CAPTURE_PORT,), CAPTURE_BOUND),
+                                     ("abrupt", (CAPTURE_PORT,), CAPTURE_PACKETS)):
             result["stage"] = "capture:" + kind
             result["captures"][kind] = run_capture(names, kind, interface, peer_address, target_address, ports,
                                                    packets, directory, output)
@@ -2354,6 +2438,15 @@ def capture_scenario(helper, target, run, output):
         failed = [name for name, control in result["refusals"].items() if control["status"] != "passed"]
         if failed:
             raise CheckError("Negative controls did not fail as expected: " + ", ".join(failed), "capture_failure")
+        # Last, because it ends the target: the capture loses its interface
+        # while tcpdump runs.
+        result["stage"] = "capture:target_loss"
+        result["captures"]["target_loss"] = run_capture(names, "target_loss", interface, peer_address, target_address,
+                                                        (CAPTURE_PORT,), CAPTURE_PACKETS, directory, output,
+                                                        endpoint["MacAddress"])
+        if result["captures"]["target_loss"]["status"] != "passed":
+            raise CheckError("The target_loss capture failed: "
+                             + "; ".join(result["captures"]["target_loss"]["problems"]), "capture_failure")
         del result["stage"]
         result["status"] = "passed"
     except (check.CheckError, KeyError, ValueError, TypeError) as error:
