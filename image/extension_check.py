@@ -1912,12 +1912,21 @@ def capture_token(port):
 
 # Answers each request line on every port given with argv[1] bytes of the
 # port's own token; runs in the target's namespace without any capability.
+# It listens over IPv4 and, where the namespace has IPv6, over IPv6 alone on
+# a second socket, so that the IPv4 side is the same on every network.
 CAPTURE_SERVER = """import socket, sys, threading
 size = int(sys.argv[1])
-def serve(port):
-    s = socket.socket()
+def serve(port, family):
+    s = socket.socket(family)
     s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    s.bind(("0.0.0.0", port))
+    if family == socket.AF_INET:
+        s.bind(("0.0.0.0", port))
+    else:
+        s.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 1)
+        try:
+            s.bind(("::", port))
+        except OSError:
+            return
     s.listen(16)
     token = b"capture-response-%d-" % port
     body = (token * (size // len(token) + 1))[:size]
@@ -1937,16 +1946,20 @@ def serve(port):
         finally:
             c.close()
 for port in sys.argv[2:]:
-    threading.Thread(target=serve, args=(int(port),)).start()
+    for family in (socket.AF_INET, socket.AF_INET6):
+        threading.Thread(target=serve, args=(int(port), family)).start()
 """
 
-# One request and its whole answer per port given, from the peer.
+# One request and its whole answer per port given, from the peer; from the
+# source port argv[3] when it is not 0, so that a connection can be told
+# apart in the capture.
 CAPTURE_EXCHANGE = """import json, socket, sys
-host, size = sys.argv[1], int(sys.argv[2])
+host, size, source = sys.argv[1], int(sys.argv[2]), int(sys.argv[3])
 results = []
-for port in map(int, sys.argv[3:]):
+for port in map(int, sys.argv[4:]):
     token = b"capture-response-%d-" % port
-    with socket.create_connection((host, port), timeout=10) as c:
+    with socket.create_connection((host, port), timeout=10, source_address=("", source) if source else None) as c:
+        local = c.getsockname()[1]
         c.sendall(b"capture-request-%d\\n" % port)
         data = b""
         while True:
@@ -1956,7 +1969,7 @@ for port in map(int, sys.argv[3:]):
             data += chunk
     if data != (token * (size // len(token) + 1))[:size]:
         raise SystemExit("port %d answered %d unexpected bytes" % (port, len(data)))
-    results.append({"port": port, "received": len(data)})
+    results.append({"address": host, "port": port, "source_port": local, "received": len(data)})
 print(json.dumps(results))
 """
 
@@ -2081,15 +2094,25 @@ def parse_pcap(data, snaplen):
 
 def tcp_segment(frame):
     """(source, destination, source port, destination port, flags, payload) of
-    an Ethernet/IPv4/TCP frame, or None."""
-    if len(frame) < 14 + 20 or frame[12:14] != b"\x08\x00" or frame[14] >> 4 != 4:
+    an Ethernet/IPv4/TCP frame or of an Ethernet/IPv6/TCP frame whose TCP
+    header follows the IPv6 base header directly, or None. Addresses are in
+    their compressed text form."""
+    if len(frame) >= 14 + 20 and frame[12:14] == b"\x08\x00" and frame[14] >> 4 == 4:
+        header = (frame[14] & 0x0f) * 4
+        if frame[14 + 9] != 6 or len(frame) < 14 + header + 20:
+            return None
+        tcp = 14 + header
+        source, destination = (str(ipaddress.IPv4Address(frame[14 + 12:14 + 16])),
+                               str(ipaddress.IPv4Address(frame[14 + 16:14 + 20])))
+    elif len(frame) >= 14 + 40 and frame[12:14] == b"\x86\xdd" and frame[14] >> 4 == 6:
+        # Next header 6: no extension header between IPv6 and TCP.
+        if frame[14 + 6] != 6 or len(frame) < 14 + 40 + 20:
+            return None
+        tcp = 14 + 40
+        source, destination = (str(ipaddress.IPv6Address(frame[14 + 8:14 + 24])),
+                               str(ipaddress.IPv6Address(frame[14 + 24:14 + 40])))
+    else:
         return None
-    header = (frame[14] & 0x0f) * 4
-    if frame[14 + 9] != 6 or len(frame) < 14 + header + 20:
-        return None
-    tcp = 14 + header
-    source, destination = (str(ipaddress.IPv4Address(frame[14 + 12:14 + 16])),
-                           str(ipaddress.IPv4Address(frame[14 + 16:14 + 20])))
     sport, dport = struct.unpack_from(">HH", frame, tcp)
     flags = frame[tcp + 13]
     payload = frame[tcp + (frame[tcp + 12] >> 4) * 4:]
@@ -2102,10 +2125,12 @@ def capture_flow(records, peer, target, snaplen):
     summary = {"records": len(records), "to_target": 0, "from_target": 0, "truncated": 0}
     problems = []
     seen = set()
+    # The same text form as tcp_segment(), whatever form the engine reported.
+    peer, target = str(ipaddress.ip_address(peer)), str(ipaddress.ip_address(target))
     for index, (frame, original) in enumerate(records):
         segment = tcp_segment(frame)
         if segment is None:
-            problems.append("record %d is not IPv4 TCP" % index)
+            problems.append("record %d is not TCP over IPv4 or IPv6" % index)
             continue
         source, destination, sport, dport, flags, payload = segment
         if (source, destination, dport) == (peer, target, CAPTURE_PORT):
@@ -2131,7 +2156,8 @@ def capture_flow(records, peer, target, snaplen):
 
 def capture_problems(kind, state, data, peer, target, snaplen, packets):
     """Summary and problems of one finished capture: kind is "traffic" (the
-    selected flow both ways and nothing else), "empty" (a valid file without
+    selected flow both ways and nothing else), "ipv6" (the same for an IPv6
+    peer and target, without any IPv4 record), "empty" (a valid file without
     records) or "bound" (exactly `packets` records of the selected flow)."""
     problems = []
     if state["status"] != 0:
@@ -2151,7 +2177,11 @@ def capture_problems(kind, state, data, peer, target, snaplen, packets):
                    byte_bound=limit)
     if statistics["captured"] is not None and statistics["captured"] != len(records):
         problems.append("%d packets captured, %d records" % (statistics["captured"], len(records)))
-    if kind == "traffic":
+    if kind == "ipv6":
+        summary["ipv4_records"] = sum(1 for frame, _ in records if frame[12:14] == b"\x08\x00")
+        if summary["ipv4_records"]:
+            problems.append("%d IPv4 records in an IPv6 capture" % summary["ipv4_records"])
+    if kind in ("traffic", "ipv6"):
         absent = {"syn", "syn_ack", "request", "response"} - set(summary["seen"])
         if absent:
             problems.append("the selected flow lacks " + ", ".join(sorted(absent)))
@@ -2173,12 +2203,40 @@ def cut_tail(problems):
     return [problem for problem in problems if problem not in cut], bool(cut)
 
 
+def restart_records(records, peer, targets, before, after):
+    """Problems of records between the peer and any of the target's addresses
+    on the selected port that are not of the peer's connection from port
+    `before`, the one before the target restarted; a record of the connection
+    from port `after` is from after the restart."""
+    problems = []
+    peer = str(ipaddress.ip_address(peer))
+    targets = {str(ipaddress.ip_address(target)) for target in targets}
+    for index, (frame, _) in enumerate(records):
+        segment = tcp_segment(frame)
+        if segment is None:
+            continue
+        source, destination, sport, dport = segment[:4]
+        if source == peer and destination in targets and dport == CAPTURE_PORT:
+            port = sport
+        elif source in targets and destination == peer and sport == CAPTURE_PORT:
+            port = dport
+        else:
+            continue
+        if port == after:
+            problems.append("record %d is from after the restart: peer port %d" % (index, port))
+        elif port != before:
+            problems.append("record %d is of another connection: peer port %d" % (index, port))
+    return problems
+
+
 def partial_problems(kind, state, data, peer, target, snaplen, packets, loss=None):
     """Summary and problems of a capture that did not end through SIGTERM:
-    "abrupt" (tcpdump killed with SIGKILL) or "target_loss" (the target
-    container killed while tcpdump ran). Its evidence is partial: a valid
-    header, complete records of the selected flow only, at most one cut final
-    record, and statistics that stay unknown when tcpdump printed none."""
+    "abrupt" (tcpdump killed with SIGKILL), "target_loss" (the target
+    container killed while tcpdump ran) or "restart" (the target container
+    restarted while tcpdump ran). Its evidence is partial: a valid header,
+    complete records of the selected flow only, at most one cut final record,
+    and statistics that stay unknown when tcpdump printed none. A restart's
+    file holds only the connection from before the restart."""
     problems = []
     statistics = capture_statistics(state["stderr"])
     records, pcap_problems = parse_pcap(data, snaplen)
@@ -2192,7 +2250,8 @@ def partial_problems(kind, state, data, peer, target, snaplen, packets, loss=Non
     summary.update(bytes=len(data), sha256=hashlib.sha256(data).hexdigest(), statistics=statistics,
                    byte_bound=limit, cut_tail=cut, complete="partial")
     if not records:
-        problems.append("no complete record of the traffic before the %s" % ("kill" if kind == "abrupt" else "loss"))
+        problems.append("no complete record of the traffic before the %s" % {
+            "abrupt": "kill", "target_loss": "loss", "restart": "restart"}[kind])
     if kind == "abrupt":
         if state["status"] != CAPTURE_KILLED:
             problems.append("tcpdump ended with %s, not %d after SIGKILL" % (state["status"], CAPTURE_KILLED))
@@ -2200,11 +2259,17 @@ def partial_problems(kind, state, data, peer, target, snaplen, packets, loss=Non
         if printed:
             problems.append("a killed tcpdump printed statistics: " + ", ".join(printed))
     else:
-        summary["loss"] = loss
+        summary["loss" if kind == "target_loss" else "restart"] = loss
         if loss["interfaces"]:
-            problems.append("the target's interface is still in the namespace after its container was killed")
+            problems.append("the target's interface is still in the namespace after its container was %s"
+                            % ("killed" if kind == "target_loss" else "restarted"))
         if loss["end"] == "exited" and state["status"] == 0:
             problems.append("tcpdump ended with status 0 after it lost its interface")
+    if kind == "restart":
+        if loss["followed"]:
+            problems.append("the helper is in the namespace of the restarted target")
+        problems += restart_records(records, peer, (target, loss["new_address"]), loss["before_port"],
+                                    loss["after_port"])
     return summary, problems
 
 
@@ -2291,33 +2356,47 @@ def retrieve(capturer, base, directory):
     return local.read_bytes()
 
 
-def exchange(peer, target_address, ports, output):
+def exchange(peer, target_address, ports, output, source=0):
+    """The peer's exchanges with target_address on each port, from the
+    source port given or, with 0, from any."""
     code, text = docker("exec", peer, "python3", "-c", CAPTURE_EXCHANGE, target_address, str(CAPTURE_RESPONSE),
-                        *map(str, ports), check_exit=False)
+                        str(source), *map(str, ports), check_exit=False)
     with (output / "exchanges.log").open("a") as log:
-        log.write("%s: %s" % (",".join(map(str, ports)), text))
+        log.write("%s %s: %s" % (target_address, ",".join(map(str, ports)), text))
     if code:
         raise CheckError("The peer's exchange failed: " + text.strip()[:500], "checker_failure")
     return json.loads(text.strip().splitlines()[-1])
 
 
 CAPTURE_STOPS = {"traffic": "SIGTERM", "empty": "SIGTERM", "bound": "packet bound", "abrupt": "SIGKILL",
-                 "target_loss": "target container killed"}
+                 "target_loss": "target container killed", "ipv6": "SIGTERM",
+                 "restart": "target container restarted"}
+# The peer's source ports in the restart capture: its connection before the
+# restart and its connection after it.
+CAPTURE_RESTART_PORTS = (24000, 24001)
 # The negative controls of refused_capture(), each with the kind it must fail with.
 CAPTURE_REFUSALS = {"invalid_filter": "invalid_filter", "unavailable_interface": "unavailable_interface",
                     "without_net_raw": "permission_denied"}
 
 
-def run_capture(names, kind, interface, peer, target, ports, packets, directory, output, mac=None):
-    """One capture in the target's namespace, from readiness to the decoded file."""
-    base = "/tmp/capture-" + kind
+def capture_filter(peer):
+    """The selected port with the peer; with an IPv6 peer, IPv6 alone."""
     expression = "tcp port %d and host %s" % (CAPTURE_PORT, peer)
+    return "ip6 and " + expression if ":" in peer else expression
+
+
+def run_capture(names, kind, interface, peer, target, exchanges, packets, directory, output, mac=None):
+    """One capture in the target's namespace, from readiness to the decoded
+    file; exchanges lists the (address, ports) that the peer uses in turn."""
+    base = "/tmp/capture-" + kind
+    expression = capture_filter(peer)
     result = {"interface": interface, "filter": expression, "snaplen": CAPTURE_SNAPLEN, "packets": packets,
               "stop": CAPTURE_STOPS[kind]}
     capturer = names["capturer"]
     ready = start_capture(capturer, base, interface, expression, packets)
     result["ready"] = [line for line in ready["stderr"].splitlines() if READY_LINE.fullmatch(line.strip())]
-    result["exchanges"] = exchange(names["peer"], target, ports, output)
+    result["exchanges"] = [item for address, ports in exchanges
+                           for item in exchange(names["peer"], address, ports, output)]
     time.sleep(0.5)
     loss = None
     if kind == "abrupt":
@@ -2344,6 +2423,61 @@ def run_capture(names, kind, interface, peer, target, ports, packets, directory,
         summary, problems = partial_problems(kind, state, data, peer, target, CAPTURE_SNAPLEN, packets, loss)
     else:
         summary, problems = capture_problems(kind, state, data, peer, target, CAPTURE_SNAPLEN, packets)
+    result.update(summary=summary, problems=problems, status="failed" if problems else "passed")
+    return result
+
+
+def restart_capture(names, network, interface, peer, target, mac, directory, output, helper, label):
+    """The restart capture: the peer's connection from the first restart
+    port, then `docker restart` of the target while tcpdump runs, then a
+    server in the restarted target's new namespace and the peer's connection
+    from the second port. The helper stays in the namespace it joined and
+    never follows the new generation; its file must hold only the connection
+    from before the restart. Whether tcpdump exits or keeps running is
+    recorded; one that keeps running is stopped with SIGTERM."""
+    base = "/tmp/capture-restart"
+    before, after = CAPTURE_RESTART_PORTS
+    expression = capture_filter(peer)
+    capturer = names["capturer"]
+    result = {"interface": interface, "filter": expression, "snaplen": CAPTURE_SNAPLEN, "packets": CAPTURE_PACKETS,
+              "stop": CAPTURE_STOPS["restart"]}
+    old = json.loads(docker("container", "inspect", names["target"])[1])[0]
+    ready = start_capture(capturer, base, interface, expression, CAPTURE_PACKETS)
+    result["ready"] = [line for line in ready["stderr"].splitlines() if READY_LINE.fullmatch(line.strip())]
+    result["exchanges"] = exchange(names["peer"], target, (CAPTURE_PORT,), output, source=before)
+    time.sleep(0.5)
+    # sleep, the target's process, ignores SIGTERM; -t 0 restarts at once.
+    docker("restart", "-t", "0", names["target"], timeout=60)
+    new = json.loads(docker("container", "inspect", names["target"])[1])[0]
+    if not new["State"]["Running"] or new["NetworkSettings"]["SandboxID"] == old["NetworkSettings"]["SandboxID"]:
+        raise CheckError("The restarted target did not run in a new network sandbox")
+    endpoint = new["NetworkSettings"]["Networks"][network]
+    restart = {"before_port": before, "after_port": after, "new_address": endpoint["IPAddress"]}
+    # tcpdump's state once the new generation runs, before its traffic.
+    restart["status_after_restart"] = capture_state(capturer, base, time.monotonic() + CAPTURE_STOP_TIMEOUT,
+                                                    "the capture's state was not read after the restart")["status"]
+    start_server(names["renewed"], names["target"], helper, label)
+    code, text = docker("exec", names["peer"], "python3", "-c", READY, restart["new_address"], str(CAPTURE_PORT),
+                        check_exit=False)
+    if code:
+        raise CheckError("The server in the restarted target's namespace did not answer: " + text.strip())
+    namespaces = {role: docker("exec", names[role], "python3", "-c", NAMESPACE)[1].strip()
+                  for role in ("capturer", "renewed")}
+    restart["followed"] = namespaces["capturer"] == namespaces["renewed"]
+    result["exchanges"] += exchange(names["peer"], restart["new_address"], (CAPTURE_PORT,), output, source=after)
+    time.sleep(0.5)
+    state = wait_status(capturer, base, CAPTURE_STOP_TIMEOUT)
+    restart["end"] = "exited" if state["status"] is not None else "kept running"
+    # Neither the old interface nor the new generation's is in the helper's namespace.
+    restart["interfaces"] = [found for address in sorted({mac.lower(), endpoint["MacAddress"].lower()})
+                             for found in json.loads(docker("exec", capturer, "python3", "-c", CAPTURE_INTERFACE,
+                                                            address, timeout=CAPTURE_STOP_TIMEOUT)[1])]
+    if state["status"] is None:
+        state = finish_capture(capturer, base, stop=True)
+    result.update(exit_code=state["status"], stderr=[line.strip() for line in state["stderr"].splitlines()])
+    data = retrieve(capturer, base, directory)
+    summary, problems = partial_problems("restart", state, data, peer, target, CAPTURE_SNAPLEN, CAPTURE_PACKETS,
+                                         restart)
     result.update(summary=summary, problems=problems, status="failed" if problems else "passed")
     return result
 
@@ -2382,66 +2516,95 @@ def refused_capture(names, label, interface, helper):
     return controls
 
 
+def start_server(name, target, helper, label):
+    """The server in the target's namespace, without any capability."""
+    docker("run", "--detach", "--label", label, "--pull=never", "--platform", helper["platform"], "--name", name,
+           "--network", "container:" + target, "--cap-drop=ALL", "--entrypoint=python3", helper["image_id"], "-c",
+           CAPTURE_SERVER, str(CAPTURE_RESPONSE), str(CAPTURE_PORT), str(CAPTURE_EXCLUDED_PORT))
+
+
+def capture_setup(names, network, helper, target, label, record, dual_stack=False):
+    """Create the private bridge (dual-stack when asked) with a target, a
+    server and the capturing helper in its namespace and a peer, check the
+    helper's user, the namespaces and the target's interface, and wait for
+    the server on every family. The facts go into record; the target's and
+    the peer's addresses by family are returned with the interface's name and
+    the target's MAC address."""
+    common = ["--detach", "--label", label, "--pull=never", "--platform", helper["platform"]]
+    docker("network", "create", "--internal", *(["--ipv6"] if dual_stack else []), "--label", label, network)
+    docker("run", "--detach", "--label", label, "--pull=never", "--platform", target["platform"],
+           "--name", names["target"], "--network", network, "--entrypoint=sleep", target["image_id"], "infinity")
+    endpoint = json.loads(docker("container", "inspect", names["target"])[1])[0]["NetworkSettings"]["Networks"][network]
+    start_server(names["server"], names["target"], helper, label)
+    docker("run", *common, "--name", names["peer"], "--network", network, "--cap-drop=ALL",
+           "--entrypoint=sleep", helper["image_id"], "infinity")
+    # The image's own user, with NET_RAW alone and nothing else.
+    docker("run", *common, "--name", names["capturer"], "--network", "container:" + names["target"], "--cap-drop=ALL",
+           "--cap-add=NET_RAW", "--entrypoint=sleep", helper["image_id"], "infinity")
+    uid, euid = json.loads(docker("exec", names["capturer"], "python3", "-c", CAPTURE_UID)[1])
+    record["capturer"] = {"uid": uid, "euid": euid, "caps": ["NET_RAW"]}
+    if 0 in (uid, euid):
+        raise CheckError("The capturing helper runs as root", "image_unsupported")
+    namespaces = {role: docker("exec", names[role], "python3", "-c", NAMESPACE)[1].strip()
+                  for role in ("server", "capturer", "peer")}
+    if namespaces["server"] != namespaces["capturer"] or namespaces["peer"] == namespaces["capturer"]:
+        raise CheckError("The helpers are not in the expected namespaces: " + json.dumps(namespaces))
+    found = json.loads(docker("exec", names["capturer"], "python3", "-c", CAPTURE_INTERFACE,
+                              endpoint["MacAddress"])[1])
+    if len(found) != 1:
+        raise CheckError("Expected one interface with %s, found %s" % (endpoint["MacAddress"], json.dumps(found)))
+    peer = json.loads(docker("container", "inspect", names["peer"])[1])[0]["NetworkSettings"]["Networks"][network]
+    addresses = {"target": {4: endpoint["IPAddress"]}, "peer": {4: peer["IPAddress"]}}
+    record.update(interface=dict(found[0], address=endpoint["IPAddress"]), peer_address=peer["IPAddress"])
+    if dual_stack:
+        addresses["target"][6], addresses["peer"][6] = endpoint["GlobalIPv6Address"], peer["GlobalIPv6Address"]
+        if not addresses["target"][6] or not addresses["peer"][6]:
+            raise CheckError("The dual-stack network gave the target or the peer no IPv6 address")
+        record["addresses"] = {role: {"ipv%d" % family: address for family, address in by_family.items()}
+                               for role, by_family in addresses.items()}
+    for family in sorted(addresses["target"]):
+        for port in (CAPTURE_PORT, CAPTURE_EXCLUDED_PORT):
+            code, text = docker("exec", names["peer"], "python3", "-c", READY, addresses["target"][family], str(port),
+                                check_exit=False)
+            if code:
+                raise CheckError("The server in the target's namespace did not answer: " + text.strip())
+    return dict(addresses, interface=found[0]["name"], mac=endpoint["MacAddress"])
+
+
+def compile_filter(capturer, peer):
+    code, text = docker("exec", capturer, "tcpdump", "-y", "EN10MB", "-d", capture_filter(peer), check_exit=False)
+    if code:
+        raise CheckError("The filter did not compile: " + text.strip()[:500], classify_capture(code, text))
+
+
 def capture_scenario(helper, target, run, output):
     """Capture between a peer and a container of the target image on a
     private bridge, from a helper in the target's namespace; then the
-    negative controls; then remove every owned container and the network."""
+    negative controls and the target's loss. Then, on a dual-stack bridge
+    with a second target, an IPv6 capture and the target's restart. Finally
+    remove every owned container and both networks."""
     label = LABEL + "=" + run
     network = "ceph-extension-check-" + run
     names = {role: network + "-" + role for role in ("target", "server", "capturer", "peer", "unprivileged")}
+    # The dual-stack bridge's own containers; renewed serves in the restarted target.
+    dual_network = network + "-dual"
+    dual = {role: network + "-" + role + "6" for role in ("target", "server", "capturer", "peer", "renewed")}
     result = {"reference": target["reference"], "image_id": target["image_id"], "helper_image_id": helper["image_id"],
               "platform": helper["platform"], "status": "running", "stage": "setup"}
     output.mkdir()
     directory = tempfile.mkdtemp(prefix="capture-")
-    common = ["--detach", "--label", label, "--pull=never", "--platform", helper["platform"]]
     try:
-        docker("network", "create", "--internal", "--label", label, network)
-        docker("run", "--detach", "--label", label, "--pull=never", "--platform", target["platform"],
-               "--name", names["target"], "--network", network, "--entrypoint=sleep", target["image_id"], "infinity")
-        endpoint = json.loads(docker("container", "inspect", names["target"])[1])[0]["NetworkSettings"]["Networks"][network]
-        shared = "container:" + names["target"]
-        docker("run", *common, "--name", names["server"], "--network", shared, "--cap-drop=ALL",
-               "--entrypoint=python3", helper["image_id"], "-c", CAPTURE_SERVER, str(CAPTURE_RESPONSE),
-               str(CAPTURE_PORT), str(CAPTURE_EXCLUDED_PORT))
-        docker("run", *common, "--name", names["peer"], "--network", network, "--cap-drop=ALL",
-               "--entrypoint=sleep", helper["image_id"], "infinity")
-        # The image's own user, with NET_RAW alone and nothing else.
-        docker("run", *common, "--name", names["capturer"], "--network", shared, "--cap-drop=ALL",
-               "--cap-add=NET_RAW", "--entrypoint=sleep", helper["image_id"], "infinity")
-        uid, euid = json.loads(docker("exec", names["capturer"], "python3", "-c", CAPTURE_UID)[1])
-        result["capturer"] = {"uid": uid, "euid": euid, "caps": ["NET_RAW"]}
-        if 0 in (uid, euid):
-            raise CheckError("The capturing helper runs as root", "image_unsupported")
-        namespaces = {role: docker("exec", names[role], "python3", "-c", NAMESPACE)[1].strip()
-                      for role in ("server", "capturer", "peer")}
-        if namespaces["server"] != namespaces["capturer"] or namespaces["peer"] == namespaces["capturer"]:
-            raise CheckError("The helpers are not in the expected namespaces: " + json.dumps(namespaces))
-        found = json.loads(docker("exec", names["capturer"], "python3", "-c", CAPTURE_INTERFACE,
-                                  endpoint["MacAddress"])[1])
-        if len(found) != 1:
-            raise CheckError("Expected one interface with %s, found %s" % (endpoint["MacAddress"], json.dumps(found)))
-        interface = found[0]["name"]
-        target_address = endpoint["IPAddress"]
-        peer_address = json.loads(docker("container", "inspect", names["peer"])[1])[0][
-            "NetworkSettings"]["Networks"][network]["IPAddress"]
-        result.update(interface=dict(found[0], address=target_address), peer_address=peer_address)
-        for port in (CAPTURE_PORT, CAPTURE_EXCLUDED_PORT):
-            code, text = docker("exec", names["peer"], "python3", "-c", READY, target_address, str(port),
-                                check_exit=False)
-            if code:
-                raise CheckError("The server in the target's namespace did not answer: " + text.strip())
-        expression = "tcp port %d and host %s" % (CAPTURE_PORT, peer_address)
-        code, text = docker("exec", names["capturer"], "tcpdump", "-y", "EN10MB", "-d", expression, check_exit=False)
-        if code:
-            raise CheckError("The filter did not compile: " + text.strip()[:500], classify_capture(code, text))
+        setup = capture_setup(names, network, helper, target, label, result)
+        interface, target_address, peer_address = setup["interface"], setup["target"][4], setup["peer"][4]
+        compile_filter(names["capturer"], peer_address)
         result["captures"] = {}
         for kind, ports, packets in (("traffic", (CAPTURE_PORT, CAPTURE_EXCLUDED_PORT), CAPTURE_PACKETS),
                                      ("empty", (CAPTURE_EXCLUDED_PORT,), CAPTURE_PACKETS),
                                      ("bound", (CAPTURE_PORT,), CAPTURE_BOUND),
                                      ("abrupt", (CAPTURE_PORT,), CAPTURE_PACKETS)):
             result["stage"] = "capture:" + kind
-            result["captures"][kind] = run_capture(names, kind, interface, peer_address, target_address, ports,
-                                                   packets, directory, output)
+            result["captures"][kind] = run_capture(names, kind, interface, peer_address, target_address,
+                                                   [(target_address, ports)], packets, directory, output)
             if result["captures"][kind]["status"] != "passed":
                 raise CheckError("The %s capture failed: %s" % (kind, "; ".join(result["captures"][kind]["problems"])),
                                  "capture_failure")
@@ -2450,15 +2613,40 @@ def capture_scenario(helper, target, run, output):
         failed = [name for name, control in result["refusals"].items() if control["status"] != "passed"]
         if failed:
             raise CheckError("Negative controls did not fail as expected: " + ", ".join(failed), "capture_failure")
-        # Last, because it ends the target: the capture loses its interface
-        # while tcpdump runs.
+        # Last on this bridge, because it ends the target: the capture loses
+        # its interface while tcpdump runs.
         result["stage"] = "capture:target_loss"
         result["captures"]["target_loss"] = run_capture(names, "target_loss", interface, peer_address, target_address,
-                                                        (CAPTURE_PORT,), CAPTURE_PACKETS, directory, output,
-                                                        endpoint["MacAddress"])
+                                                        [(target_address, (CAPTURE_PORT,))], CAPTURE_PACKETS,
+                                                        directory, output, setup["mac"])
         if result["captures"]["target_loss"]["status"] != "passed":
             raise CheckError("The target_loss capture failed: "
                              + "; ".join(result["captures"]["target_loss"]["problems"]), "capture_failure")
+        # A second target on a dual-stack bridge: the IPv6 flow is selected
+        # while the peer also uses the excluded port over IPv6 and the
+        # selected port over IPv4.
+        result["stage"] = "setup:dual_stack"
+        result["dual_stack"] = {}
+        dual_setup = capture_setup(dual, dual_network, helper, target, label, result["dual_stack"], dual_stack=True)
+        target4, target6 = dual_setup["target"][4], dual_setup["target"][6]
+        peer4, peer6 = dual_setup["peer"][4], dual_setup["peer"][6]
+        for peer in (peer6, peer4):
+            compile_filter(dual["capturer"], peer)
+        result["stage"] = "capture:ipv6"
+        result["captures"]["ipv6"] = run_capture(dual, "ipv6", dual_setup["interface"], peer6, target6,
+                                                 [(target6, (CAPTURE_PORT, CAPTURE_EXCLUDED_PORT)),
+                                                  (target4, (CAPTURE_PORT,))], CAPTURE_PACKETS, directory, output)
+        if result["captures"]["ipv6"]["status"] != "passed":
+            raise CheckError("The ipv6 capture failed: " + "; ".join(result["captures"]["ipv6"]["problems"]),
+                             "capture_failure")
+        # Last on the dual-stack bridge, because it moves the target into a
+        # new namespace.
+        result["stage"] = "capture:restart"
+        result["captures"]["restart"] = restart_capture(dual, dual_network, dual_setup["interface"], peer4, target4,
+                                                        dual_setup["mac"], directory, output, helper, label)
+        if result["captures"]["restart"]["status"] != "passed":
+            raise CheckError("The restart capture failed: " + "; ".join(result["captures"]["restart"]["problems"]),
+                             "capture_failure")
         del result["stage"]
         result["status"] = "passed"
     except (check.CheckError, KeyError, ValueError, TypeError) as error:

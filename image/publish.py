@@ -296,7 +296,8 @@ def validate_netem_report(report, architecture):
 def validate_capture_report(report, architecture):
     """The capture helper publishes only what its functional check showed on
     this platform: the quick refusal without NET_RAW, and in every release
-    target, with this helper, every capture and every negative control."""
+    target, with this helper, every capture of CAPTURE_STOPS (including the
+    IPv6 and the restart capture) and every negative control."""
     extension_check = extensions()
     image = report["image"]
     refusals = [entry for entry in image.get("checks", []) if entry.get("name") == "refused-without-net_raw"]

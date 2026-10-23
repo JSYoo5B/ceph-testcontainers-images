@@ -245,6 +245,15 @@ def tcp_frame(source, destination, sport, dport, flags, payload=b""):
     return b"\x00" * 12 + b"\x08\x00" + ip + tcp
 
 
+def tcp6_frame(source, destination, sport, dport, flags, payload=b"", next_header=6):
+    """An Ethernet/IPv6/TCP frame without options or extension headers."""
+    tcp = struct.pack(">HHIIBBHHH", sport, dport, 1, 1, 5 << 4, flags, 65535, 0, 0) + payload
+    ip = struct.pack(">IHBB16s16s", 6 << 28, len(tcp), next_header, 64,
+                     extension_check.ipaddress.IPv6Address(source).packed,
+                     extension_check.ipaddress.IPv6Address(destination).packed)
+    return b"\x00" * 12 + b"\x86\xdd" + ip + tcp
+
+
 def capture_file(*frames, snaplen=SNAPLEN):
     """A classic pcap that cuts every frame at the snaplen, as tcpdump does."""
     data = struct.pack("<IHHiIII", 0xa1b2c3d4, 2, 4, 0, 0, snaplen, 1)
@@ -256,14 +265,28 @@ def capture_file(*frames, snaplen=SNAPLEN):
 
 PORT, EXCLUDED = extension_check.CAPTURE_PORT, extension_check.CAPTURE_EXCLUDED_PORT
 RESPONSE = (extension_check.capture_token(PORT) * 60)[:extension_check.CAPTURE_RESPONSE]
-SYN = tcp_frame(PEER, TARGET, 40000, PORT, 0x02)
-SYN_ACK = tcp_frame(TARGET, PEER, PORT, 40000, 0x12)
-ACK = tcp_frame(PEER, TARGET, 40000, PORT, 0x10)
-REQUEST = tcp_frame(PEER, TARGET, 40000, PORT, 0x18, extension_check.capture_request(PORT))
-ANSWER = tcp_frame(TARGET, PEER, PORT, 40000, 0x18, RESPONSE)
-FLOW = (SYN, SYN_ACK, ACK, REQUEST, ANSWER, tcp_frame(PEER, TARGET, 40000, PORT, 0x11),
-        tcp_frame(TARGET, PEER, PORT, 40000, 0x11))
+
+
+def flow(peer, target, peer_port=40000, frame=tcp_frame):
+    """One whole connection from the peer's port to the target's selected port."""
+    return (frame(peer, target, peer_port, PORT, 0x02), frame(target, peer, PORT, peer_port, 0x12),
+            frame(peer, target, peer_port, PORT, 0x10),
+            frame(peer, target, peer_port, PORT, 0x18, extension_check.capture_request(PORT)),
+            frame(target, peer, PORT, peer_port, 0x18, RESPONSE), frame(peer, target, peer_port, PORT, 0x11),
+            frame(target, peer, PORT, peer_port, 0x11))
+
+
+FLOW = flow(PEER, TARGET)
+SYN, SYN_ACK, ACK, REQUEST, ANSWER = FLOW[:5]
 OTHER = tcp_frame(PEER, TARGET, 40001, EXCLUDED, 0x02)
+# The dual-stack bridge: its IPv6 flow, and the restart capture's connections
+# from before and after the restart, over IPv4.
+PEER6, TARGET6 = "fd00:c0de::3", "fd00:c0de::2"
+PEER4, TARGET4 = "172.31.0.3", "172.31.0.2"
+FLOW6 = flow(PEER6, TARGET6, frame=tcp6_frame)
+OTHER6 = tcp6_frame(PEER6, TARGET6, 40001, EXCLUDED, 0x02)
+BEFORE, AFTER = extension_check.CAPTURE_RESTART_PORTS
+RESTART_FLOW = flow(PEER4, TARGET4, BEFORE)
 
 
 def statistics(captured, received=None):
@@ -358,6 +381,37 @@ class CaptureEvidenceTests(unittest.TestCase):
             with self.subTest(text=text):
                 self.assertEqual(extension_check.classify_capture(code, text), kind)
 
+    def ipv6_problems(self, data, peer=PEER6, target=TARGET6):
+        records = len(extension_check.parse_pcap(data, SNAPLEN)[0])
+        return extension_check.capture_problems("ipv6", finished(records), data, peer, target, SNAPLEN,
+                                                extension_check.CAPTURE_PACKETS)
+
+    def test_the_ipv6_flow_passes_without_its_ipv4_counterpart(self):
+        summary, problems = self.ipv6_problems(capture_file(*FLOW6))
+        self.assertEqual(problems, [])
+        self.assertEqual((summary["records"], summary["to_target"], summary["from_target"], summary["truncated"],
+                          summary["ipv4_records"]), (7, 4, 3, 1, 0))
+        self.assertEqual(summary["seen"], ["request", "response", "syn", "syn_ack"])
+        # The engine may report an address in another text form.
+        self.assertEqual(self.ipv6_problems(capture_file(*FLOW6), peer="fd00:c0de:0:0:0:0:0:3")[1], [])
+
+    def test_ipv6_controls_fail(self):
+        for name, data in (
+                ("IPv4 flow kept", capture_file(*FLOW6, *flow(PEER4, TARGET4))),
+                ("one IPv4 record", capture_file(*FLOW6, flow(PEER4, TARGET4)[0])),
+                ("excluded port kept", capture_file(*FLOW6, OTHER6)),
+                ("other IPv6 peer", capture_file(*FLOW6, tcp6_frame("fd00:c0de::9", TARGET6, 40002, PORT, 0x02))),
+                ("extension header", capture_file(*FLOW6, tcp6_frame(PEER6, TARGET6, 40000, PORT, 0x10,
+                                                                     next_header=0))),
+                ("no SYN-ACK", capture_file(*(frame for frame in FLOW6 if frame != FLOW6[1]))),
+                ("no request payload", capture_file(*(frame for frame in FLOW6 if frame != FLOW6[3]))),
+                ("only IPv4", capture_file(*flow(PEER4, TARGET4))),
+                ("empty", capture_file())):
+            with self.subTest(name=name):
+                self.assertNotEqual(self.ipv6_problems(data)[1], [])
+        # The IPv4 oracle does not take the IPv6 flow either.
+        self.assertNotEqual(self.problems("traffic", capture_file(*FLOW6))[1], [])
+
 
 # A final record whose header promises 60 bytes, of which 10 were written.
 CUT_RECORD = struct.pack("<IIII", 1, 0, 60, 60) + b"\x00" * 10
@@ -413,6 +467,47 @@ class PartialCaptureTests(unittest.TestCase):
             with self.subTest(name=name):
                 self.assertNotEqual(self.problems("target_loss", capture_file(*FLOW), status, READY_LINE, loss)[1], [])
 
+    def restart_problems(self, data, status=1, stderr=READY_LINE + "tcpdump: pcap_loop: The interface disappeared\n",
+                         **restart):
+        restart = dict({"end": "exited", "interfaces": [], "followed": False, "before_port": BEFORE,
+                        "after_port": AFTER, "new_address": TARGET4, "status_after_restart": 1}, **restart)
+        state = {"status": status, "stderr": stderr, "pid": 42, "size": len(data)}
+        return extension_check.partial_problems("restart", state, data, PEER4, TARGET4, SNAPLEN,
+                                                extension_check.CAPTURE_PACKETS, restart)
+
+    def test_a_restart_keeps_only_the_connection_from_before(self):
+        summary, problems = self.restart_problems(capture_file(*RESTART_FLOW))
+        self.assertEqual(problems, [])
+        self.assertEqual((summary["records"], summary["complete"], summary["restart"]["end"]),
+                         (len(RESTART_FLOW), "partial", "exited"))
+        self.assertNotIn("loss", summary)
+        # A tcpdump that kept running, stopped with SIGTERM afterwards.
+        self.assertEqual(self.restart_problems(capture_file(*RESTART_FLOW), 0,
+                                               READY_LINE + statistics(len(RESTART_FLOW)), end="kept running")[1], [])
+        # A cut final record of the connection before the restart is partial output.
+        summary, problems = self.restart_problems(capture_file(*RESTART_FLOW) + CUT_RECORD)
+        self.assertEqual((problems, summary["cut_tail"]), ([], True))
+
+    def test_any_record_from_after_the_restart_fails(self):
+        moved = "172.31.0.9"
+        for name, data, restart in (
+                ("the connection after the restart", capture_file(*RESTART_FLOW, *flow(PEER4, TARGET4, AFTER)), {}),
+                ("one record after the restart", capture_file(*RESTART_FLOW, flow(PEER4, TARGET4, AFTER)[1]), {}),
+                ("only the connection after the restart", capture_file(*flow(PEER4, TARGET4, AFTER)), {}),
+                ("after the restart at a new address", capture_file(*RESTART_FLOW, *flow(PEER4, moved, AFTER)),
+                 {"new_address": moved}),
+                ("another connection", capture_file(*RESTART_FLOW, *flow(PEER4, TARGET4, 40000)), {}),
+                ("no record", capture_file(), {}),
+                ("the helper followed the target", capture_file(*RESTART_FLOW), {"followed": True}),
+                ("an interface in the helper's namespace", capture_file(*RESTART_FLOW),
+                 {"interfaces": [{"name": "eth0", "index": 5}]})):
+            with self.subTest(name=name):
+                self.assertNotEqual(self.restart_problems(data, **restart)[1], [])
+        problems = self.restart_problems(capture_file(*RESTART_FLOW, flow(PEER4, TARGET4, AFTER)[1]))[1]
+        self.assertEqual(problems, ["record 7 is from after the restart: peer port %d" % AFTER])
+        # A clean exit once the interface is gone fails as after a loss.
+        self.assertNotEqual(self.restart_problems(capture_file(*RESTART_FLOW), 0, READY_LINE)[1], [])
+
 
 class FakeCaptureEngine:
     """A Docker stand-in for one capture scenario; each option breaks one step."""
@@ -420,7 +515,9 @@ class FakeCaptureEngine:
     def __init__(self, test, uid=1000, early_exit=None, invalid_filter_refused=True, net_raw_refused=True,
                  keeps_excluded=False, unprivileged=None, clock=None, ready_delay=0, exit_delay=0, block=0,
                  killed_status=137, killed_statistics=False, cut_tail=False, loss_end="exited", loss_status=1,
-                 interface_survives=False):
+                 interface_survives=False, keeps_ipv4=False, no_ipv6=False, restart_end="exited", restart_status=1,
+                 restart_leaks=False, follows=False, interface_survives_restart=False, same_sandbox=False,
+                 renewed_address=TARGET4):
         self.test, self.uid, self.early_exit = test, uid, early_exit
         self.invalid_filter_refused, self.net_raw_refused = invalid_filter_refused, net_raw_refused
         self.keeps_excluded = keeps_excluded
@@ -429,13 +526,23 @@ class FakeCaptureEngine:
         # A synthetic clock: a readiness or exit read takes its delay, and a
         # state read that blocks for block seconds times out at its bound.
         self.clock, self.ready_delay, self.exit_delay, self.block = clock, ready_delay, exit_delay, block
-        self.captures, self.calls, self.state_timeouts = {}, [], []
+        self.captures, self.calls, self.state_timeouts, self.exchanges = {}, [], [], []
         # How an abrupt end and a lost target look: the killed tcpdump's
         # status and statistics, a cut final record, and whether tcpdump
         # exits or keeps running once the target's interface is gone.
         self.killed_status, self.killed_statistics, self.cut_tail = killed_status, killed_statistics, cut_tail
         self.loss_end, self.loss_status, self.interface_survives = loss_end, loss_status, interface_survives
         self.target_killed = False
+        # The dual-stack bridge: an IPv6 capture that keeps the IPv4 flow, a
+        # network without IPv6 addresses, and how the target's restart looks:
+        # tcpdump exits or keeps running, its file holds records from after
+        # the restart, the helper joins the new namespace, an interface stays
+        # in the helper's namespace, or the sandbox does not change.
+        self.keeps_ipv4, self.no_ipv6 = keeps_ipv4, no_ipv6
+        self.restart_end, self.restart_status, self.restart_leaks = restart_end, restart_status, restart_leaks
+        self.follows, self.interface_survives_restart = follows, interface_survives_restart
+        self.same_sandbox, self.renewed_address = same_sandbox, renewed_address
+        self.target_restarted = False
 
     def __call__(self, *command, timeout=120, check_exit=True):
         self.calls.append(list(command))
@@ -444,9 +551,17 @@ class FakeCaptureEngine:
         role = name.rsplit("-", 1)[-1]
         if command[:2] == ("container", "inspect") and "--format" not in command:
             network = name.rsplit("-", 1)[0]
-            address = {"target": TARGET, "peer": PEER}[role]
-            return 0, json.dumps([{"NetworkSettings": {"Networks": {network: {
-                "IPAddress": address, "MacAddress": "02:42:ac:1e:00:02"}}}}])
+            if role.endswith("6"):
+                network += "-dual"
+                address = {"target6": self.renewed_address if self.target_restarted else TARGET4,
+                           "peer6": PEER4}[role]
+                address6 = "" if self.no_ipv6 else {"target6": TARGET6, "peer6": PEER6}[role]
+            else:
+                address, address6 = {"target": TARGET, "peer": PEER}[role], ""
+            sandbox = "sandbox-%s-%d" % (role, self.target_restarted and not self.same_sandbox)
+            return 0, json.dumps([{"State": {"Running": True}, "NetworkSettings": {"SandboxID": sandbox, "Networks": {
+                network: {"IPAddress": address, "GlobalIPv6Address": address6,
+                          "MacAddress": "02:42:ac:1e:00:02"}}}}])
         if command[:2] == ("container", "inspect"):
             if self.unprivileged:
                 return 0, json.dumps(self.unprivileged[2])
@@ -462,6 +577,11 @@ class FakeCaptureEngine:
             self.test.assertTrue(command[1].endswith("-target"))
             self.target_killed = True
             return 0, ""
+        if command[0] == "restart":
+            self.test.assertEqual(command[1:3], ("-t", "0"))
+            self.test.assertTrue(command[3].endswith("-target6"))
+            self.target_restarted = True
+            return 0, ""
         if command[0] == "cp":
             base = command[1].split(":", 1)[1][:-len(".pcap")]
             Path(command[2]).write_bytes(self.captures[base]["data"])
@@ -470,7 +590,7 @@ class FakeCaptureEngine:
             return 0, ""
         if command[1] == "--detach":
             base = command[6]
-            self.test.assertTrue(command[2].endswith("-capturer"))
+            self.test.assertTrue(command[2].endswith(("-capturer", "-capturer6")))
             self.test.assertEqual(command[3:6], ("sh", "-c", extension_check.CAPTURE_WRAPPER))
             self.captures[base] = {"args": command[7:], "stopped": False, "killed": False, "exchanged": False}
             self.latest = base
@@ -479,16 +599,20 @@ class FakeCaptureEngine:
         if script == extension_check.CAPTURE_UID:
             return 0, json.dumps([self.uid, self.uid])
         if script == extension_check.NAMESPACE:
-            return 0, "net:[%d]\n" % (2 if role == "peer" else 1)
+            namespace = {"peer": 2, "server6": 4, "capturer6": 4, "peer6": 5,
+                         "renewed6": 4 if self.follows else 6}.get(role, 1)
+            return 0, "net:[%d]\n" % namespace
         if script == extension_check.CAPTURE_INTERFACE:
-            if self.target_killed and not self.interface_survives:
-                return 0, "[]"
-            return 0, json.dumps([{"name": "eth0", "index": 5}])
+            gone = (self.target_restarted and not self.interface_survives_restart) if role == "capturer6" else (
+                self.target_killed and not self.interface_survives)
+            return 0, "[]" if gone else json.dumps([{"name": "eth0", "index": 5}])
         if script == extension_check.READY:
             return 0, ""
         if script == extension_check.CAPTURE_EXCHANGE:
             self.captures[self.latest]["exchanged"] = True
-            return 0, json.dumps([{"port": int(port), "received": 1000} for port in command[7:]])
+            self.exchanges.append((self.latest, command[5], int(command[7]), self.target_restarted))
+            return 0, json.dumps([{"address": command[5], "port": int(port), "source_port": int(command[7]) or 40000,
+                                   "received": 1000} for port in command[8:]])
         if script == extension_check.CAPTURE_SIGNAL:
             self.test.assertIn(command[-1], ("SIGTERM", "SIGKILL"))
             self.captures[self.latest]["killed" if command[-1] == "SIGKILL" else "stopped"] = True
@@ -523,8 +647,20 @@ class FakeCaptureEngine:
             frames = FLOW[:extension_check.CAPTURE_BOUND]
         elif kind == "traffic":
             frames = FLOW + ((OTHER,) if self.keeps_excluded else ())
+        elif kind == "ipv6":
+            frames = FLOW6 + (flow(PEER4, TARGET4) if self.keeps_ipv4 else ())
         else:
             frames = ()
+        if kind == "restart" and self.target_restarted:
+            capture["data"] = capture_file(*RESTART_FLOW, *(flow(PEER4, self.renewed_address, AFTER)
+                                                            if self.restart_leaks else ()))
+            if self.restart_end == "exited":
+                return {"stderr": READY_LINE + "tcpdump: pcap_loop: The interface disappeared\n", "pid": 42,
+                        "status": self.restart_status, "size": len(capture["data"])}
+            if capture["stopped"]:
+                return {"stderr": READY_LINE + statistics(len(RESTART_FLOW)), "pid": 42, "status": 0,
+                        "size": len(capture["data"])}
+            return {"stderr": READY_LINE, "pid": 42, "status": None, "size": len(capture["data"])}
         if kind == "abrupt" and capture["killed"]:
             capture["data"] = capture_file(*FLOW) + (CUT_RECORD if self.cut_tail else b"")
             return {"stderr": READY_LINE + (statistics(len(FLOW)) if self.killed_statistics else ""), "pid": 42,
@@ -589,7 +725,8 @@ class CaptureScenarioTests(unittest.TestCase):
         engine = FakeCaptureEngine(self)
         result = self.scenario(engine)
         self.assertEqual(result["status"], "passed", result.get("error"))
-        self.assertEqual(set(result["captures"]), {"traffic", "empty", "bound", "abrupt", "target_loss"})
+        self.assertEqual(set(result["captures"]),
+                         {"traffic", "empty", "bound", "abrupt", "target_loss", "ipv6", "restart"})
         self.assertEqual({name: control["status"] for name, control in result["refusals"].items()},
                          dict.fromkeys(("invalid_filter", "unavailable_interface", "without_net_raw"), "passed"))
         runs = [call for call in engine.calls if call[0] == "run"]
@@ -603,6 +740,74 @@ class CaptureScenarioTests(unittest.TestCase):
         self.assertEqual(traffic[traffic.index("-s") + 1], str(SNAPLEN))
         self.assertEqual(traffic[-1], "tcp port %d and host %s" % (PORT, PEER))
         self.assertFalse(list(self.output.rglob("*.pcap")), "raw captures stay out of the report directory")
+
+    def test_the_dual_stack_bridge_selects_ipv6_and_restarts_its_own_target(self):
+        engine = FakeCaptureEngine(self)
+        result = self.scenario(engine)
+        self.assertEqual(result["status"], "passed", result.get("error"))
+        networks = [call for call in engine.calls if call[:2] == ["network", "create"]]
+        # The IPv4 bridge stays as it was; the second one is dual-stack.
+        self.assertEqual([("--ipv6" in call, "--internal" in call, call[-1]) for call in networks],
+                         [(False, True, "ceph-extension-check-abcdef012345"),
+                          (True, True, "ceph-extension-check-abcdef012345-dual")])
+        runs = [call for call in engine.calls if call[0] == "run"]
+        capturer = next(call for call in runs if call[call.index("--name") + 1].endswith("-capturer6"))
+        self.assertEqual([arg for arg in capturer if arg.startswith("--cap")], ["--cap-drop=ALL", "--cap-add=NET_RAW"])
+        self.assertEqual(capturer[capturer.index("--network") + 1],
+                         "container:ceph-extension-check-abcdef012345-target6")
+        ipv6 = engine.captures["/tmp/capture-ipv6"]["args"]
+        self.assertEqual(ipv6[-1], "ip6 and tcp port %d and host %s" % (PORT, PEER6))
+        self.assertEqual(engine.captures["/tmp/capture-traffic"]["args"][-1], "tcp port %d and host %s" % (PORT, PEER))
+        # The IPv6 capture sees the selected and the excluded port over IPv6
+        # and the selected port over IPv4.
+        self.assertEqual([(item["address"], item["port"]) for item in result["captures"]["ipv6"]["exchanges"]],
+                         [(TARGET6, PORT), (TARGET6, EXCLUDED), (TARGET4, PORT)])
+        self.assertEqual(result["captures"]["ipv6"]["summary"]["ipv4_records"], 0)
+        # The restart comes last, between the connection from BEFORE and the one from AFTER.
+        commands = [call[0] for call in engine.calls]
+        self.assertGreater(commands.index("restart"), commands.index("kill"))
+        restart_exchanges = [(source, restarted) for base, _, source, restarted in engine.exchanges
+                             if base == "/tmp/capture-restart"]
+        self.assertEqual(restart_exchanges, [(BEFORE, False), (AFTER, True)])
+        renewed = next(call for call in runs if call[call.index("--name") + 1].endswith("-renewed6"))
+        self.assertGreater(engine.calls.index(renewed), engine.calls.index(["restart", "-t", "0",
+                                                                            "ceph-extension-check-abcdef012345-target6"]))
+        self.assertEqual(renewed[renewed.index("--network") + 1], "container:ceph-extension-check-abcdef012345-target6")
+        restart = result["captures"]["restart"]["summary"]["restart"]
+        self.assertEqual({key: restart[key] for key in ("end", "followed", "interfaces", "status_after_restart")},
+                         {"end": "exited", "followed": False, "interfaces": [], "status_after_restart": 1})
+        self.assertEqual(result["captures"]["restart"]["summary"]["complete"], "partial")
+        self.assertEqual(result["dual_stack"]["addresses"]["target"], {"ipv4": TARGET4, "ipv6": TARGET6})
+
+    def test_a_restart_that_keeps_running_passes_on_the_synthetic_clock(self):
+        clock = Clock()
+        result = self.scenario(FakeCaptureEngine(self, clock=clock, restart_end="kept running"), clock)
+        self.assertEqual(result["status"], "passed", result.get("error"))
+        self.assertEqual(result["captures"]["restart"]["summary"]["restart"]["end"], "kept running")
+        self.assertEqual(result["captures"]["restart"]["exit_code"], 0)
+
+    def test_ipv6_and_restart_failures_keep_their_stage_and_kind(self):
+        for name, engine, stage, kind in (
+                ("IPv4 flow kept", FakeCaptureEngine(self, keeps_ipv4=True), "capture:ipv6", "capture_failure"),
+                ("no IPv6 address", FakeCaptureEngine(self, no_ipv6=True), "setup:dual_stack", "checker_failure"),
+                ("records after the restart", FakeCaptureEngine(self, restart_leaks=True), "capture:restart",
+                 "capture_failure"),
+                ("records after the restart at a new address",
+                 FakeCaptureEngine(self, restart_leaks=True, renewed_address="172.31.0.9"), "capture:restart",
+                 "capture_failure"),
+                ("the helper follows the target", FakeCaptureEngine(self, follows=True), "capture:restart",
+                 "capture_failure"),
+                ("an interface stays", FakeCaptureEngine(self, interface_survives_restart=True), "capture:restart",
+                 "capture_failure"),
+                ("clean exit after the restart", FakeCaptureEngine(self, restart_status=0), "capture:restart",
+                 "capture_failure"),
+                ("the same sandbox", FakeCaptureEngine(self, same_sandbox=True), "capture:restart",
+                 "checker_failure")):
+            with self.subTest(name=name):
+                self.addCleanup(shutil.rmtree, self.output / "run", ignore_errors=True)
+                result = self.scenario(engine)
+                shutil.rmtree(self.output / "run")
+                self.assertEqual(outcome(result), ("failed", stage, kind))
 
     def test_failures_keep_their_kind(self):
         for name, engine, stage, kind in (
@@ -849,6 +1054,10 @@ class CapturePublicationTests(unittest.TestCase):
             "another platform": change(lambda r: r["targets"][official].update(platform="linux/arm64")),
             "missing target loss": change(lambda r: r["targets"][official]["captures"].pop("target_loss")),
             "missing abrupt": change(lambda r: r["targets"][official]["captures"].pop("abrupt")),
+            "missing restart": change(lambda r: r["targets"][official]["captures"].pop("restart")),
+            "missing ipv6": change(lambda r: r["targets"][official]["captures"].pop("ipv6")),
+            "failed restart": change(lambda r: r["targets"][official]["captures"]["restart"].update(status="failed")),
+            "ipv6 with problems": change(lambda r: r["targets"][official]["captures"]["ipv6"].update(problems=["x"])),
             "failed bound": change(lambda r: r["targets"][official]["captures"]["bound"].update(status="failed")),
             "empty with problems": change(lambda r: r["targets"][official]["captures"]["empty"].update(
                 problems=["x"])),
