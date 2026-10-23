@@ -745,22 +745,163 @@ class CaptureScenarioTests(unittest.TestCase):
                 self.assertEqual((code, report["status"], report["failure_kind"]), (1, "failed", kind))
 
 
-class CapturePublicationTests(unittest.TestCase):
-    def test_the_capture_helper_is_not_published_yet(self):
-        import publish
-        self.assertEqual(extension_check.PUBLISHED, ("netem",))
-        report = {"status": "passed", "level": "functional", "extension": "capture", "contract": "1"}
-        with self.assertRaisesRegex(publish.PublishError, "unpublished extension 'capture'"):
-            publish.validate_extension_report(report, "capture", "amd64")
+WORKFLOWS = Path(__file__).resolve().parents[3] / ".github" / "workflows"
+PUBLISH_GATE = "inputs.publish && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)"
 
-    def test_the_capture_job_builds_and_checks_but_cannot_publish(self):
-        workflow = (Path(__file__).resolve().parents[3] / ".github" / "workflows" / "test.yml").read_text()
-        job = workflow[workflow.index("  capture-extension:"):workflow.index("  promote-extension:")]
+
+def section(text, start, end=None):
+    begin = text.index(start)
+    return text[begin:text.index(end, begin)] if end else text[begin:]
+
+
+class CapturePublicationTests(unittest.TestCase):
+    """What a capture report must show before its helper can be published,
+    with the scenario results of the actual checker on a fake engine."""
+
+    setUp = CaptureScenarioTests.setUp
+    scenario = CaptureScenarioTests.scenario
+
+    def report(self):
+        import publish
+        result = self.scenario(FakeCaptureEngine(self))
+        self.assertEqual(result["status"], "passed", result.get("error"))
+        targets = {}
+        for reference in sorted(publish.extension_targets("capture")):
+            targets[reference] = json.loads(json.dumps(result))
+            targets[reference]["reference"] = reference
+        checks = [{"name": "path:tcpdump", "status": "passed"},
+                  {"name": "refused-without-net_raw", "status": "passed", "cleanup": {"status": "passed"}}]
+        image = dict(HELPER, status="passed", checks=checks, cleanup={"status": "passed"},
+                     versions={"tcpdump": "tcpdump version 4.99.3 libpcap version 1.10.3"},
+                     labels={"io.ceph-testcontainers.extension": "capture",
+                             "io.ceph-testcontainers.extension.contract": "1"})
+        return {"status": "passed", "level": "functional", "extension": "capture", "contract": "1",
+                "checker_sha256": extension_check.checker_sha256(), "image": image,
+                "environment": {"OperatingSystem": "Ubuntu 24.04"}, "targets": targets}
+
+    def test_the_capture_helper_is_published(self):
+        self.assertEqual(extension_check.PUBLISHED, ("netem", "capture"))
+        import publish
+        self.assertEqual(publish.extension_tag("capture"), publish.REGISTRY + ":extension-capture-v1")
+        self.assertEqual(publish.extension_tag("capture", "arm64"),
+                         publish.REGISTRY + ":extension-capture-v1-linux-arm64")
+
+    def test_the_checkers_negative_controls_are_the_ones_publication_requires(self):
+        result = self.scenario(FakeCaptureEngine(self))
+        self.assertEqual({name: control["expected"] for name, control in result["refusals"].items()},
+                         extension_check.CAPTURE_REFUSALS)
+        self.assertEqual(set(result["captures"]), set(extension_check.CAPTURE_STOPS))
+
+    def test_a_passing_functional_report_on_its_platform_can_be_published(self):
+        import publish
+        report = self.report()
+        # The capture helper has no netem kernel check, selector or optional profile.
+        self.assertFalse({"kernel", "selectors", "rate", "packet_faults"} & set(report))
+        publish.validate_extension_report(report, "capture", "amd64")
+        for architecture, extension in (("arm64", "capture"), ("amd64", "netem")):
+            with self.subTest(architecture=architecture, extension=extension), \
+                    self.assertRaises(publish.PublishError):
+                publish.validate_extension_report(report, extension, architecture)
+
+    def test_publication_requires_every_capture_control_and_target(self):
+        import publish
+        good = self.report()
+        official = publish.releases.RELEASES["19.2.5"]["official"]
+
+        def change(edit):
+            value = json.loads(json.dumps(good))
+            edit(value)
+            return value
+
+        bad = {
+            "quick check level": change(lambda r: r.update(level="quick")),
+            "another checker": change(lambda r: r.update(checker_sha256="0" * 64)),
+            "no labels": change(lambda r: r["image"].update(labels={})),
+            "no quick refusal": change(lambda r: r["image"].update(checks=r["image"]["checks"][:1])),
+            "failed quick refusal": change(lambda r: r["image"]["checks"][1].update(status="failed")),
+            "quick refusal cleanup": change(lambda r: r["image"]["checks"][1]["cleanup"].update(status="failed")),
+            "missing release target": change(lambda r: r["targets"].pop(official)),
+            "failed target": change(lambda r: r["targets"][official].update(status="failed")),
+            "target leftovers": change(lambda r: r["targets"][official]["cleanup"].update(leftovers=["x"])),
+            "another helper": change(lambda r: r["targets"][official].update(helper_image_id="sha256:" + "e" * 64)),
+            "another platform": change(lambda r: r["targets"][official].update(platform="linux/arm64")),
+            "missing target loss": change(lambda r: r["targets"][official]["captures"].pop("target_loss")),
+            "missing abrupt": change(lambda r: r["targets"][official]["captures"].pop("abrupt")),
+            "failed bound": change(lambda r: r["targets"][official]["captures"]["bound"].update(status="failed")),
+            "empty with problems": change(lambda r: r["targets"][official]["captures"]["empty"].update(
+                problems=["x"])),
+            "no refusals": change(lambda r: r["targets"][official].pop("refusals")),
+            "missing control": change(lambda r: r["targets"][official]["refusals"].pop("without_net_raw")),
+            "failed control": change(lambda r: r["targets"][official]["refusals"]["invalid_filter"].update(
+                status="failed")),
+            "control of another kind": change(lambda r: r["targets"][official]["refusals"]["without_net_raw"].update(
+                kind="not_refused")),
+            "control expecting another kind": change(
+                lambda r: [control.update(expected="capture_failure", kind="capture_failure")
+                           for control in [r["targets"][official]["refusals"]["unavailable_interface"]]]),
+        }
+        for name, value in bad.items():
+            with self.subTest(name=name), self.assertRaises(publish.PublishError):
+                publish.validate_extension_report(value, "capture", "amd64")
+
+    def test_the_capture_job_publishes_only_from_a_manual_run_on_the_default_branch(self):
+        workflow = (WORKFLOWS / "test.yml").read_text()
+        job = section(workflow, "  capture-extension:", "  promote-extension:")
+        self.assertIn("make extension-test", job)
         self.assertIn("make capture-image", job)
         self.assertIn("--extension capture", job)
-        self.assertNotIn("packages: write", job)
-        self.assertNotIn("publish.py", job)
-        self.assertNotIn("docker/login-action", job)
+        self.assertIn("packages: write", job)
+        steps = job.split("      - ")
+        login = next(step for step in steps if "docker/login-action" in step)
+        stage = next(step for step in steps if "publish.py stage-extension" in step)
+        candidate = next(step for step in steps if "extension-candidate-capture-" in step)
+        for step in (login, stage, candidate):
+            self.assertIn("if: " + PUBLISH_GATE + "\n", step)
+        self.assertIn("--extension capture --architecture ${{ matrix.architecture }}", stage)
+        # The candidate comes from this job's own report, after its own check.
+        self.assertIn('--report "$RUNNER_TEMP/capture/extension-report.json"', stage)
+        self.assertLess(job.index("--functional"), job.index("publish.py stage-extension"))
+
+    def test_raw_captures_are_refused_before_any_artifact_upload(self):
+        job = section((WORKFLOWS / "test.yml").read_text(), "  capture-extension:", "  promote-extension:")
+        guard = job.index("publish.py check-artifacts --directory \"$RUNNER_TEMP/capture\"")
+        self.assertIn("if: always()", job[job.rindex("      - ", 0, guard):guard])
+        self.assertLess(guard, job.index("actions/upload-artifact"))
+        published = section((WORKFLOWS / "published-extension.yml").read_text(), "  published-capture-extension:")
+        guard = published.index("publish.py check-artifacts")
+        self.assertLess(guard, published.index("actions/upload-artifact"))
+
+    def test_promotion_takes_only_both_capture_candidates_and_checks_the_published_digests(self):
+        workflow = (WORKFLOWS / "test.yml").read_text()
+        promote = section(workflow, "  promote-capture-extension:", "  verify-published-capture-extension:")
+        self.assertIn("if: " + PUBLISH_GATE + "\n", promote)
+        self.assertIn("needs: capture-extension\n", promote)
+        self.assertIn("pattern: extension-candidate-capture-*\n", promote)
+        self.assertIn("promote-extension --extension capture", promote)
+        verify = section(workflow, "  verify-published-capture-extension:")
+        self.assertIn("if: " + PUBLISH_GATE + "\n", verify)
+        self.assertIn("needs: promote-capture-extension\n", verify)
+        self.assertIn("extension: capture\n", verify)
+        self.assertIn("images: ${{ needs.promote-capture-extension.outputs.images }}", verify)
+        # netem's promotion no longer picks up the capture candidates.
+        netem = section(workflow, "  promote-extension:", "  verify-published-extension:")
+        self.assertIn("pattern: extension-candidate-netem-*\n", netem)
+        self.assertIn("promote-extension --extension netem", netem)
+
+    def test_the_published_capture_helper_is_checked_by_digest_as_in_ci(self):
+        published = (WORKFLOWS / "published-extension.yml").read_text()
+        netem = section(published, "  published-extension:", "  published-capture-extension:")
+        capture = section(published, "  published-capture-extension:")
+        self.assertIn("if: inputs.extension == 'netem'", netem)
+        self.assertIn("if: inputs.extension == 'capture'", capture)
+        self.assertIn("published-reference --extension \"$IMAGE_EXTENSION\"", capture)
+        self.assertIn("--extension capture --image \"$reference\"", capture)
+        self.assertIn("--functional", capture)
+        # The same targets as the capture job, and no netem profile.
+        self.assertIn('python3 image/releases.py official "$release"', capture)
+        self.assertNotIn("releases.py role", capture)
+        for option in ("--selector", "--rate", "--packet-faults"):
+            self.assertNotIn(option, capture)
 
 
 if __name__ == "__main__":

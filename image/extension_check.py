@@ -51,9 +51,9 @@ HERE = Path(__file__).resolve().parent
 EXTENSIONS = {"netem": {"contract": "1", "probe": HERE / "extensions" / "netem" / "check-netem.sh", "user": "0:0",
                         "caps": (), "published": True},
               "capture": {"contract": "1", "probe": HERE / "extensions" / "capture" / "check-capture.sh",
-                          "user": None, "caps": ("NET_RAW",), "published": False}}
-# The helpers that image/publish.py publishes. A helper joins only once its
-# functional check gates publication.
+                          "user": None, "caps": ("NET_RAW",), "published": True}}
+# The helpers that image/publish.py publishes, each gated by its own
+# functional check on both architectures.
 PUBLISHED = tuple(name for name, spec in EXTENSIONS.items() if spec["published"])
 # The checks that exist only for the netem helper.
 NETEM_ONLY = ("selector", "rate", "packet_faults")
@@ -2303,6 +2303,9 @@ def exchange(peer, target_address, ports, output):
 
 CAPTURE_STOPS = {"traffic": "SIGTERM", "empty": "SIGTERM", "bound": "packet bound", "abrupt": "SIGKILL",
                  "target_loss": "target container killed"}
+# The negative controls of refused_capture(), each with the kind it must fail with.
+CAPTURE_REFUSALS = {"invalid_filter": "invalid_filter", "unavailable_interface": "unavailable_interface",
+                    "without_net_raw": "permission_denied"}
 
 
 def run_capture(names, kind, interface, peer, target, ports, packets, directory, output, mac=None):

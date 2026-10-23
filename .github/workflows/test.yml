@@ -8,7 +8,7 @@ on:
   workflow_dispatch:
     inputs:
       publish:
-        description: Publish the checked extension helper
+        description: Publish the checked extension helpers (capture only from the default branch)
         type: boolean
         default: false
 permissions:
@@ -103,7 +103,11 @@ jobs:
 
   capture-extension:
     # The packet-capture helper is built, checked quickly and functionally in
-    # the namespace of each release's official image, and never published.
+    # the namespace of each release's official image, and published only by a
+    # manual run with publish on the default branch.
+    permissions:
+      contents: read
+      packages: write
     strategy:
       fail-fast: false
       matrix:
@@ -120,9 +124,17 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.9'
+      - run: make extension-test
       - uses: docker/setup-buildx-action@v4
         with:
           driver: docker-container
+      - name: Log in for image publication
+        uses: docker/login-action@v3
+        if: inputs.publish && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
       - name: Build the helper
         run: make capture-image PLATFORM="linux/${{ matrix.architecture }}" IMAGE_REPOSITORY=ceph-check
       - name: Check the capture contract and capture in Ceph targets' namespaces
@@ -135,11 +147,28 @@ jobs:
           done
           python3 image/extension_check.py --extension capture --image ceph-check:extension-capture \
             --platform "linux/${{ matrix.architecture }}" --functional "${targets[@]}" --output-dir "$RUNNER_TEMP/capture"
+      - name: Keep raw captures out of the artifacts
+        if: always()
+        run: python3 image/publish.py check-artifacts --directory "$RUNNER_TEMP/capture"
+      - name: Upload the exact tested helper
+        if: inputs.publish && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+        run: |
+          python3 image/publish.py stage-extension --report "$RUNNER_TEMP/capture/extension-report.json" \
+            --extension capture --architecture ${{ matrix.architecture }} \
+            --revision "$GITHUB_SHA" --run-id "$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" \
+            --output "$RUNNER_TEMP/capture-candidate/extension-candidate.json"
+      - uses: actions/upload-artifact@v4
+        if: inputs.publish && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+        with:
+          name: extension-candidate-capture-${{ matrix.architecture }}
+          retention-days: 30
+          path: ${{ runner.temp }}/capture-candidate/extension-candidate.json
+          if-no-files-found: error
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: extension-capture-${{ matrix.architecture }}-check
-          retention-days: ${{ job.status == 'failure' && 14 || 7 }}
+          retention-days: ${{ inputs.publish && 30 || job.status == 'failure' && 14 || 7 }}
           path: ${{ runner.temp }}/capture/
           if-no-files-found: warn
 
@@ -157,7 +186,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
-          pattern: extension-candidate-*
+          pattern: extension-candidate-netem-*
           path: ${{ runner.temp }}/extension-candidates
       - uses: docker/login-action@v3
         with:
@@ -167,7 +196,7 @@ jobs:
       - name: Overwrite the helper tags with the tested digests
         id: promote
         run: |
-          python3 image/publish.py promote-extension --candidates "$RUNNER_TEMP/extension-candidates" \
+          python3 image/publish.py promote-extension --extension netem --candidates "$RUNNER_TEMP/extension-candidates" \
             --revision "$GITHUB_SHA" --run-id "$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" \
             --output "$RUNNER_TEMP/extension-promotion/promotion.json" --github-output "$GITHUB_OUTPUT"
       - uses: actions/upload-artifact@v4
@@ -186,4 +215,53 @@ jobs:
       packages: read
     uses: ./.github/workflows/published-extension.yml
     with:
+      extension: netem
       images: ${{ needs.promote-extension.outputs.images }}
+
+  promote-capture-extension:
+    # Both architectures' capture jobs must have passed and uploaded their own
+    # tested helper; a failed platform uploads nothing and blocks promotion.
+    if: inputs.publish && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    needs: capture-extension
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      images: ${{ steps.promote.outputs.images }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: extension-candidate-capture-*
+          path: ${{ runner.temp }}/capture-candidates
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Overwrite the helper tags with the tested digests
+        id: promote
+        run: |
+          python3 image/publish.py promote-extension --extension capture --candidates "$RUNNER_TEMP/capture-candidates" \
+            --revision "$GITHUB_SHA" --run-id "$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" \
+            --output "$RUNNER_TEMP/capture-promotion/promotion.json" --github-output "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: extension-capture-promotion
+          retention-days: 30
+          path: ${{ runner.temp }}/capture-promotion/
+          if-no-files-found: warn
+
+  verify-published-capture-extension:
+    if: inputs.publish && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    needs: promote-capture-extension
+    permissions:
+      contents: read
+      packages: read
+    uses: ./.github/workflows/published-extension.yml
+    with:
+      extension: capture
+      images: ${{ needs.promote-capture-extension.outputs.images }}

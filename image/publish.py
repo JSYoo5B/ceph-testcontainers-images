@@ -229,9 +229,13 @@ def extension_tag(extension, architecture=None):
         "-linux-" + architecture if architecture else "")
 
 
-def extension_targets():
-    """The targets every published helper must pass: the official image and the
-    published essential role image of every release."""
+def extension_targets(extension):
+    """The targets every published helper must pass. The netem helper: the
+    official image and the published essential role image of every release.
+    The capture helper: the official image of every release, which is what its
+    CI job checks."""
+    if extension == "capture":
+        return {value["official"] for value in releases.RELEASES.values()}
     return {reference for release, value in releases.RELEASES.items()
             for reference in (value["official"], releases.published_role(release, "official", "essential"))}
 
@@ -254,20 +258,26 @@ def validate_extension_report(report, extension, architecture):
     require(labels.get("io.ceph-testcontainers.extension") == extension and
             labels.get("io.ceph-testcontainers.extension.contract") == contract,
             "A published helper must declare its extension and contract")
-    kernel = report.get("kernel", {})
-    require(kernel.get("status") == "passed" and kernel.get("cleanup", {}).get("status") == "passed",
-            "The kernel check must pass and clean up")
     targets = report.get("targets", {})
-    require(extension_targets() <= set(targets),
-            "The official and the published OSD role image of every release must be checked targets")
+    require(extension_targets(extension) <= set(targets),
+            "Every release target of the " + extension + " helper must be a checked target")
     for result in targets.values():
         require(result.get("status") == "passed" and result.get("cleanup", {}).get("status") == "passed"
                 and not result["cleanup"].get("leftovers"), "Every target scenario must pass and clean up")
+    {"netem": validate_netem_report, "capture": validate_capture_report}[extension](report, architecture)
+
+
+def validate_netem_report(report, architecture):
+    extension_check = extensions()
+    kernel = report.get("kernel", {})
+    require(kernel.get("status") == "passed" and kernel.get("cleanup", {}).get("status") == "passed",
+            "The kernel check must pass and clean up")
+    targets = extension_targets("netem")
     selectors = report.get("selectors", {})
     require(set(extension_check.SELECTORS) <= set(selectors), "Every selector profile of the contract must be checked")
     for profile in extension_check.SELECTORS:
         results = selectors[profile]
-        require(extension_targets() <= set(results), "Each selector profile must be checked in every release target")
+        require(targets <= set(results), "Each selector profile must be checked in every release target")
         for result in results.values():
             require(result.get("status") == "passed" and result.get("cleanup", {}).get("status") == "passed"
                     and not result["cleanup"].get("leftovers"), "Every selector scenario must pass and clean up")
@@ -277,16 +287,90 @@ def validate_extension_report(report, extension, architecture):
         require(profile.get("status") == "passed" and profile.get("scope") == "functional",
                 "The %s profile must pass functionally" % name)
         results = profile.get("targets", {})
-        require(extension_targets() <= set(results), "The %s profile must be checked in every release target" % name)
+        require(targets <= set(results), "The %s profile must be checked in every release target" % name)
         for result in results.values():
             require(result.get("status") == "passed" and result.get("cleanup", {}).get("status") == "passed"
                     and not result["cleanup"].get("leftovers"), "Every %s scenario must pass and clean up" % name)
+
+
+def validate_capture_report(report, architecture):
+    """The capture helper publishes only what its functional check showed on
+    this platform: the quick refusal without NET_RAW, and in every release
+    target, with this helper, every capture and every negative control."""
+    extension_check = extensions()
+    image = report["image"]
+    refusals = [entry for entry in image.get("checks", []) if entry.get("name") == "refused-without-net_raw"]
+    require(len(refusals) == 1 and refusals[0].get("status") == "passed"
+            and refusals[0].get("cleanup", {}).get("status") == "passed",
+            "The quick refusal without NET_RAW must pass and clean up")
+    for reference, result in report["targets"].items():
+        require(result.get("helper_image_id") == image.get("image_id")
+                and result.get("platform") == "linux/" + architecture,
+                "Every capture scenario must use the checked helper on the requested platform: " + reference)
+        captures = result.get("captures", {})
+        require(set(captures) == set(extension_check.CAPTURE_STOPS)
+                and all(capture.get("status") == "passed" and not capture.get("problems")
+                        for capture in captures.values()),
+                "Every capture must be recorded and pass: " + reference)
+        controls = result.get("refusals", {})
+        require(set(controls) == set(extension_check.CAPTURE_REFUSALS)
+                and all(control.get("status") == "passed" and control.get("expected") == expected
+                        and control.get("kind") == expected
+                        for name, expected in extension_check.CAPTURE_REFUSALS.items()
+                        for control in (controls[name],)),
+                "Every negative control must be recorded and fail as required: " + reference)
+
+
+# The leading bytes of classic pcap (both byte orders, micro- and nanosecond)
+# and of pcapng.
+CAPTURE_MAGICS = (b"\xd4\xc3\xb2\xa1", b"\xa1\xb2\xc3\xd4", b"\x4d\x3c\xb2\xa1", b"\xa1\xb2\x3c\x4d",
+                  b"\x0a\x0d\x0d\x0a")
+
+
+def raw_captures(directory):
+    """Files below a report directory that are, or are named as, raw captures.
+    The capture checker keeps them out of its report directory, which CI
+    uploads; a capture can hold payloads that no redaction sanitizes."""
+    found = []
+    for path in sorted(Path(directory).rglob("*")):
+        if not path.is_file():
+            continue
+        with path.open("rb") as handle:
+            head = handle.read(4)
+        if ".pcap" in path.name or head in CAPTURE_MAGICS:
+            found.append(str(path.relative_to(directory)))
+    return found
+
+
+def published_reference(extension, architecture, images):
+    """The digest reference of one published helper platform, from a digest
+    map (extension -> architecture -> sha256 digest) as promotion writes it."""
+    images = json.loads(images)
+    names = extensions().PUBLISHED
+    require(isinstance(images, dict) and extension in names and extension in images,
+            "Provide a digest map for the published extension " + repr(extension))
+    require(set(images) <= set(names), "The digest map names an unpublished extension")
+    for name, platforms in images.items():
+        require(isinstance(platforms, dict) and set(platforms) == set(ARCHITECTURES),
+                "Provide both architectures for " + name)
+        require(all(isinstance(digest, str) and DIGEST.fullmatch(digest) for digest in platforms.values()),
+                "Image references must be immutable sha256 digests")
+    return REGISTRY + "@" + images[extension][architecture]
+
+
+def check_artifacts(args):
+    found = raw_captures(args.directory)
+    for path in found:
+        print("Raw capture in the artifact directory: " + path, file=sys.stderr)
+    require(not found, "Raw captures must not be uploaded")
 
 
 def stage_extension(args):
     report_bytes = args.report.read_bytes()
     report = json.loads(report_bytes)
     validate_extension_report(report, args.extension, args.architecture)
+    if args.extension == "capture":
+        require(not raw_captures(args.report.parent), "The report directory holds raw captures")
     require(re.fullmatch(r"[0-9a-f]{40}", args.revision) is not None, "Revision must be a full commit SHA")
     require(re.fullmatch(r"[0-9]+-[0-9]+", args.run_id) is not None, "Run identity must include run and attempt")
     checked = report["image"]
@@ -302,9 +386,11 @@ def stage_extension(args):
     result = {"schema": 1, "extension": args.extension, "contract": report["contract"],
               "architecture": args.architecture, "revision": args.revision, "run_id": args.run_id,
               "status": "uploading", "report_sha256": hashlib.sha256(report_bytes).hexdigest(),
-              "targets": sorted(report["targets"]), "selectors": sorted(report["selectors"]),
-              "environment": report.get("environment"),
-              "kernel": report["kernel"].get("kernel")}
+              "targets": sorted(report["targets"]), "environment": report.get("environment")}
+    if args.extension == "netem":
+        result.update(selectors=sorted(report["selectors"]), kernel=report["kernel"].get("kernel"))
+    else:
+        result["versions"] = checked.get("versions")
     save(args.output, result)
     tag = REGISTRY + ":ci-" + args.run_id + "-" + extension_tag(args.extension, args.architecture).split(":", 1)[1]
     run(["docker", "tag", entry["image_id"], tag])
@@ -317,7 +403,9 @@ def stage_extension(args):
     print("Uploaded tested helper: " + tag + "@" + entry["digest"], flush=True)
 
 
-def collect_extension_candidates(directory, revision, run_id):
+def collect_extension_candidates(directory, revision, run_id, extension):
+    """The candidates of one extension: one per architecture, each uploaded by
+    the job whose own functional check passed on that architecture."""
     result = {}
     for path in sorted(directory.rglob("extension-candidate.json")):
         candidate = json.loads(path.read_text())
@@ -326,23 +414,24 @@ def collect_extension_candidates(directory, revision, run_id):
         require(candidate.get("status") == "passed" and candidate.get("revision") == revision
                 and candidate.get("run_id") == run_id, "Candidates must pass in the same CI run and revision")
         entry = candidate.get("image", {})
+        require(key[0] == extension, "Candidate of another extension: " + repr(key[0]))
         require(entry.get("extension") == key[0] and entry.get("architecture") == key[1],
                 "Candidate extension/platform mismatch")
         require(all(isinstance(entry.get(field), str) and DIGEST.fullmatch(entry[field])
                     for field in ("digest", "config_digest", "image_id")), "Invalid candidate identity")
         result[key] = candidate
-    require(set(result) == {(e, a) for e in extensions().PUBLISHED for a in ARCHITECTURES},
-            "Every extension must pass on both platforms")
+    require(set(result) == {(extension, a) for a in ARCHITECTURES}, "The extension must pass on both platforms")
     return result
 
 
 def promote_extension(args):
-    candidates = collect_extension_candidates(args.candidates, args.revision, args.run_id)
+    require(args.extension in extensions().PUBLISHED, "Unknown or unpublished extension " + repr(args.extension))
+    candidates = collect_extension_candidates(args.candidates, args.revision, args.run_id, args.extension)
     with ThreadPoolExecutor(max_workers=4) as pool:
         list(pool.map(verify_image, [candidate["image"] for candidate in candidates.values()]))
-    names = extensions().PUBLISHED
+    names = (args.extension,)
     tags = [extension_tag(e, a) for e in names for a in (*ARCHITECTURES, None)]
-    result = {"status": "promoting", "revision": args.revision, "run_id": args.run_id,
+    result = {"status": "promoting", "extension": args.extension, "revision": args.revision, "run_id": args.run_id,
               "previous": {tag: previous_manifest(tag) for tag in tags}, "platforms": {}, "indexes": {}}
     save(args.output, result)
     digests = {extension: {} for extension in names}
@@ -435,7 +524,8 @@ def main():
     stage_helper.add_argument("--report", type=Path, required=True)
     stage_helper.add_argument("--extension", required=True)
     stage_helper.add_argument("--architecture", choices=ARCHITECTURES, required=True)
-    promote_helper = commands.add_parser("promote-extension", help="Promote every extension from both platforms")
+    promote_helper = commands.add_parser("promote-extension", help="Promote one extension from both platforms")
+    promote_helper.add_argument("--extension", required=True)
     promote_helper.add_argument("--candidates", type=Path, required=True)
     promote_helper.add_argument("--github-output", type=Path)
     for command in (stage_helper, promote_helper):
@@ -446,6 +536,12 @@ def main():
     health_parser.add_argument("--promotion", type=Path, help="Check the tags of this completed promotion")
     health_parser.add_argument("--release", dest="releases", action="append", choices=tuple(releases.RELEASES))
     commands.add_parser("extension-health", help="Check that every published helper platform image still exists")
+    reference = commands.add_parser("published-reference", help="Print one platform of a promoted helper by digest")
+    reference.add_argument("--extension", required=True)
+    reference.add_argument("--architecture", choices=ARCHITECTURES, required=True)
+    reference.add_argument("--images", required=True)
+    artifacts = commands.add_parser("check-artifacts", help="Fail when a report directory holds raw captures")
+    artifacts.add_argument("--directory", type=Path, required=True)
     args = parser.parse_args()
     if args.command == "health":
         args.releases = args.releases or list(releases.RELEASES)
@@ -453,6 +549,12 @@ def main():
         return
     if args.command == "extension-health":
         extension_health(args)
+        return
+    if args.command == "published-reference":
+        print(published_reference(args.extension, args.architecture, args.images))
+        return
+    if args.command == "check-artifacts":
+        check_artifacts(args)
         return
     {"stage": stage, "promote": promote, "stage-extension": stage_extension,
      "promote-extension": promote_extension}[args.command](args)
