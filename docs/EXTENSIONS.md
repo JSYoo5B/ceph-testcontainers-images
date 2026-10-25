@@ -365,7 +365,11 @@ What it does not claim:
 - Any other engine: rootless Docker, Podman, Docker Desktop and its Enhanced Container Isolation, or a Linux host with a different kernel or security profile. Run the functional check there before relying on the helper.
 - Targets other than the official images: the role images and custom Ceph images are not checked targets.
 - What the functional check does not cover: byte limits other than the packet bound, and IPv6 with extension headers. A tcpdump that keeps running after a target loss or a restart and a cut final record are accepted by the checker and covered by synthetic fixtures only; the hosted runs so far ended with tcpdump exiting and no cut record.
-- Anything about the captured traffic: decoding or judging Ceph Messenger traffic is left to the consumers.
+- Targets the helper cannot safely join: host-network targets, stopped targets and targets that share another container's namespace are unsupported. The helper never falls back to a host-wide capture, and a module refuses such a target instead of capturing on the host.
+- Following a restarted or replaced target: a restart gives the target a new network namespace, and the helper stays in the old one. The restart capture records that the helper did not follow, so a module that wants the traffic after a restart starts a new helper; automatic following is not part of contract 1.
+- Exact byte or duration limits: the helper enforces only the packet count (`-c`) and the module's stop. The byte bound is derived from the packet count and snaplen, and the time bound is the module's own stop deadline. Rotation, several files and pcapng are not part of contract 1, so there is no ordering or overwritten interval to report.
+- Interface, route, qdisc or target configuration: capture changes none of them, and it needs no `NET_ADMIN`; the helper holds `NET_RAW` alone and never runs privileged.
+- Anything about the captured traffic: decoding, decrypting or judging Ceph Messenger traffic is left to the consumers.
 
 #### Engine coverage
 
