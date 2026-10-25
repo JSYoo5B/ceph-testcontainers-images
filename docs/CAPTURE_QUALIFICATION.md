@@ -98,8 +98,10 @@ from this join.
 Each JSON/member is at most 8 MiB; each ZIP is at most 32 MiB with at most 128
 members and 64 MiB expanded content. Input metadata is capped at 128 jobs and
 128 artifacts. ZIPs are read without extraction; traversal, symlinks, encrypted
-members, duplicate report members and raw-pcap names/magic are refused. Error
-messages are bounded to 1024 characters. The input directory must remain stable
+members, duplicate report members and raw-pcap names/magic are refused.
+Unsupported ZIP compression and malformed DEFLATE members produce a failed audit
+that preserves earlier verified reports and is written to the requested JSON
+output. Error messages are bounded to 1024 characters. The input directory must remain stable
 during the audit; the tool does not attest API record authenticity or acquire an
 atomic snapshot of local files.
 

@@ -14,6 +14,7 @@ import re
 import stat
 import sys
 import zipfile
+import zlib
 
 import publish
 
@@ -171,8 +172,13 @@ class Audit:
                 if info.is_dir():
                     continue
                 need(info.filename not in files and info.file_size <= MAX_JSON, "duplicate/oversized ZIP member")
-                with archive.open(info) as member:
-                    payload = member.read(MAX_JSON + 1)
+                try:
+                    with archive.open(info) as member:
+                        payload = member.read(MAX_JSON + 1)
+                except (NotImplementedError, zlib.error) as error:
+                    # Keep malformed input failures inside the per-artifact audit
+                    # boundary without exposing decompressor/member input text.
+                    raise Invalid("unsupported or malformed ZIP compression") from error
                 need(len(payload) == info.file_size and len(payload) <= MAX_JSON, "oversized/incomplete ZIP member")
                 need(".pcap" not in path.name.lower() and payload[:4] not in publish.CAPTURE_MAGICS,
                      "raw capture in retained artifact")

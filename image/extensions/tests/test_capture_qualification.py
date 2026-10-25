@@ -5,11 +5,14 @@ import io
 import json
 from pathlib import Path
 import stat
+import struct
+import subprocess
 import sys
 import tempfile
 import unittest
 from unittest import mock
 import zipfile
+import zlib
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 import capture_qualification as q
@@ -150,6 +153,60 @@ class CaptureQualificationTests(unittest.TestCase):
         self.assertEqual(len(report["qualified_platforms"]), 2)
         self.assertFalse(report["live_registry_checked"])
         self.assertFalse(report["consumer_protocol_claimed"])
+
+    def malformed_zip(self, kind):
+        """Keep API identity valid while corrupting a real compressed member."""
+        name = "published-capture-extension-arm64-check"
+        self.repack(name)
+        meta = next(item for item in self.artifacts if item["name"] == name)
+        path = self.root / (str(meta["id"]) + ".zip")
+        data = bytearray(path.read_bytes())
+        with zipfile.ZipFile(io.BytesIO(data)) as archive:
+            info = archive.getinfo("extension-report.json")
+            central = archive.start_dir
+        local = info.header_offset
+        if kind == "unsupported":
+            struct.pack_into("<H", data, local + 8, 99)
+            struct.pack_into("<H", data, central + 10, 99)
+        elif kind == "deflate":
+            name_size, extra_size = struct.unpack_from("<HH", data, local + 26)
+            data[local + 30 + name_size + extra_size] = 7  # Reserved DEFLATE block type.
+        else:
+            struct.pack_into("<I", data, central + 16, info.CRC ^ 1)
+        path.write_bytes(data)
+        meta.update(digest=q.sha(data), size_in_bytes=len(data))
+        return path
+
+    def test_malformed_zip_retains_prior_reports(self):
+        for kind, exception in (("unsupported", NotImplementedError), ("deflate", zlib.error),
+                                ("crc", zipfile.BadZipFile)):
+            with self.subTest(kind=kind):
+                path = self.malformed_zip(kind)
+                with self.assertRaises(exception), zipfile.ZipFile(path) as archive:
+                    archive.read("extension-report.json")
+                report = self.audit()
+                self.assertEqual(report["status"], "failed")
+                self.assertEqual(len(report["verified_reports"]), 3)
+                self.assertEqual(len(report["qualified_platforms"]), 1)
+                self.assertEqual(report["qualified_platforms"][0]["platform"], "linux/amd64")
+                self.assertTrue(any(error.startswith("published arm64:") for error in report["errors"]))
+                self.assertTrue(all(len(error) <= 1024 for error in report["errors"]))
+
+    def test_malformed_zip_cli_writes_failed_json(self):
+        for kind in ("unsupported", "deflate", "crc"):
+            with self.subTest(kind=kind):
+                self.malformed_zip(kind)
+                self.write_metadata()
+                output = self.root / (kind + "-result.json")
+                result = subprocess.run([sys.executable, q.__file__, "--directory", str(self.root),
+                                         "--revision", self.revision, "--run-id", self.run_id,
+                                         "--output", str(output)], capture_output=True, text=True)
+                self.assertEqual(result.returncode, 1, result.stderr)
+                report = json.loads(output.read_text())
+                self.assertEqual(report["status"], "failed")
+                self.assertEqual(len(report["verified_reports"]), 3)
+                self.assertEqual([item["platform"] for item in report["qualified_platforms"]], ["linux/amd64"])
+                self.assertNotIn("Traceback", result.stderr)
 
     def test_unrelated_job_failure_does_not_replace_capture_job_evidence(self):
         self.run["conclusion"] = "failure"
