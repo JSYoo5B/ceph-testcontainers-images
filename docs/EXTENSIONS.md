@@ -57,6 +57,9 @@ The functional check below verifies these on every engine it runs on.
 
 ## packet-capture helper (contract 1)
 
+For an offline join of publication reports, candidates, promoted digests and
+published-image checks, see [Capture publication qualification](CAPTURE_QUALIFICATION.md).
+
 The packet-capture helper records packets in the network namespace of a target container, below Ceph. A module starts the helper in that namespace (Docker network mode `container:<target>`), runs `tcpdump` there and retrieves the capture file. The target keeps its own image and capabilities. The helper contains no Ceph component, and nothing in it decodes, decrypts or judges Ceph Messenger traffic: that belongs to the consumers ([ceph-testcontainers-go#52](https://github.com/JSYoo5B/ceph-testcontainers-go/issues/52) collects and structurally validates the files).
 
 This section defines contract 1, its quick check and its functional check, which [image/extension_check.py](../image/extension_check.py) runs. The reference helper is published as `extension-capture-v1` (see [Published helpers](#packet-capture-helper)). The functional check's results are evidence for the engines it ran on, not a support claim for others.
