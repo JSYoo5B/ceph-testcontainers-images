@@ -103,6 +103,9 @@ digests = set()
 for name, variant in variants.items():
     if not isinstance(variant, dict) or variant.get("intercept_syscall") is not (name == "intercept-syscall"):
         fail("intercept_syscall of " + name)
+    expected_flags = "-DINTERCEPT_SYSCALL" if name == "intercept-syscall" else ""
+    if variant.get("compile_flags") != expected_flags:
+        fail("compile_flags of " + name)
     path = variant.get("path")
     if not isinstance(path, str) or not path.startswith("/"):
         fail("path of " + name)

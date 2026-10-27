@@ -161,6 +161,35 @@ class BuildManifestOracleTests(unittest.TestCase):
             "wrong hash": lambda: mutate(lambda v: v["variants"]["default"].update(sha256="0" * 64)),
             "file changed after the manifest": lambda: mutate(tamper),
             "identical files": lambda: mutate(same_file),
+            "missing compile_flags": lambda: mutate(lambda v: v["variants"]["default"].pop("compile_flags")),
+            "missing compile_flags of the intercept variant":
+                lambda: mutate(lambda v: v["variants"]["intercept-syscall"].pop("compile_flags")),
+            "null compile_flags": lambda: mutate(lambda v: v["variants"]["default"].update(compile_flags=None)),
+            "non-string compile_flags": lambda: mutate(lambda v: v["variants"]["default"].update(compile_flags=[])),
+            "default variant declaring -DINTERCEPT_SYSCALL":
+                lambda: mutate(lambda v: v["variants"]["default"].update(compile_flags="-DINTERCEPT_SYSCALL")),
+            "intercept variant without -DINTERCEPT_SYSCALL":
+                lambda: mutate(lambda v: v["variants"]["intercept-syscall"].update(compile_flags="")),
+            "intercept variant with other flags":
+                lambda: mutate(lambda v: v["variants"]["intercept-syscall"].update(
+                    compile_flags="-DINTERCEPT_SYSCALL -DFAKE_SETTIME")),
+            "null sha256": lambda: mutate(lambda v: v["variants"]["default"].update(sha256=None)),
+            "missing sha256": lambda: mutate(lambda v: v["variants"]["default"].pop("sha256")),
+            "missing path": lambda: mutate(lambda v: v["variants"]["default"].pop("path")),
+            "null path": lambda: mutate(lambda v: v["variants"]["default"].update(path=None)),
+            "null intercept_syscall": lambda: mutate(lambda v: v["variants"]["default"].update(intercept_syscall=None)),
+            "null architecture": lambda: mutate(lambda v: v.update(architecture=None)),
+            "null source": lambda: mutate(lambda v: v.update(source=None)),
+            "null tag": lambda: mutate(lambda v: v["source"].update(tag=None)),
+            "empty repository": lambda: mutate(lambda v: v["source"].update(repository="")),
+            "null commit": lambda: mutate(lambda v: v["source"].update(commit=None)),
+            "uppercase tree": lambda: mutate(lambda v: v["source"].update(tree="A" * 40)),
+            "null toolchain": lambda: mutate(lambda v: v.update(toolchain=None)),
+            "null libc": lambda: mutate(lambda v: v["toolchain"].update(libc=None)),
+            "null variants": lambda: mutate(lambda v: v.update(variants=None)),
+            "null variant": lambda: mutate(lambda v: v["variants"].update(default=None)),
+            "variant list": lambda: mutate(lambda v: v.update(variants=[])),
+            "json null": lambda: "null",
         }
         for name, value in cases.items():
             with self.subTest(name):
