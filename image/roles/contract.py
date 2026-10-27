@@ -6,7 +6,7 @@ CORE_CLI = {"ceph", "ceph-conf"}
 EXECUTABLES = {
     "essential": CORE_CLI | {"ceph-mon", "ceph-mgr", "ceph-osd", "ceph-authtool", "monmaptool", "crushtool"},
     "client": CORE_CLI | {"rados", "rbd", "cryptsetup", "crushtool", "osdmaptool"},
-    "cephfs": CORE_CLI | {"ceph-mds", "cephfs-mirror"},
+    "cephfs": CORE_CLI | {"ceph-mds", "cephfs-mirror", "cephfs-journal-tool"},
     "rbd-aux": CORE_CLI | {"rados", "rbd", "rbd-mirror", "ceph-immutable-object-cache"},
     "rgw": CORE_CLI | {"radosgw", "radosgw-admin"},
 }
@@ -14,8 +14,14 @@ EXECUTABLES = {
 # package omits it; do not invent an upstream capability for that experiment.
 OPTIONAL_EXECUTABLES = {"client": {"ceph-dencoder"}}
 
-def executables(role, available):
-    return EXECUTABLES[role] | (OPTIONAL_EXECUTABLES.get(role, set()) & set(available))
+# Executables a package backend's source does not ship. Alpine packages the
+# CephFS recovery tools in ceph19-utils, which the experiment does not install
+# (installing it would also add ceph-dencoder and its denc plugins).
+SOURCE_LACKS = {"apk": {"cephfs-journal-tool"}}
+
+def executables(role, available, backend=None):
+    names = EXECUTABLES[role] | (OPTIONAL_EXECUTABLES.get(role, set()) & set(available))
+    return names - SOURCE_LACKS.get(backend, set())
 SCENARIOS = {
     "cluster-lifecycle": ("essential", "client"),
     "rbd": ("essential", "client"),
