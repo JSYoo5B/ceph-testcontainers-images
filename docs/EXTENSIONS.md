@@ -143,6 +143,53 @@ A capture can hold payloads, addresses and identifiers. Text and JSON redaction 
 
 This repository has no such policy, so CI never uploads a raw capture. The checker keeps capture files out of its report directory. Before CI uploads a capture report directory, `python3 image/publish.py check-artifacts --directory <dir>` fails when any file below it is named `*.pcap*` or starts with a classic pcap or pcapng magic number, and staging a capture helper for publication refuses a report directory that holds one. The report upload runs only when that check succeeded (`steps.raw-captures.outcome == 'success'`), so a failed check leaves the directory unuploaded, while a safe report is still uploaded after an earlier checker failure.
 
+## clock-probe helper (contract 1, quick check only)
+
+The clock-probe helper is the placement for the clock-skew and time-jump scratch work in [ceph-testcontainers-go#66](https://github.com/JSYoo5B/ceph-testcontainers-go/issues/66). That research needs a C compiler and a pinned libfaketime interposer inside an isolated scratch container, and the essential role images carry neither. The helper provides them, so that a fixture needs no toolchain on the runner, no matching of the image's libc and no network at test time. The helper contains no Ceph component. Nothing in it applies an offset to a Ceph daemon, decides what a clock fault means or qualifies a clock-fault backend: a module starts the helper as a scratch container of its own and runs its own probe in it.
+
+This section defines contract 1 and its quick check, which [image/extension_check.py](../image/extension_check.py) runs today. No helper image is published, no functional check exists and no engine support is claimed.
+
+### Image contract
+
+| Requirement | Detail |
+| --- | --- |
+| Platform | Linux `arm64` or `amd64`. The container runs as root and needs no capability and no network. |
+| Entry | The module overrides entrypoint and command; `sleep infinity` keeps an idle helper running. |
+| Executables on `PATH` | `sh`, `sleep`, `python3`, `gcc`, `nm`, `clock-probe-build-info` |
+| Compiler | `gcc --version` reports a version, and `gcc` builds and links a C program that calls `clock_gettime`. |
+| Build manifest | `clock-probe-build-info` prints one JSON object: `schema` 1; `source` with `repository`, `tag`, `commit` and `tree` (a 40-digit commit and tree); `toolchain` with `compiler` and `libc`; `architecture` (the machine that runs the helper); and `variants` with exactly `default` and `intercept-syscall`. |
+| Variants | Each variant has an absolute `path` to an ELF shared object, its `sha256`, `intercept_syscall` (a boolean) and `compile_flags` (the string `-DINTERCEPT_SYSCALL` for `intercept-syscall` and the empty string for `default`). The files differ, each hash is the hash of its file, and the two builds differ only in the `INTERCEPT_SYSCALL` compile switch. Only the variant with the switch exports `syscall`. |
+| Interposer load | Each variant loads through `LD_PRELOAD` with `FAKETIME_TIMESTAMP_FILE` naming a file that the caller owns and with `FAKETIME` unset. A `+0` file leaves the public realtime clock of that process within 5 seconds of an uninstrumented reader, and a `+3600` file moves it by 3600 seconds, within 5 seconds. |
+| Command supervision | `python3` imports `base64`, `ctypes`, `hashlib`, `json`, `os`, `platform`, `select`, `signal`, `subprocess`, `sys`, `tempfile` and `time`. |
+| Filesystem | `/tmp` is writable. |
+
+`clock-probe-build-info` exists so that a probe records the interposer's identity (commit, `INTERCEPT_SYSCALL` setting and hash) from the image itself and not from a tag name or a label. The reference helper also carries the labels `io.ceph-testcontainers.extension=clock-probe` and `io.ceph-testcontainers.extension.contract=1`. Other helpers do not need them, and the checker does not rely on them.
+
+### Quick check
+
+```sh
+make clock-probe-image                    # build ceph-testcontainers:extension-clock-probe
+make clock-probe-check                    # its quick check
+python3 image/extension_check.py --extension clock-probe --image my-registry/clock-probe:dev
+```
+
+The quick probe ([check-clock-probe.sh](../image/extensions/clock-probe/check-clock-probe.sh)) runs as root in a container with no network and no capability. Besides the executables, compiler and manifest checks, it compiles a small program, preloads each variant with a timestamp file that the probe owns, and requires the public `clock_gettime(CLOCK_REALTIME)` of that one process to follow the `+0` and `+3600` files. `extension-report.json` keeps every check and the gcc version, and `quick.log` keeps the manifest summary and the measured offset intervals.
+
+The load check uses a static file. It does not update a file while a process runs, so it says nothing about update latency or about restoring a running process.
+
+### Reference helper
+
+[image/extensions/clock-probe](../image/extensions/clock-probe) builds on the pinned `debian:bookworm-slim` base of the Debian role images with Debian's `build-essential`, `binutils` and `python3`. [build-libfaketime.sh](../image/extensions/clock-probe/build-libfaketime.sh) fetches libfaketime `v0.9.12` once during the image build as the single pinned commit `3ccdd344aadf1e317156fa5fb7c881f2c4404778`, fails the build when the fetched commit differs, builds `libfaketime.so.1` without and with `-DINTERCEPT_SYSCALL`, writes the manifest, and removes the source tree and its fetch tools. The image carries libfaketime's license (GPL-2.0) at `/usr/share/doc/libfaketime/copyright`, and `/usr/share/ceph-testcontainers/SOURCES.txt` points to the commit and, for the Debian packages, to their source packages. CI builds it and runs the quick check on native runners of both architectures; it is not published.
+
+### What the helper does not cover
+
+- Whether the four clock routes of the scratch probe (public `clock_gettime`, libc `syscall`, the vDSO and a raw syscall) shift or bypass the interposer. The quick check measures the public realtime path of one process only.
+- A probe binary, the decoder of its output, or any native scenario of the issue. Those belong to the module and to the later steps of the issue.
+- A live update of the offset file, update latency, restoration or disposal of an instrumented process.
+- Any Ceph daemon or client, a time namespace, a virtual machine or a kernel clock fault.
+- A functional check, publication and engine support. They need their own decision and change.
+- The interposer is built for glibc on Debian. A different libc needs its own helper or a changed build, and a build on another base can change the ABI that the module sees.
+
 ## Checking an extension image
 
 Requires Python 3.9 or later and a Docker engine with API 1.49 or later. The checker never builds or pulls images.
