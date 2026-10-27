@@ -1,0 +1,5 @@
+#!/bin/sh
+# Print the build manifest of the libfaketime variants as JSON: the pinned
+# source, each variant's path, SHA-256 and INTERCEPT_SYSCALL setting, the
+# compiler, the C library and the architecture.
+exec cat /opt/ceph-testcontainers/libfaketime/build.json

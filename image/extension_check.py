@@ -25,6 +25,11 @@ readiness line, the selected flow in both directions without an excluded
 flow, a stop by SIGTERM with the file flushed and the statistics, a valid
 empty capture, the packet bound, and that an invalid filter, a missing
 interface and a missing NET_RAW are refused, each with its own kind.
+
+The clock-probe helper has only the quick check so far: its probe runs as root
+without capabilities or network and checks the compiler, the build manifest of
+the two pinned libfaketime builds, and that each build loads and shifts one
+clock path of one process.
 """
 import argparse
 from datetime import datetime, timezone
@@ -47,11 +52,14 @@ HERE = Path(__file__).resolve().parent
 # Each extension's quick probe, the user that runs it and the capabilities it
 # gets in a container without a network: the netem helper runs as root with
 # none; the capture helper as the unprivileged user of its image with
-# NET_RAW, which its tcpdump needs to start at all.
+# NET_RAW, which its tcpdump needs to start at all; the clock-probe helper runs
+# as root with none.
 EXTENSIONS = {"netem": {"contract": "1", "probe": HERE / "extensions" / "netem" / "check-netem.sh", "user": "0:0",
                         "caps": (), "published": True},
               "capture": {"contract": "1", "probe": HERE / "extensions" / "capture" / "check-capture.sh",
-                          "user": None, "caps": ("NET_RAW",), "published": True}}
+                          "user": None, "caps": ("NET_RAW",), "published": True},
+              "clock-probe": {"contract": "1", "probe": HERE / "extensions" / "clock-probe" / "check-clock-probe.sh",
+                              "user": "0:0", "caps": (), "published": False}}
 # The helpers that image/publish.py publishes, each gated by its own
 # functional check on both architectures.
 PUBLISHED = tuple(name for name, spec in EXTENSIONS.items() if spec["published"])
@@ -430,6 +438,9 @@ def arguments(argv=None):
         parser.error("--functional requires at least one --target")
     if args.selector and not args.functional:
         parser.error("--selector requires --functional")
+    if args.extension == "clock-probe" and (args.functional or args.target):
+        parser.error("--extension clock-probe has only the quick check so far; --functional and --target belong to "
+                     "netem and capture")
     if args.extension != "netem" and any(getattr(args, option) for option in NETEM_ONLY):
         parser.error("--extension " + args.extension + " has no --selector, --rate or --packet-faults; "
                      "they belong to netem")
