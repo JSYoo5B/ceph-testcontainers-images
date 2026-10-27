@@ -82,15 +82,21 @@ fsmirror=false
 osd=false
 rgw=false
 mds=false
+fstools=false
 case "$role" in
     essential) core=true; osd=true ;;
     client) client=true ;;
-    cephfs) mds=true; fsmirror=true ;;
+    cephfs) mds=true; fsmirror=true; fstools=true ;;
     rbd-aux) cache=true ;;
     rgw) rgw=true ;;
-    all) core=true; client=true; cache=true; fsmirror=true; osd=true; rgw=true; mds=true ;;
+    all) core=true; client=true; cache=true; fsmirror=true; osd=true; rgw=true; mds=true; fstools=true ;;
     *) exit 2 ;;
 esac
+# Alpine packages the CephFS recovery tools in ceph19-utils, which the
+# experimental Alpine source does not install; its contract omits them.
+if "$fstools" && test -r /etc/os-release && (. /etc/os-release; test "${ID:-}" = alpine); then
+    fstools=false
+fi
 
 version() {
     binary=$1
@@ -348,6 +354,9 @@ if "$rgw"; then
 fi
 if "$mds"; then
     check version:ceph-mds version ceph-mds
+fi
+if "$fstools"; then
+    check version:cephfs-journal-tool version cephfs-journal-tool
 fi
 printf 'COMPLETE\t%s\n' "$role"
 exit "$failed"

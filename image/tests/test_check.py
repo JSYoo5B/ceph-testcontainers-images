@@ -288,3 +288,26 @@ class ParentCachePluginProbeTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class CephfsRecoveryToolQuickCheckTests(unittest.TestCase):
+    """Runs the role gating and the cephfs-journal-tool check with a recording check()."""
+
+    def checks(self, role):
+        script = (check.HERE / "check-runtime.sh").read_text()
+        gating = script[script.index("core=false\n"):script.index("version() {")]
+        tail = script[script.index('if "$fstools"; then\n    check version'):script.index("printf 'COMPLETE")]
+        program = 'role=$1\ncheck() { echo "$1"; }\n' + gating + tail
+        result = subprocess.run(["/bin/sh", "-c", program, "sh", role], capture_output=True, text=True, timeout=60)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return result.stdout.split()
+
+    def test_only_cephfs_and_all_check_the_tool(self):
+        for role in ("cephfs", "all"):
+            self.assertIn("version:cephfs-journal-tool", self.checks(role), role)
+        for role in ("essential", "client", "rbd-aux", "rgw"):
+            self.assertNotIn("version:cephfs-journal-tool", self.checks(role), role)
+
+    def test_check_failure_is_reported_as_a_loading_failure(self):
+        script = (check.HERE / "check-runtime.sh").read_text()
+        self.assertIn("library-load:*|class-load:*|version:*) kind=loading_failure", script)

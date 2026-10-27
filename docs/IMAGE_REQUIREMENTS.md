@@ -33,7 +33,7 @@ explicit role; only an explicit all selection supplies every role.
 | --- | --- |
 | essential | MON, MGR, OSD; ceph CLI, keyring/monmap bootstrap, process inspection, release always-on MGR modules and volumes/rbd_support/mirroring/snap_schedule with dependencies; BlueStore, rbd/rgw/cephfs/hello/lock classes, compressor and erasure-code plugins |
 | client | ceph/rados/rbd and offline CRUSH/OSD map diagnostics (`crushtool`, `osdmaptool`); Python rados/rbd/cephfs, ceph_argparse/ceph_daemon; libradosstriper, librbd LUKS1/LUKS2, libcryptsetup and cryptsetup executable; command/process utilities |
-| cephfs | MDS and cephfs-mirror, their libraries and local ceph CLI |
+| cephfs | MDS, cephfs-mirror and the offline journal tool `cephfs-journal-tool`, their libraries and local ceph CLI |
 | rbd-aux | rbd-mirror and cache-capable client runtime: rados/rbd CLI/bindings, ceph-immutable-object-cache and the librbd parent_cache plugin, local ceph CLI |
 | rgw | RGW Beast/TLS, radosgw-admin and readlink; ceph/Python runtime for independently invoked per-zone setup containers |
 | all | Union of the five responsibilities |
@@ -95,6 +95,7 @@ The table lists what a testcontainers module does with each component. Rows mark
 | `radosgw-admin` | `rgw` | RGW users, keys, buckets and placement created from the gateway container |
 | `readlink` | `rgw` | Confirming that the gateway owns the listening socket on host networks and TLS listeners |
 | `ceph-mds` | `cephfs` | Active, standby and standby-replay MDS daemons |
+| `cephfs-journal-tool` | `cephfs` | Offline MDS journal inspection, export and header backup, run from a cephfs container against a stopped or failed filesystem |
 
 Daemons that are not requested are not started. An image with `rbd-mirror` does not start a mirror daemon in a single cluster, and an `all` image used for OSDs does not start MGR or RGW processes.
 

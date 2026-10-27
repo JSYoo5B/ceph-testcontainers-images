@@ -87,6 +87,7 @@ the image's effective paths rather than a distribution's fixed layout.
 | OSD plugin files | essential | Query `plugin_dir` and require shared objects in the compressor and erasure-code groups; verifies plugin files are present, without claiming every plugin has loaded or processed data |
 | Gateway prerequisites | rgw | Require `readlink` on PATH and run `radosgw`/`radosgw-admin` version checks; verifies required gateway/admin executables start and the socket-inspection utility is available |
 | Metadata-server prerequisite | cephfs | Run `ceph-mds --version`; verifies the MDS executable and its startup dependency closure load |
+| CephFS journal tool | cephfs | Run `cephfs-journal-tool --version` and parse release/commit; verifies the executable and its shared-library closure load. It does not read or modify a journal. Skipped for the Alpine experiment, whose contract omits the tool |
 
 OSD object-class loading does not require Python or a compiler in the OSD
 image. Class method execution, encrypted I/O and striper data operations

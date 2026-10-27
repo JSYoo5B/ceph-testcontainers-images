@@ -290,6 +290,12 @@ def role_metadata_probes(probes, path_members, materialized, role):
             if role in path_members.get(canonical_destination(path, materialized), set())}
 
 
+def role_files(role, inventory, selected, extras):
+    """Files a role may contain: its package closure and extras, minus excluded executables."""
+    files = set(extras).union(*(inventory[p]["files"] for p in selected))
+    return {p for p in files if include_path(role, p)}
+
+
 def main():
     output = Path(os.environ.get("OUTPUT_ROOT", "/role-output"))
     if not output.is_absolute():
@@ -323,8 +329,7 @@ def main():
     for role in ROLES:
         licenses = set().union(*(inventory[p]["licenses"] for p in selected[role]))
         licenses.add(COPYING)
-        files = set(extras).union(*(inventory[p]["files"] for p in selected[role]))
-        files = {p for p in files if include_path(role, p)}
+        files = role_files(role, inventory, selected[role], extras)
         files.update(licenses)
         for path in plan_source_paths(files, licenses, materialized):
             path_members.setdefault(path, set()).add(role)

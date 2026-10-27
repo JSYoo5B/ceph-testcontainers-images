@@ -14,7 +14,7 @@ def configure(kind):
     packaging.ROLES = contract.ROLES
     packaging.ROOT_PACKAGES = backend.roots(kind)
     executables = {role:contract.executables(role,
-        {name for name in contract.OPTIONAL_EXECUTABLES.get(role,set()) if shutil.which(name)})
+        {name for name in contract.OPTIONAL_EXECUTABLES.get(role,set()) if shutil.which(name)}, kind)
         for role in contract.ROLES}
     packaging.REQUIRED_EXECUTABLES = {
         role: tuple('/usr/sbin/cryptsetup' if name=='cryptsetup' else '/usr/bin/'+name
