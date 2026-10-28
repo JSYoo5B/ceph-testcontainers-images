@@ -2659,11 +2659,12 @@ def ext_observation(variant, text, size=CAPTURE_RESPONSE, header=EXT_HEADER):
     def inconclusive(reason):
         return {"variant": variant, "outcome": "inconclusive", "reason": reason}
 
-    lines = text.strip().splitlines() if isinstance(text, str) else []
+    # The whole output must be exactly one JSON document: noise before or
+    # after it, or a second record, leaves the observation inconclusive.
     try:
-        raw = json.loads(lines[-1])
-    except (IndexError, ValueError):
-        return inconclusive("no JSON record")
+        raw = json.loads(text.strip()) if isinstance(text, str) else None
+    except ValueError:
+        return inconclusive("the output is not exactly one JSON record")
     if not isinstance(raw, dict) or set(raw) != {"uid", "euid", "caps", "set", "readback", "exchange"}:
         return inconclusive("unexpected record keys")
     caps, option, readback, exchange = raw["caps"], raw["set"], raw["readback"], raw["exchange"]

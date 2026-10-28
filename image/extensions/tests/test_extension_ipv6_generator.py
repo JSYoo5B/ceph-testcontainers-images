@@ -76,6 +76,24 @@ class OracleTests(unittest.TestCase):
             with self.subTest(name=name):
                 self.assertEqual(extension_check.ext_observation("net_raw_user", value)["outcome"], "inconclusive")
 
+    def test_output_other_than_exactly_one_record_is_inconclusive(self):
+        record, other = text(ADMITTED), text(REFUSED)
+        for name, value in (("prefixed noise", "unexpected probe output\n" + record), ("prefixed null", "null\n" + record),
+                            ("prefixed empty object", "{}\n" + record), ("two identical records", record + record),
+                            ("two different records", other + record), ("trailing noise", record + "done\n"),
+                            ("trailing null", record + "null\n"), ("two records on one line", record.strip() * 2),
+                            ("a warning before it", "Warning: x\n\n" + record)):
+            with self.subTest(name=name):
+                self.assertEqual(extension_check.ext_observation("net_raw_user", value)["outcome"], "inconclusive")
+        # Surrounding whitespace around the one record is fine.
+        self.assertEqual(extension_check.ext_observation("net_raw_user", "\n  " + record + "\n\n")["outcome"],
+                         "admitted")
+        # A conclusive summary needs every variant to be one clean record.
+        noisy = {"net_raw_user": "noise\n" + default_ext_output("net_raw_user")}
+        observations = {variant: extension_check.ext_observation(variant, noisy.get(variant, default_ext_output(variant)))
+                        for variant in extension_check.EXT_VARIANTS}
+        self.assertEqual(extension_check.ext_summary(observations), {"capability_free_refused": None, "admitted": None})
+
     def test_every_missing_null_or_wrong_typed_field_is_inconclusive(self):
         nested = {"caps": ADMITTED["caps"], "set": ADMITTED["set"], "exchange": ADMITTED["exchange"]}
         wrong = (None, True, "x", 1.5, [], {}, -1)
