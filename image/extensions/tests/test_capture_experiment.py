@@ -278,12 +278,30 @@ class LauncherTests(unittest.TestCase):
         self.assertEqual(list(seen[0][seen[0].index("/tmp/c") + 1:]),
                          experiment.tcpdump_argv("/tmp/c", "eth0", "tcp port 7000", 9)[1:])
 
+    # The supervisor needs exactly these modules; each must import under -I.
+    SUPERVISOR_MODULES = {"hashlib", "json", "resource", "signal", "subprocess", "sys", "threading", "time"}
+
     def test_the_supervisor_uses_only_the_standard_library(self):
         tree = ast.parse(experiment.SUPERVISOR_SOURCE)
         names = {alias.name.split(".")[0] for node in ast.walk(tree) if isinstance(node, ast.Import)
                  for alias in node.names}
         names |= {node.module.split(".")[0] for node in ast.walk(tree) if isinstance(node, ast.ImportFrom)}
-        self.assertLessEqual(names, set(sys.stdlib_module_names))
+        self.assertLessEqual(names, self.SUPERVISOR_MODULES)
+        for name in sorted(names):
+            with self.subTest(module=name):
+                done = subprocess.run([sys.executable, "-I", "-c", "import " + name], capture_output=True)
+                self.assertEqual(done.returncode, 0, done.stderr)
+
+    def test_the_new_files_stay_within_the_oldest_python_that_ci_uses(self):
+        # CI runs the unit tests on Python 3.9 (.github/workflows/test.yml); the helper has 3.11.
+        files = [Path(__file__), Path(experiment.__file__), Path(supervisor.__file__)]
+        newer = ("stdlib_module_names", "bit_count", "strict=", "slots=True", "kw_only", "TaskGroup", "tomllib")
+        for path in files:
+            text = path.read_text()
+            with self.subTest(path=path.name):
+                ast.parse(text, feature_version=(3, 9))
+                if path != Path(__file__):  # this file names the words
+                    self.assertEqual([word for word in newer if word in text], [])
 
     def test_the_source_runs_as_the_helper_runs_it(self):
         config = experiment.supervisor_config([sys.executable, "-c", "import sys; sys.stderr.write('ready\\n')"],
