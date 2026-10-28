@@ -38,6 +38,7 @@ docs/EXTENSIONS.md           Opt-in extension images and their contracts
 image/check.py               Checker for any local image
 image/check-runtime.sh       Quick check probe, run inside each image
 image/extension_check.py     Checker for opt-in extension images
+image/capture_experiment*.py Unwired capture file-size-limit experiment supervisor
 image/extensions/            Extension images and their probes
 image/publish.py             Publish CI-tested images and promote release tags
 image/releases.py            Checked releases and their pinned inputs
