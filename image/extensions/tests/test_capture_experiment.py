@@ -23,6 +23,9 @@ PREFIX = HEADER + RECORD * 2
 STATISTICS = b"3 packets captured\n3 packets received by filter\n0 packets dropped by kernel\n"
 
 
+OBSERVED = {"default": "default", "ignore": "ignored"}
+
+
 def receipt(extra=5, sigxfsz="default", code=-25, sent=(), running=False, stderr=STATISTICS, prefix=PREFIX):
     size = len(prefix)
     text = stderr.decode()
@@ -35,7 +38,7 @@ def receipt(extra=5, sigxfsz="default", code=-25, sent=(), running=False, stderr
                    {"op": "limit", "prefix": size, "extra": extra, "status": "applied", "bytes": size + extra,
                     "size_before": size, "size_after": size, "prefix_sha256": hashlib.sha256(prefix).hexdigest(),
                     "own_before": [-1, -1], "own_after": [-1, -1], "before": [-1, -1],
-                    "after": [size + extra, size + extra], "sigxfsz": sigxfsz}],
+                    "after": [size + extra, size + extra], "sigxfsz": OBSERVED[sigxfsz]}],
         "exit": {"returncode": code, "signal": None, "running": running, "reaped_with_sigkill": running,
                  "sent": list(sent)},
         "stderr": {"head": text, "tail": "", "total": len(text), "retained": len(text), "overflow": False},
@@ -202,9 +205,20 @@ class OracleNegativeControlTests(unittest.TestCase):
                 self.inconclusive(changed, reason=reason.strip())
 
     def test_an_unknown_sigxfsz_disposition_is_never_accepted(self):
-        changed = receipt()
-        changed["events"][1]["sigxfsz"] = "unknown"
-        self.inconclusive(changed, reason="SIGXFSZ is unknown")
+        for mode, observed in (("default", "unknown"), ("default", "caught"), ("default", "ignored"),
+                               ("ignore", "unknown"), ("ignore", "caught"), ("ignore", "default"),
+                               ("ignore", "ignore")):
+            with self.subTest(mode=mode, observed=observed):
+                changed = receipt(sigxfsz=mode, code=0, sent=["SIGTERM"])
+                changed["events"][1]["sigxfsz"] = observed
+                self.inconclusive(changed, reason="SIGXFSZ is %s" % observed)
+
+    def test_each_requested_mode_matches_only_its_observed_disposition(self):
+        for mode, observed in (("default", "default"), ("ignore", "ignored")):
+            with self.subTest(mode=mode):
+                changed = receipt(sigxfsz=mode, code=0, sent=["SIGTERM"])
+                self.assertEqual(changed["events"][1]["sigxfsz"], observed)
+                self.assertEqual(experiment.assess(changed, PREFIX + RECORD[:5])["verdict"], "observed")
 
     def test_file_rules(self):
         data = PREFIX + RECORD[:5]
@@ -407,10 +421,46 @@ class SupervisorTests(unittest.TestCase):
         found, _, _ = self.run_supervisor([{"op": "limit", "prefix": len(PREFIX), "extra": 17}], module=module,
                                           child=FakeChild(code=-25, stderr=STATISTICS), sigxfsz="default")
         found = json.loads(json.dumps(found))
-        found["events"][0]["sigxfsz"] = "default"  # the status file is a stand-in for /proc
         result = experiment.assess(found, PREFIX + RECORD[:17])
         self.assertEqual((result["verdict"], result["termination"], result["cut_record"]),
                          ("observed", "killed_by_SIGXFSZ", "body"), result)
+
+    def test_a_genuine_receipt_of_each_mode_round_trips_through_the_oracle(self):
+        for mode, ignored, code in (("default", False, -25), ("ignore", True, 0)):
+            with self.subTest(mode=mode):
+                self.status(ignored)
+                child = FakeChild(code=code, stderr=STATISTICS)
+                sent = [{"op": "signal", "name": "SIGTERM"}] if mode == "ignore" else []
+                if mode == "ignore":
+                    child = FakeChild(running=True, stderr=STATISTICS)
+                found, _, _ = self.run_supervisor([{"op": "limit", "prefix": len(PREFIX), "extra": 5}] + sent,
+                                                  child=child, module=FakeResource(), sigxfsz=mode)
+                result = experiment.assess(json.loads(json.dumps(found)), PREFIX + RECORD[:5])
+                self.assertEqual((result["verdict"], result["reasons"]), ("observed", []))
+
+    def test_a_disconnected_output_still_reaps_the_child_and_keeps_the_failure(self):
+        for child in (FakeChild(running=True), FakeChild(running=True, stderr=STATISTICS)):
+            def emit(event):
+                raise BrokenPipeError(32, "closed")
+
+            popen = mock.Mock(return_value=child)
+            with self.assertRaises(BrokenPipeError):
+                supervisor.run({"argv": ["tcpdump"], "pcap": str(self.pcap), "sigxfsz": "ignore"},
+                               [{"op": "wait_exit", "timeout": 0}, {"op": "wait_exit", "timeout": 0}], emit,
+                               popen=popen, module=None, proc=str(self.proc))
+            self.assertEqual(child.returncode, -9)
+            self.assertTrue(child.stderr.closed)
+
+    def test_a_cleanup_failure_does_not_replace_the_output_failure(self):
+        child = FakeChild(running=True)
+        child.kill = mock.Mock(side_effect=ProcessLookupError(3, "gone"))
+
+        def emit(event):
+            raise BrokenPipeError(32, "closed")
+
+        with self.assertRaises(BrokenPipeError):
+            supervisor.run({"argv": ["tcpdump"], "sigxfsz": "ignore"}, [{"op": "wait_exit", "timeout": 0}], emit,
+                           popen=mock.Mock(return_value=child), module=None, proc=str(self.proc))
 
     def test_a_file_that_is_not_the_prefix_is_refused_and_the_limit_stays(self):
         module = FakeResource()

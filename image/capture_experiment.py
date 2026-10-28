@@ -24,6 +24,8 @@ import extension_check
 SUPERVISOR_SOURCE = (Path(__file__).resolve().parent / "capture_experiment_supervisor.py").read_text()
 SCHEMA = "capture-experiment-supervisor/v1"
 SIGXFSZ_NUMBER = 25
+# The disposition that /proc reports for each requested mode.
+OBSERVED_DISPOSITION = {"default": "default", "ignore": "ignored"}
 HEX_DIGEST = re.compile(r"[0-9a-f]{64}")
 
 
@@ -127,7 +129,7 @@ def limit_problems(limit, launcher):
         problems.append("the file was not stable at the prefix of %d bytes" % prefix)
     if not isinstance(limit.get("prefix_sha256"), str) or not HEX_DIGEST.fullmatch(limit["prefix_sha256"]):
         problems.append("the prefix has no SHA-256")
-    if limit.get("sigxfsz") != launcher["sigxfsz"]:
+    if limit.get("sigxfsz") != OBSERVED_DISPOSITION[launcher["sigxfsz"]]:
         problems.append("the child's SIGXFSZ is %s, requested %s" % (limit.get("sigxfsz"), launcher["sigxfsz"]))
     return problems
 

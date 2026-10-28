@@ -158,6 +158,18 @@ def signal_name(number):
         return "SIG%d" % number
 
 
+def reap(child, reader):
+    """End the child if it still runs, wait for it and close its pipe."""
+    try:
+        if child.poll() is None:
+            child.kill()
+            child.wait()
+    finally:
+        reader.join(READER_WAIT)
+        if not reader.is_alive():
+            child.stderr.close()
+
+
 def run(config, commands, emit, popen=subprocess.Popen, module=resource, proc="/proc"):
     """Run the child under the commands and return the receipt."""
     sigxfsz = config["sigxfsz"]
@@ -177,34 +189,38 @@ def run(config, commands, emit, popen=subprocess.Popen, module=resource, proc="/
         events.append(event)
         emit(event)
 
-    for command in commands:
-        name = command.get("op") if isinstance(command, dict) else None
-        try:
-            if name == "wait_stderr":
-                record(wait_stderr(command, retention))
-            elif name == "limit":
-                record(apply_limit(command, child, config.get("pcap"), module, proc))
-            elif name == "signal" and command.get("name") in SIGNALS:
-                alive = child.poll() is None
-                if alive:
-                    child.send_signal(getattr(signal, command["name"]))
-                    sent.append(command["name"])
-                record({"op": "signal", "name": command["name"], "sent": alive})
-            elif name == "wait_exit":
-                wait_exit(child, float(command.get("timeout", 5)))
-                record({"op": "wait_exit", "exited": child.poll() is not None})
-            else:
+    try:
+        for command in commands:
+            name = command.get("op") if isinstance(command, dict) else None
+            try:
+                if name == "wait_stderr":
+                    record(wait_stderr(command, retention))
+                elif name == "limit":
+                    record(apply_limit(command, child, config.get("pcap"), module, proc))
+                elif name == "signal" and command.get("name") in SIGNALS:
+                    alive = child.poll() is None
+                    if alive:
+                        child.send_signal(getattr(signal, command["name"]))
+                        sent.append(command["name"])
+                    record({"op": "signal", "name": command["name"], "sent": alive})
+                elif name == "wait_exit":
+                    wait_exit(child, float(command.get("timeout", 5)))
+                    record({"op": "wait_exit", "exited": child.poll() is not None})
+                else:
+                    record({"op": "invalid"})
+            except (TypeError, ValueError):
                 record({"op": "invalid"})
-        except (TypeError, ValueError):
-            record({"op": "invalid"})
+    except BaseException:
+        # The output or the commands failed: the owned child must not outlive
+        # the supervisor. The original failure is the one that propagates.
+        try:
+            reap(child, reader)
+        except OSError:
+            pass
+        raise
     wait_exit(child, FINAL_WAIT)
     running = child.poll() is None
-    if running:
-        child.kill()
-        child.wait()
-    reader.join(READER_WAIT)
-    if not reader.is_alive():
-        child.stderr.close()
+    reap(child, reader)
     code = child.returncode
     receipt["exit"] = {"returncode": code, "signal": signal_name(-code) if code < 0 else None,
                        "running": running, "reaped_with_sigkill": running, "sent": sent}
