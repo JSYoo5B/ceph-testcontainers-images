@@ -509,6 +509,23 @@ class PartialCaptureTests(unittest.TestCase):
         self.assertNotEqual(self.restart_problems(capture_file(*RESTART_FLOW), 0, READY_LINE)[1], [])
 
 
+def ext_output(caps="0000000000000000", uid=1000, set_error=(1, "EPERM"), readback=None, exchange=None):
+    """One generator's output as the probe prints it: the set refused with
+    set_error, or (set_error None) the readback and exchange given."""
+    option = {"ok": True, "errno": None, "name": None} if set_error is None else \
+        {"ok": False, "errno": set_error[0], "name": set_error[1]}
+    return json.dumps({"uid": uid, "euid": uid, "caps": {"CapEff": caps, "CapPrm": caps, "CapBnd": "0000000000002000"},
+                       "set": option, "readback": readback, "exchange": exchange}) + "\n"
+
+
+def default_ext_output(variant):
+    """What Linux does: refuse without an effective CAP_NET_RAW, admit with it."""
+    if variant == "capability_free":
+        return ext_output()
+    return ext_output("0000000000002000", 0 if variant == "net_raw_root" else 1000, None,
+                      extension_check.EXT_HEADER.hex(), {"received": 1000, "complete": True, "error": None})
+
+
 class FakeCaptureEngine:
     """A Docker stand-in for one capture scenario; each option breaks one step."""
 
@@ -517,8 +534,12 @@ class FakeCaptureEngine:
                  killed_status=137, killed_statistics=False, cut_tail=False, loss_end="exited", loss_status=1,
                  interface_survives=False, keeps_ipv4=False, no_ipv6=False, restart_end="exited", restart_status=1,
                  restart_leaks=False, follows=False, interface_survives_restart=False, same_sandbox=False,
-                 renewed_address=TARGET4):
+                 renewed_address=TARGET4, generator=None, generator_run_fails=False):
         self.test, self.uid, self.early_exit = test, uid, early_exit
+        # The generator-admission probe's output by variant (None: the
+        # kernel's behavior, see ext_output), and whether starting an
+        # admitted generator fails.
+        self.generator, self.generator_run_fails = generator or {}, generator_run_fails
         self.invalid_filter_refused, self.net_raw_refused = invalid_filter_refused, net_raw_refused
         self.keeps_excluded = keeps_excluded
         # (exit code, output, state) of the control without NET_RAW.
@@ -586,6 +607,8 @@ class FakeCaptureEngine:
             base = command[1].split(":", 1)[1][:-len(".pcap")]
             Path(command[2]).write_bytes(self.captures[base]["data"])
             return 0, ""
+        if command[0] == "run" and role.startswith("netraw") and self.generator_run_fails:
+            raise extension_check.CheckError("Command failed: docker run: cannot start")
         if command[0] != "exec":
             return 0, ""
         if command[1] == "--detach":
@@ -608,6 +631,10 @@ class FakeCaptureEngine:
             return 0, "[]" if gone else json.dumps([{"name": "eth0", "index": 5}])
         if script == extension_check.READY:
             return 0, ""
+        if script == extension_check.EXT_PROBE:
+            variant = {"peer6": "capability_free", "netrawuser6": "net_raw_user", "netrawroot6": "net_raw_root"}[role]
+            self.test.assertEqual(command[5:], (TARGET6, str(PORT), "1000", extension_check.EXT_HEADER.hex()))
+            return 0, self.generator.get(variant, default_ext_output(variant))
         if script == extension_check.CAPTURE_EXCHANGE:
             self.captures[self.latest]["exchanged"] = True
             self.exchanges.append((self.latest, command[5], int(command[7]), self.target_restarted))
