@@ -33,6 +33,7 @@ clock path of one process.
 """
 import argparse
 from datetime import datetime, timezone
+import errno
 import hashlib
 import ipaddress
 import json
@@ -2588,6 +2589,170 @@ def compile_filter(capturer, peer):
         raise CheckError("The filter did not compile: " + text.strip()[:500], classify_capture(code, text))
 
 
+# The generator-admission probe for a later IPv6 extension-header capture. It
+# only observes and never gates: the sender of the proposed flow must set one
+# eight-byte Destination Options header (TCP next header, length 0, PadN of
+# four zero bytes) with IPV6_DSTOPTS, which Linux allows only with CAP_NET_RAW
+# in the network namespace's user namespace (ipv6_set_opt_hdr in
+# net/ipv6/ipv6_sockglue.c), and read it back byte for byte. Emission on the
+# wire is not observed here.
+EXT_HEADER = bytes([6, 0, 1, 4, 0, 0, 0, 0])
+EXT_OPTION = 59  # IPV6_DSTOPTS in include/uapi/linux/in6.h
+CAP_NET_RAW = 13
+# Each generator variant: its capabilities and user, over what the peer
+# already is. capability_free is the peer of the capture scenario itself.
+EXT_VARIANTS = {"capability_free": [], "net_raw_user": ["--cap-add=NET_RAW"],
+                "net_raw_root": ["--user=0:0", "--cap-add=NET_RAW"]}
+EXT_OUTCOMES = ("refused", "set_failed", "readback_mismatch", "exchange_incomplete", "admitted", "inconclusive")
+
+# Runs in a generator: argv is the target's IPv6 address, the port, the answer
+# size and the header in hex. It sets the header on a fresh TCP socket, reads
+# it back, and only if the set succeeded completes the request and answer.
+EXT_PROBE = """import errno, json, os, socket, sys
+host, port, size, header = sys.argv[1], int(sys.argv[2]), int(sys.argv[3]), bytes.fromhex(sys.argv[4])
+option = getattr(socket, "IPV6_DSTOPTS", 59)
+caps = {}
+with open("/proc/self/status") as f:
+    for line in f:
+        key, _, value = line.partition(":")
+        if key in ("CapEff", "CapPrm", "CapBnd"):
+            caps[key] = value.strip()
+out = {"uid": os.getuid(), "euid": os.geteuid(), "caps": caps, "set": None, "readback": None, "exchange": None}
+s = socket.socket(socket.AF_INET6)
+try:
+    s.setsockopt(socket.IPPROTO_IPV6, option, header)
+    out["set"] = {"ok": True, "errno": None, "name": None}
+except OSError as error:
+    out["set"] = {"ok": False, "errno": error.errno, "name": errno.errorcode.get(error.errno)}
+if out["set"]["ok"]:
+    out["readback"] = s.getsockopt(socket.IPPROTO_IPV6, option, 64).hex()
+    token = b"capture-response-%d-" % port
+    try:
+        s.settimeout(10)
+        s.connect((host, port))
+        s.sendall(b"capture-request-%d\\n" % port)
+        data = b""
+        while True:
+            chunk = s.recv(4096)
+            if not chunk:
+                break
+            data += chunk
+        out["exchange"] = {"received": len(data), "complete": data == (token * (size // len(token) + 1))[:size],
+                           "error": None}
+    except OSError as error:
+        out["exchange"] = {"received": 0, "complete": False, "error": str(error.strerror or error)}
+s.close()
+print(json.dumps(out))
+"""
+HEX = re.compile(r"(?:[0-9a-f]{2})*")
+CAPS = re.compile(r"[0-9a-f]{16}")
+
+
+def whole(value):
+    return type(value) is int and value >= 0
+
+
+def ext_observation(variant, text, size=CAPTURE_RESPONSE, header=EXT_HEADER):
+    """Classify one generator's output. Only a well-formed record decodes into
+    an outcome; a missing, null or wrong-typed field, an unknown key or a
+    record that contradicts itself is inconclusive and carries no evidence."""
+    def inconclusive(reason):
+        return {"variant": variant, "outcome": "inconclusive", "reason": reason}
+
+    # The whole output must be exactly one JSON document: noise before or
+    # after it, or a second record, leaves the observation inconclusive.
+    try:
+        raw = json.loads(text.strip()) if isinstance(text, str) else None
+    except ValueError:
+        return inconclusive("the output is not exactly one JSON record")
+    if not isinstance(raw, dict) or set(raw) != {"uid", "euid", "caps", "set", "readback", "exchange"}:
+        return inconclusive("unexpected record keys")
+    caps, option, readback, exchange = raw["caps"], raw["set"], raw["readback"], raw["exchange"]
+    if not whole(raw["uid"]) or not whole(raw["euid"]):
+        return inconclusive("uid or euid is not a whole number")
+    if not isinstance(caps, dict) or set(caps) != {"CapEff", "CapPrm", "CapBnd"} or \
+            not all(isinstance(value, str) and CAPS.fullmatch(value) for value in caps.values()):
+        return inconclusive("capability sets are not 64-bit hex")
+    if not isinstance(option, dict) or set(option) != {"ok", "errno", "name"} or type(option["ok"]) is not bool:
+        return inconclusive("set record is malformed")
+    if option["ok"] and (option["errno"] is not None or option["name"] is not None) or \
+            not option["ok"] and (not whole(option["errno"]) or option["errno"] == 0 or
+                                  not (option["name"] is None or isinstance(option["name"], str))):
+        return inconclusive("set record is malformed")
+    if readback is not None and (not isinstance(readback, str) or not HEX.fullmatch(readback)):
+        return inconclusive("readback is not hex")
+    if exchange is not None:
+        if not isinstance(exchange, dict) or set(exchange) != {"received", "complete", "error"} or \
+                not whole(exchange["received"]) or type(exchange["complete"]) is not bool or \
+                not (exchange["error"] is None or isinstance(exchange["error"], str)):
+            return inconclusive("exchange record is malformed")
+        if exchange["complete"] and (exchange["received"] != size or exchange["error"] is not None):
+            return inconclusive("exchange claims completion with another size or an error")
+    if not option["ok"] and (readback is not None or exchange is not None):
+        return inconclusive("readback or exchange after a refused set")
+    if option["ok"] and (readback is None or exchange is None):
+        return inconclusive("the set succeeded without both a readback and an exchange")
+    net_raw = bool(int(caps["CapEff"], 16) >> CAP_NET_RAW & 1)
+    record = {"variant": variant, "uid": raw["uid"], "euid": raw["euid"], "caps": caps, "net_raw_effective": net_raw,
+              "set": option, "readback": readback, "exchange": exchange}
+    if variant == "capability_free" and net_raw:
+        return inconclusive("the capability-free sender holds CAP_NET_RAW")
+    if not option["ok"]:
+        # EPERM from the kernel's CAP_NET_RAW check is a refusal; it is
+        # consistent only with a generator that lacks the capability.
+        if option["errno"] == errno.EPERM:
+            if net_raw:
+                return inconclusive("EPERM although CAP_NET_RAW is effective")
+            return dict(record, outcome="refused")
+        return dict(record, outcome="set_failed")
+    if not net_raw:
+        return inconclusive("the set succeeded although CAP_NET_RAW is not effective")
+    if readback != header.hex():
+        return dict(record, outcome="readback_mismatch")
+    if exchange["complete"]:
+        return dict(record, outcome="admitted")
+    return dict(record, outcome="exchange_incomplete")
+
+
+def ext_summary(observations):
+    """What the observations establish; unknown (None) when the capability-free
+    refusal or an admitted generator is not conclusive."""
+    outcomes = {name: observation.get("outcome") for name, observation in observations.items()}
+    conclusive = outcomes and "inconclusive" not in outcomes.values() and set(outcomes) == set(EXT_VARIANTS)
+    return {"capability_free_refused": outcomes.get("capability_free") == "refused" if conclusive else None,
+            "admitted": sorted(name for name, outcome in outcomes.items() if outcome == "admitted")
+            if conclusive else None}
+
+
+def generator_probe(names, network, helper, label, target):
+    """Observe, on the dual-stack bridge, whether the capability-free peer and
+    two admitted generators can set the header and complete an exchange with
+    the target's IPv6 address. Never raises for a Docker or probe failure and
+    never fails the scenario: the record is an observation, and a failure to
+    observe leaves it inconclusive."""
+    record = {"gating": False, "header": EXT_HEADER.hex(), "address": target, "port": CAPTURE_PORT,
+              "scope": "setsockopt, readback and a TCP exchange only; emission on the wire is not observed",
+              "variants": {}}
+    try:
+        for variant, options in EXT_VARIANTS.items():
+            container = names["peer"] if variant == "capability_free" else names[variant]
+            if variant != "capability_free":
+                docker("run", "--detach", "--label", label, "--pull=never", "--platform", helper["platform"],
+                       "--name", container, "--network", network, "--cap-drop=ALL", *options,
+                       "--entrypoint=sleep", helper["image_id"], "infinity")
+            code, text = docker("exec", container, "python3", "-c", EXT_PROBE, target, str(CAPTURE_PORT),
+                                str(CAPTURE_RESPONSE), EXT_HEADER.hex(), timeout=60, check_exit=False)
+            observation = ext_observation(variant, text)
+            if observation["outcome"] != "inconclusive" and code:
+                observation = {"variant": variant, "outcome": "inconclusive", "reason": "the probe exited %d" % code}
+            record["variants"][variant] = observation
+    except (check.CheckError, OSError, subprocess.SubprocessError, KeyError, ValueError, TypeError) as error:
+        record["error"] = str(error)[:500]
+    record["summary"] = ext_summary(record["variants"])
+    record["status"] = "observed" if record["summary"]["capability_free_refused"] is not None else "inconclusive"
+    return record
+
+
 def capture_scenario(helper, target, run, output):
     """Capture between a peer and a container of the target image on a
     private bridge, from a helper in the target's namespace; then the
@@ -2600,6 +2765,8 @@ def capture_scenario(helper, target, run, output):
     # The dual-stack bridge's own containers; renewed serves in the restarted target.
     dual_network = network + "-dual"
     dual = {role: network + "-" + role + "6" for role in ("target", "server", "capturer", "peer", "renewed")}
+    dual.update({variant: network + "-" + variant.replace("_", "") + "6" for variant in EXT_VARIANTS
+                 if variant != "capability_free"})
     result = {"reference": target["reference"], "image_id": target["image_id"], "helper_image_id": helper["image_id"],
               "platform": helper["platform"], "status": "running", "stage": "setup"}
     output.mkdir()
@@ -2650,6 +2817,11 @@ def capture_scenario(helper, target, run, output):
         if result["captures"]["ipv6"]["status"] != "passed":
             raise CheckError("The ipv6 capture failed: " + "; ".join(result["captures"]["ipv6"]["problems"]),
                              "capture_failure")
+        # An observation that never gates: whether the IPv6 extension-header
+        # flow's sender can be admitted. It leaves the captures and their
+        # publication gate as they are.
+        result["stage"] = "probe:ipv6_extension_generator"
+        result["ipv6_extension_probe"] = generator_probe(dual, dual_network, helper, label, target6)
         # Last on the dual-stack bridge, because it moves the target into a
         # new namespace.
         result["stage"] = "capture:restart"
