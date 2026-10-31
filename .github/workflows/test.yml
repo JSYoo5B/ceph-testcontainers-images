@@ -146,7 +146,8 @@ jobs:
             targets+=(--target "$reference")
           done
           python3 image/extension_check.py --extension capture --image ceph-check:extension-capture \
-            --platform "linux/${{ matrix.architecture }}" --functional "${targets[@]}" --output-dir "$RUNNER_TEMP/capture"
+            --platform "linux/${{ matrix.architecture }}" --functional --capture-experiments "${targets[@]}" \
+            --output-dir "$RUNNER_TEMP/capture"
       - name: Keep raw captures out of the artifacts
         id: raw-captures
         if: always()

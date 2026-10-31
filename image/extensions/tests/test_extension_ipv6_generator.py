@@ -258,9 +258,10 @@ class ScenarioTests(unittest.TestCase):
     def test_the_probe_records_the_refusal_and_the_admitted_generators_without_gating(self):
         engine, result = self.probe()
         self.assertEqual(result["status"], "passed", result.get("error"))
-        # The captures and their gate are the ones from before.
+        # The probe itself never gates; the extension-header capture that
+        # follows it uses the root generator that it admitted.
         self.assertEqual(set(result["captures"]),
-                         {"traffic", "empty", "bound", "abrupt", "target_loss", "ipv6", "restart"})
+                         {"traffic", "empty", "bound", "abrupt", "target_loss", "ipv6", "ipv6_ext", "restart"})
         probe = result["ipv6_extension_probe"]
         self.assertEqual((probe["status"], probe["gating"], probe["header"], probe["address"], probe["port"]),
                          ("observed", False, HEADER, TARGET6, PORT))
@@ -283,7 +284,11 @@ class ScenarioTests(unittest.TestCase):
         for role in ("target6", "server6", "peer6"):
             self.assertFalse(any(arg == "--cap-add=NET_RAW" for arg in runs[role]), role)
         probes = [call for call in engine.calls if call[0] == "exec" and extension_check.EXT_PROBE in call]
-        self.assertEqual([call[1].rsplit("-", 1)[-1] for call in probes], ["peer6", "netrawuser6", "netrawroot6"])
+        # The probe's three senders, then the extension-header capture's two
+        # exchanges from the root generator: the selected and the excluded port.
+        self.assertEqual([call[1].rsplit("-", 1)[-1] for call in probes],
+                         ["peer6", "netrawuser6", "netrawroot6", "netrawroot6", "netrawroot6"])
+        self.assertEqual([call[6] for call in probes[3:]], [str(PORT), str(capture.EXCLUDED)])
 
     def test_the_probe_runs_before_the_restart_and_changes_no_capture(self):
         engine, result = self.probe()
@@ -294,8 +299,7 @@ class ScenarioTests(unittest.TestCase):
         self.assertEqual(result["captures"]["ipv6"]["status"], "passed")
 
     def test_a_generator_that_cannot_start_or_a_probe_that_fails_is_an_unknown_not_a_failure(self):
-        for name, options in (("start fails", dict(generator_run_fails=True)),
-                              ("garbage output", dict(generator={"capability_free": "Traceback\n"})),
+        for name, options in (("garbage output", dict(generator={"capability_free": "Traceback\n"})),
                               ("null admitted fields", dict(generator={
                                   "net_raw_user": text(dict(ADMITTED, readback=None, exchange=None))}))):
             with self.subTest(name=name):
@@ -303,10 +307,18 @@ class ScenarioTests(unittest.TestCase):
                 self.assertEqual(result["status"], "passed", result.get("error"))
                 probe = result["ipv6_extension_probe"]
                 self.assertFalse(probe["gating"])
-                if name == "start fails":
-                    self.assertIn("error", probe)
-                    self.assertEqual(probe["status"], "inconclusive")
-                self.assertIsNone(probe["summary"]["admitted"] if name != "start fails" else None)
+                self.assertIsNone(probe["summary"]["admitted"])
+        # The extension-header capture needs the root generator: one that
+        # cannot start or is not admitted fails that capture, while the
+        # probe's own record stays an inconclusive observation.
+        for name, options in (("start fails", dict(generator_run_fails=True)),
+                              ("root refused", dict(generator={"net_raw_root": capture.ext_output(uid=0)}))):
+            with self.subTest(name=name):
+                engine, result = self.probe(**options)
+                self.assertEqual((result["status"], result.get("failure_stage"), result.get("failure_kind")),
+                                 ("failed", "capture:ipv6_ext", "capture_failure"))
+                self.assertFalse(result["ipv6_extension_probe"]["gating"])
+                self.assertNotIn("ipv6_ext", result["captures"])
 
     def test_an_unrefused_capability_free_sender_is_recorded_as_inconclusive_not_as_evidence(self):
         engine, result = self.probe(generator={"capability_free": default_ext_output("net_raw_user")})
@@ -315,13 +327,12 @@ class ScenarioTests(unittest.TestCase):
         self.assertEqual((probe["status"], probe["summary"]["capability_free_refused"]), ("inconclusive", None))
         self.assertEqual(result["status"], "passed")
 
-    def test_the_publication_gate_and_the_coverage_note_are_unchanged(self):
+    def test_the_publication_gate_requires_the_extension_header_capture(self):
         import publish
         keys = set(extension_check.CAPTURE_STOPS)
-        self.assertEqual(keys, {"traffic", "empty", "bound", "abrupt", "target_loss", "ipv6", "restart"})
+        self.assertEqual(keys, {"traffic", "empty", "bound", "abrupt", "target_loss", "ipv6", "ipv6_ext", "restart"})
         docs = (Path(__file__).resolve().parents[3] / "docs" / "EXTENSIONS.md").read_text()
-        self.assertIn("What the functional check does not cover: byte limits other than the packet bound, "
-                      "and IPv6 with extension headers.", docs)
+        self.assertNotIn("and IPv6 with extension headers.", docs)
         self.assertTrue(callable(publish.extension_targets))
 
 

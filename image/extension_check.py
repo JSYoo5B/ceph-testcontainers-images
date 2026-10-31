@@ -32,12 +32,14 @@ the two pinned libfaketime builds, and that each build loads and shifts one
 clock path of one process.
 """
 import argparse
+import base64
 from datetime import datetime, timezone
 import errno
 import hashlib
 import ipaddress
 import json
 from pathlib import Path
+import os
 import re
 import select
 import shutil
@@ -495,6 +497,8 @@ def arguments(argv=None):
                         help="Also check the optional packet-fault profile: tc's netem reorder, duplicate and corrupt "
                              "with correlations, and with --functional the kernel and each fault in each target")
     parser.add_argument("--delay-ms", type=check.positive_number, default=200, metavar="MS")
+    parser.add_argument("--capture-experiments", action="store_true",
+                        help="With --functional for capture: also run the end-state experiments, which never gate")
     parser.add_argument("--output-dir", type=Path, help="Fresh report directory (default: artifacts/extension-check-UUID)")
     parser.add_argument("--probe-timeout", type=check.positive_number, default=120, metavar="SECONDS")
     args = parser.parse_args(argv)
@@ -2304,28 +2308,67 @@ def tcp_segment(frame):
     return source, destination, sport, dport, flags, payload
 
 
-def capture_flow(records, peer, target, snaplen):
+def options_segment(frame):
+    """(segment, header) of an Ethernet/IPv6 frame that carries exactly one
+    Destination Options header (next header 60) directly before its TCP
+    header: the TCP segment as tcp_segment() returns it, and the whole options
+    header. Any other frame is (tcp_segment(frame), None). A frame whose
+    options header declares more than the frame holds, or is followed by
+    anything but TCP, is (None, None)."""
+    if not (len(frame) >= 14 + 40 and frame[12:14] == b"\x86\xdd" and frame[14] >> 4 == 6 and frame[14 + 6] == 60):
+        return tcp_segment(frame), None
+    start = 14 + 40
+    if len(frame) < start + 2:
+        return None, None
+    length = (frame[start + 1] + 1) * 8
+    if frame[start] != 6 or len(frame) < start + length + 20:
+        return None, None
+    tcp = start + length
+    source, destination = (str(ipaddress.IPv6Address(frame[14 + 8:14 + 24])),
+                           str(ipaddress.IPv6Address(frame[14 + 24:14 + 40])))
+    sport, dport = struct.unpack_from(">HH", frame, tcp)
+    flags = frame[tcp + 13]
+    payload = frame[tcp + (frame[tcp + 12] >> 4) * 4:]
+    return (source, destination, sport, dport, flags, payload), bytes(frame[start:tcp])
+
+
+def capture_flow(records, peer, target, snaplen, options=False):
     """Summary and problems of a capture that must hold only the TCP flow
-    between the peer and the target's selected port, in both directions."""
+    between the peer and the target's selected port, in both directions.
+    With options, a frame may also carry one Destination Options header before
+    TCP: the summary then counts the frames with it in each direction, marks
+    the SYN and the request that carried it, and lists each distinct header."""
     summary = {"records": len(records), "to_target": 0, "from_target": 0, "truncated": 0}
+    if options:
+        summary["options"] = {"to_target": 0, "from_target": 0, "headers": [], "seen": []}
     problems = []
-    seen = set()
+    seen, carried = set(), set()
     # The same text form as tcp_segment(), whatever form the engine reported.
     peer, target = str(ipaddress.ip_address(peer)), str(ipaddress.ip_address(target))
     for index, (frame, original) in enumerate(records):
-        segment = tcp_segment(frame)
+        segment, header = options_segment(frame) if options else (tcp_segment(frame), None)
         if segment is None:
             problems.append("record %d is not TCP over IPv4 or IPv6" % index)
             continue
         source, destination, sport, dport, flags, payload = segment
+        if header is not None and header.hex() not in summary["options"]["headers"]:
+            summary["options"]["headers"].append(header.hex())
         if (source, destination, dport) == (peer, target, CAPTURE_PORT):
             summary["to_target"] += 1
+            if header is not None:
+                summary["options"]["to_target"] += 1
             if flags & 0x12 == 0x02:
                 seen.add("syn")
+                if header is not None:
+                    carried.add("syn")
             if payload.startswith(capture_request(CAPTURE_PORT)):
                 seen.add("request")
+                if header is not None:
+                    carried.add("request")
         elif (source, destination, sport) == (target, peer, CAPTURE_PORT):
             summary["from_target"] += 1
+            if header is not None:
+                summary["options"]["from_target"] += 1
             if flags & 0x12 == 0x12:
                 seen.add("syn_ack")
             if payload.startswith(capture_token(CAPTURE_PORT)):
@@ -2336,6 +2379,8 @@ def capture_flow(records, peer, target, snaplen):
         if len(frame) == snaplen < original:
             summary["truncated"] += 1
     summary["seen"] = sorted(seen)
+    if options:
+        summary["options"]["seen"] = sorted(carried)
     return summary, problems
 
 
@@ -2356,17 +2401,31 @@ def capture_problems(kind, state, data, peer, target, snaplen, packets):
     limit = PCAP_HEADER + packets * (PCAP_RECORD + snaplen)
     if len(data) > limit:
         problems.append("%d bytes, over the bound of %d" % (len(data), limit))
-    summary, flow_problems = capture_flow(records, peer, target, snaplen)
+    summary, flow_problems = capture_flow(records, peer, target, snaplen, options=kind == "ipv6_ext")
     problems += flow_problems
     summary.update(bytes=len(data), sha256=hashlib.sha256(data).hexdigest(), statistics=statistics,
                    byte_bound=limit)
     if statistics["captured"] is not None and statistics["captured"] != len(records):
         problems.append("%d packets captured, %d records" % (statistics["captured"], len(records)))
-    if kind == "ipv6":
+    if kind == "ipv6_ext":
+        # The client sets the header on its socket, so its SYN and request
+        # must carry exactly that header; the plain replies keep the flow
+        # complete. Plain traffic alone never passes.
+        carried = summary["options"]
+        if not carried["to_target"]:
+            problems.append("no selected packet carries the Destination Options header")
+        missing = {"syn", "request"} - set(carried["seen"])
+        if missing:
+            problems.append("the header is missing from the client's " + ", ".join(sorted(missing)))
+        if carried["headers"] != [EXT_HEADER.hex()] and carried["to_target"]:
+            problems.append("options headers %s, requested %s" % (",".join(carried["headers"]), EXT_HEADER.hex()))
+        if carried["from_target"]:
+            problems.append("%d replies carry an options header that only the client sets" % carried["from_target"])
+    if kind in ("ipv6", "ipv6_ext"):
         summary["ipv4_records"] = sum(1 for frame, _ in records if frame[12:14] == b"\x08\x00")
         if summary["ipv4_records"]:
             problems.append("%d IPv4 records in an IPv6 capture" % summary["ipv4_records"])
-    if kind in ("traffic", "ipv6"):
+    if kind in ("traffic", "ipv6", "ipv6_ext"):
         absent = {"syn", "syn_ack", "request", "response"} - set(summary["seen"])
         if absent:
             problems.append("the selected flow lacks " + ", ".join(sorted(absent)))
@@ -2554,7 +2613,7 @@ def exchange(peer, target_address, ports, output, source=0):
 
 
 CAPTURE_STOPS = {"traffic": "SIGTERM", "empty": "SIGTERM", "bound": "packet bound", "abrupt": "SIGKILL",
-                 "target_loss": "target container killed", "ipv6": "SIGTERM",
+                 "target_loss": "target container killed", "ipv6": "SIGTERM", "ipv6_ext": "SIGTERM",
                  "restart": "target container restarted"}
 # The peer's source ports in the restart capture: its connection before the
 # restart and its connection after it.
@@ -2568,6 +2627,18 @@ def capture_filter(peer):
     """The selected port with the peer; with an IPv6 peer, IPv6 alone."""
     expression = "tcp port %d and host %s" % (CAPTURE_PORT, peer)
     return "ip6 and " + expression if ":" in peer else expression
+
+
+def options_filter(peer):
+    """The IPv6 filter of the extension-header capture: the plain selected
+    flow with the peer, or a packet with the peer whose base header is
+    followed by exactly one eight-byte Destination Options header (next header
+    60, then TCP with length 0) and a TCP header on the selected port.
+    libpcap's "tcp port" reads TCP only directly after the base header, so the
+    header-bearing branch reads the fixed offsets of this one layout; a payload
+    length of at least 28 covers that header and a TCP header."""
+    return ("ip6 and host %s and (tcp port %d or (ip6[6] = 60 and ip6[40] = 6 and ip6[41] = 0 and ip6[4:2] >= 28"
+            " and (ip6[48:2] = %d or ip6[50:2] = %d)))" % (peer, CAPTURE_PORT, CAPTURE_PORT, CAPTURE_PORT))
 
 
 def run_capture(names, kind, interface, peer, target, exchanges, packets, directory, output, mac=None):
@@ -2610,6 +2681,346 @@ def run_capture(names, kind, interface, peer, target, exchanges, packets, direct
         summary, problems = capture_problems(kind, state, data, peer, target, CAPTURE_SNAPLEN, packets)
     result.update(summary=summary, problems=problems, status="failed" if problems else "passed")
     return result
+
+
+def run_options_capture(names, network, interface, generator, target, directory, output):
+    """The extension-header capture on the dual-stack bridge: the admitted
+    generator (root with NET_RAW, never the target) sets the eight-byte
+    Destination Options header on its client socket and exchanges with the
+    target's IPv6 address on the selected and the excluded port, while the
+    capability-free peer exchanges plainly on the selected port. The filter
+    selects the generator's flow on the selected port, with or without the
+    header; the judge needs the header on the client's SYN and request."""
+    base = "/tmp/capture-ipv6_ext"
+    inspect = json.loads(docker("container", "inspect", generator)[1])[0]["NetworkSettings"]["Networks"][network]
+    address = inspect["GlobalIPv6Address"]
+    if not address:
+        raise CheckError("The extension-header generator has no IPv6 address")
+    expression = options_filter(address)
+    result = {"interface": interface, "filter": expression, "snaplen": CAPTURE_SNAPLEN, "packets": CAPTURE_PACKETS,
+              "stop": CAPTURE_STOPS["ipv6_ext"], "generator": {"address": address, "variant": "net_raw_root",
+                                                               "header": EXT_HEADER.hex()}}
+    capturer = names["capturer"]
+    code, text = docker("exec", capturer, "tcpdump", "-y", "EN10MB", "-d", expression, check_exit=False)
+    if code:
+        raise CheckError("The extension-header filter did not compile: " + text.strip()[:500], classify_capture(code, text))
+    ready = start_capture(capturer, base, interface, expression, CAPTURE_PACKETS)
+    result["ready"] = [line for line in ready["stderr"].splitlines() if READY_LINE.fullmatch(line.strip())]
+    result["exchanges"] = []
+    for port in (CAPTURE_PORT, CAPTURE_EXCLUDED_PORT):
+        code, text = docker("exec", generator, "python3", "-c", EXT_PROBE, target, str(port), str(CAPTURE_RESPONSE),
+                            EXT_HEADER.hex(), timeout=60, check_exit=False)
+        with (output / "exchanges.log").open("a") as log:
+            log.write("ipv6_ext %s %d: %s" % (target, port, text))
+        observation = ext_observation("net_raw_root", text)
+        result["exchanges"].append({"sender": "generator", "port": port, "outcome": observation["outcome"]})
+        if code or observation["outcome"] != "admitted":
+            raise CheckError("The generator's exchange on port %d was %s" % (port, observation.get("reason")
+                                                                               or observation["outcome"]),
+                             "checker_failure")
+    result["exchanges"] += [dict(item, sender="peer") for item in exchange(names["peer"], target, (CAPTURE_PORT,), output)]
+    time.sleep(0.5)
+    state = finish_capture(capturer, base, stop=True)
+    result.update(exit_code=state["status"], stderr=[line.strip() for line in state["stderr"].splitlines()])
+    data = retrieve(capturer, base, directory)
+    summary, problems = capture_problems("ipv6_ext", state, data, address, target, CAPTURE_SNAPLEN, CAPTURE_PACKETS)
+    result.update(summary=summary, problems=problems, status="failed" if problems else "passed")
+    return result
+
+
+# The file-size-limit experiments (docs/EXTENSIONS.md, "Capture end-state
+# experiments"): the extra bytes allowed past a verified prefix, and the
+# child's SIGXFSZ disposition. Eight bytes end inside the next record header;
+# sixteen plus twenty end inside its data.
+LIMIT_EXPERIMENTS = {"header": {"extra": 8, "sigxfsz": "default"},
+                     "body": {"extra": PCAP_RECORD + 20, "sigxfsz": "ignore"}}
+# The longest supervisor output line kept, and the time for one event.
+CHANNEL_LINE_LIMIT = 1 << 20
+CHANNEL_EVENT_TIMEOUT = 30
+# Waits until a file in the capturer stops growing for one second (at most
+# ten), then prints its size and base64 bytes.
+STABLE_FILE = """import base64, json, os, sys, time
+path, deadline, last, since = sys.argv[1], time.monotonic() + 10, None, time.monotonic()
+while time.monotonic() < deadline:
+    size = os.path.getsize(path)
+    if size != last:
+        last, since = size, time.monotonic()
+    elif time.monotonic() - since >= 1:
+        with open(path, "rb") as f:
+            data = f.read()
+        print(json.dumps({"size": len(data), "data": base64.b64encode(data).decode()}))
+        sys.exit(0)
+    time.sleep(0.1)
+sys.exit("the file did not stop growing")
+"""
+
+
+class SupervisorChannel:
+    """The host side of the experiment supervisor: one `docker exec -i` whose
+    standard input carries the commands and whose standard output carries one
+    JSON event per line, then the receipt. Every read is bounded in time and
+    length, a line counts only once its newline arrived, and every raw line
+    is kept for the oracle. close() ends the exec if it still runs."""
+
+    def __init__(self, container, config, popen=subprocess.Popen):
+        import capture_experiment
+        self.process = popen(["docker", *capture_experiment.supervisor_command(container, config)],
+                             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+        self.buffer, self.lines, self.eof = b"", [], False
+
+    def send(self, command):
+        try:
+            self.process.stdin.write((json.dumps(command) + "\n").encode())
+            self.process.stdin.flush()
+        except (OSError, ValueError) as error:
+            raise CheckError("The supervisor channel is closed: %s" % error, "channel") from error
+
+    def _line(self, timeout):
+        deadline = time.monotonic() + timeout
+        while b"\n" not in self.buffer:
+            if self.eof:
+                return None
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise CheckError("The supervisor sent no event within %ds" % timeout, "channel")
+            if not select.select([self.process.stdout], [], [], remaining)[0]:
+                continue
+            chunk = os.read(self.process.stdout.fileno(), 65536)
+            if not chunk:
+                self.eof = True
+            self.buffer += chunk
+            if len(self.buffer) > CHANNEL_LINE_LIMIT:
+                raise CheckError("A supervisor line exceeds %d bytes" % CHANNEL_LINE_LIMIT, "channel")
+        line, self.buffer = self.buffer.split(b"\n", 1)
+        text = line.decode("utf-8", "replace")
+        self.lines.append(text)
+        return text
+
+    def event(self, timeout=CHANNEL_EVENT_TIMEOUT):
+        """The next event as a dict; a disconnect, a malformed line or a line
+        that is not an object raises, so no caller acts on it."""
+        text = self._line(timeout)
+        if text is None:
+            raise CheckError("The supervisor disconnected", "channel")
+        try:
+            event = json.loads(text)
+        except ValueError as error:
+            raise CheckError("A malformed supervisor line: %.200s" % text, "channel") from error
+        if not isinstance(event, dict):
+            raise CheckError("A supervisor line that is not an object: %.200s" % text, "channel")
+        return event
+
+    def finish(self, timeout=CHANNEL_EVENT_TIMEOUT):
+        """Close the commands and return every output line up to the end."""
+        try:
+            self.process.stdin.close()
+        except OSError:
+            pass
+        deadline = time.monotonic() + timeout
+        while self._line(max(deadline - time.monotonic(), 0.01)) is not None:
+            pass
+        if self.buffer:
+            self.lines.append(self.buffer.decode("utf-8", "replace"))
+            self.buffer = b""
+        return "\n".join(self.lines) + "\n"
+
+    def close(self):
+        if self.process.poll() is None:
+            self.process.kill()
+        self.process.wait()
+
+
+def stable_prefix(capturer, base):
+    """The capture file once it stopped growing, read inside the capturer."""
+    code, text = docker("exec", capturer, "python3", "-c", STABLE_FILE, base + ".pcap", check_exit=False, timeout=30)
+    if code:
+        raise CheckError("The capture file did not settle: " + text.strip()[:300], "channel")
+    document = json.loads(text.strip().splitlines()[-1])
+    data = base64.b64decode(document["data"])
+    if len(data) != document["size"]:
+        raise CheckError("The capture file's size and bytes differ", "channel")
+    return data
+
+
+def limit_binding_problems(ack, prefix, spec):
+    """Why a limit acknowledgement does not answer the one limit command for
+    exactly the prefix that the host read back: limit_problems, which checks
+    the acknowledgement against itself, plus its prefix, extra, bytes and
+    prefix digest against the command and the verified bytes. A
+    self-consistent acknowledgement of another limit releases nothing."""
+    import capture_experiment as experiment
+    problems = experiment.limit_problems(ack, {"sigxfsz": spec["sigxfsz"]})
+    expected = {"prefix": len(prefix), "extra": spec["extra"], "bytes": len(prefix) + spec["extra"],
+                "prefix_sha256": hashlib.sha256(prefix).hexdigest()}
+    for key, value in expected.items():
+        if ack.get(key) != value:
+            problems.append("the acknowledgement's %s is %r, the command's %r" % (key, ack.get(key), value))
+    return problems
+
+
+def limit_experiment(names, interface, peer, target, directory, output, cut, channel=SupervisorChannel):
+    """One file-size-limit experiment on the first bridge. It never raises
+    and never gates: tcpdump runs under the supervisor, seed traffic fills a
+    prefix that is read back and checked as whole records before the limit is
+    lowered to that prefix plus the extra bytes, and only an acknowledgement
+    that shows the limit applied releases the later traffic. An ambiguous or
+    missing acknowledgement ends the experiment without a second limit
+    command. The oracle judges the receipt and the file."""
+    import capture_experiment as experiment
+    spec = LIMIT_EXPERIMENTS[cut]
+    base = "/tmp/capture-limit-" + cut
+    record = {"cut": cut, "extra": spec["extra"], "sigxfsz": spec["sigxfsz"], "gating": False, "steps": []}
+    config = experiment.supervisor_config(experiment.tcpdump_argv(base, interface, capture_filter(peer),
+                                                                  CAPTURE_PACKETS), base + ".pcap", spec["sigxfsz"])
+    supervisor = None
+    try:
+        supervisor = channel(names["capturer"], config)
+        supervisor.send({"op": "wait_stderr", "contains": "listening on", "timeout": CAPTURE_READY_TIMEOUT})
+        ready = supervisor.event(CAPTURE_READY_TIMEOUT + 10)
+        record["steps"].append("ready" if ready.get("seen") is True else "not ready")
+        if ready.get("op") != "wait_stderr" or ready.get("seen") is not True:
+            raise CheckError("tcpdump did not report readiness: %s" % json.dumps(ready), "channel")
+        record["seed"] = exchange(names["peer"], target, (CAPTURE_PORT,), output)
+        prefix = stable_prefix(names["capturer"], base)
+        records, problems = parse_pcap(prefix, CAPTURE_SNAPLEN)
+        record["prefix"] = {"bytes": len(prefix), "records": len(records), "sha256": hashlib.sha256(prefix).hexdigest(),
+                            "problems": problems}
+        if problems or not records:
+            raise CheckError("The prefix is not whole records: %s" % "; ".join(problems or ["no record"]), "channel")
+        supervisor.send(experiment.limit_command(len(prefix), spec["extra"]))
+        record["steps"].append("limit sent")
+        ack = supervisor.event()
+        refused = limit_binding_problems(ack, prefix, spec) if ack.get("op") == "limit" \
+            else ["the acknowledgement is not a limit event"]
+        record["acknowledgement"] = {"status": ack.get("status"), "problems": refused}
+        if refused:
+            raise CheckError("The limit was not acknowledged as applied: " + "; ".join(refused), "channel")
+        record["steps"].append("later traffic")
+        try:
+            record["later"] = exchange(names["peer"], target, (CAPTURE_PORT, CAPTURE_PORT), output)
+        except CheckError as error:
+            # The server answers whatever tcpdump does; a failed exchange is
+            # recorded, and the file still decides.
+            record["later"] = {"error": str(error)[:300]}
+        supervisor.send({"op": "wait_exit", "timeout": 5})
+        ended = supervisor.event()
+        if ended.get("exited") is not True:
+            supervisor.send({"op": "signal", "name": "SIGTERM"})
+            supervisor.event()
+            supervisor.send({"op": "wait_exit", "timeout": CAPTURE_STOP_TIMEOUT})
+            supervisor.event(CAPTURE_STOP_TIMEOUT + 10)
+        receipt = experiment.read_receipt(supervisor.finish())
+        record["steps"].append("receipt" if receipt else "no receipt")
+        data = retrieve(names["capturer"], base, directory)
+        record["assessment"] = experiment.assess(receipt, data)
+    except (check.CheckError, OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError) as error:
+        record["error"] = str(error)[:500]
+    finally:
+        if supervisor is not None:
+            try:
+                supervisor.close()
+            except OSError as error:
+                record["cleanup_error"] = str(error)[:200]
+    assessment = record.get("assessment") or {}
+    record["status"] = assessment.get("verdict") or "inconclusive"
+    return record
+
+
+# Reads, inside the capturer, how tcpdump runs (its State in /proc), and
+# whether the loopback is still there and up.
+LOOPBACK_STATE = """import json, sys
+pid = sys.argv[1]
+out = {"process": None, "lo": None}
+try:
+    with open("/proc/%s/status" % pid) as f:
+        out["process"] = next(line.split(":", 1)[1].strip() for line in f if line.startswith("State:"))
+except (OSError, StopIteration):
+    pass
+try:
+    with open("/sys/class/net/lo/flags") as f:
+        out["lo"] = {"up": bool(int(f.read(), 16) & 1)}
+except (OSError, ValueError):
+    pass
+print(json.dumps(out))
+"""
+LOOPBACK_SAMPLES, LOOPBACK_INTERVAL = 3, 1.0
+
+
+def loopback_judge(before, samples, state, summary, problems):
+    """The kept-running loopback cohort's outcome: "kept_running" only when
+    tcpdump ran and was not stopped in every sample after the target's loss,
+    the namespace stayed the one from before, the target's interface was gone
+    and lo stayed up, and SIGTERM then ended it with status 0 and a file of
+    the loopback flow; "exited" when tcpdump ended on its own; anything else
+    is "inconclusive" with its reasons."""
+    reasons = []
+    if not samples:
+        return "inconclusive", ["no sample after the loss"]
+    if any(sample["status"] is not None for sample in samples):
+        return "exited", []
+    for index, sample in enumerate(samples):
+        process = sample.get("process") or ""
+        if not process.startswith(("S", "R")):
+            reasons.append("sample %d: tcpdump is %r, not running or sleeping" % (index, process))
+        if sample.get("namespace") != before:
+            reasons.append("sample %d: the namespace changed" % index)
+        if sample.get("interfaces"):
+            reasons.append("sample %d: the target's interface is still there" % index)
+        if not (sample.get("lo") or {}).get("up"):
+            reasons.append("sample %d: lo is not up" % index)
+    if state.get("status") != 0:
+        reasons.append("SIGTERM ended tcpdump with %s" % state.get("status"))
+    reasons += problems
+    return ("kept_running", []) if not reasons else ("inconclusive", reasons)
+
+
+def loopback_observation(helper, target, run, label, directory, output):
+    """The kept-running loopback cohort on a bridge of its own: tcpdump on lo
+    in the target's namespace, loopback traffic from inside that namespace,
+    then the target's loss. This is a diagnostic of lo, never a result for the
+    target's own interface; it never raises and never gates."""
+    network = "ceph-extension-check-" + run + "-lo"
+    names = {role: network + "-" + role for role in ("target", "server", "capturer", "peer")}
+    record = {"interface": "lo", "scope": "the loopback of the target's namespace; not the target's own interface",
+              "gating": False}
+    try:
+        setup = capture_setup(names, network, helper, target, label, {})
+        base = "/tmp/capture-loopback"
+        expression = "tcp port %d and host 127.0.0.1" % CAPTURE_PORT
+        ready = start_capture(names["capturer"], base, "lo", expression, CAPTURE_PACKETS)
+        code, text = docker("exec", names["capturer"], "python3", "-c", CAPTURE_EXCHANGE, "127.0.0.1",
+                            str(CAPTURE_RESPONSE), "0", str(CAPTURE_PORT), check_exit=False)
+        if code:
+            raise CheckError("The loopback exchange failed: " + text.strip()[:300])
+        record["seed"] = json.loads(text.strip().splitlines()[-1])
+        time.sleep(0.5)
+        before = docker("exec", names["capturer"], "python3", "-c", NAMESPACE)[1].strip()
+        docker("kill", names["target"], timeout=CAPTURE_STOP_TIMEOUT)
+        samples = []
+        for _ in range(LOOPBACK_SAMPLES):
+            time.sleep(LOOPBACK_INTERVAL)
+            state = capture_state(names["capturer"], base, time.monotonic() + CAPTURE_STOP_TIMEOUT, "state read")
+            sample = {"status": state["status"]}
+            if state["status"] is None:
+                sample.update(json.loads(docker("exec", names["capturer"], "python3", "-c", LOOPBACK_STATE,
+                                                str(ready["pid"]))[1]))
+                sample["namespace"] = docker("exec", names["capturer"], "python3", "-c", NAMESPACE)[1].strip()
+                sample["interfaces"] = json.loads(docker("exec", names["capturer"], "python3", "-c",
+                                                         CAPTURE_INTERFACE, setup["mac"])[1])
+            samples.append(sample)
+            if state["status"] is not None:
+                break
+        record["samples"] = samples
+        state = finish_capture(names["capturer"], base, stop=state["status"] is None)
+        record.update(exit_code=state["status"], stderr=[line.strip() for line in state["stderr"].splitlines()])
+        data = retrieve(names["capturer"], base, directory)
+        summary, problems = capture_problems("traffic", state, data, "127.0.0.1", "127.0.0.1", CAPTURE_SNAPLEN,
+                                             CAPTURE_PACKETS)
+        record["summary"] = summary
+        record["outcome"], record["reasons"] = loopback_judge(before, samples, state, summary, problems)
+    except (check.CheckError, OSError, ValueError, KeyError, TypeError, StopIteration) as error:
+        record.update(outcome="inconclusive", error=str(error)[:500])
+    return record
 
 
 def restart_capture(names, network, interface, peer, target, mac, directory, output, helper, label):
@@ -2926,7 +3337,7 @@ def generator_probe(names, network, helper, label, target):
     return record
 
 
-def capture_scenario(helper, target, run, output):
+def capture_scenario(helper, target, run, output, experiments=False):
     """Capture between a peer and a container of the target image on a
     private bridge, from a helper in the target's namespace; then the
     negative controls and the target's loss. Then, on a dual-stack bridge
@@ -2959,6 +3370,12 @@ def capture_scenario(helper, target, run, output):
             if result["captures"][kind]["status"] != "passed":
                 raise CheckError("The %s capture failed: %s" % (kind, "; ".join(result["captures"][kind]["problems"])),
                                  "capture_failure")
+        if experiments:
+            # Observations that never gate: the file-size-limit experiments.
+            result["stage"] = "experiments:limit"
+            result["experiments"] = {"limit": {cut: limit_experiment(names, interface, peer_address, target_address,
+                                                                     directory, output, cut)
+                                               for cut in LIMIT_EXPERIMENTS}}
         result["stage"] = "refusals"
         result["refusals"] = refused_capture(names, label, interface, helper)
         failed = [name for name, control in result["refusals"].items() if control["status"] != "passed"]
@@ -2995,6 +3412,18 @@ def capture_scenario(helper, target, run, output):
         # publication gate as they are.
         result["stage"] = "probe:ipv6_extension_generator"
         result["ipv6_extension_probe"] = generator_probe(dual, dual_network, helper, label, target6)
+        # The extension-header flow, from the generator that the probe
+        # admitted; a generator that was not admitted fails the capture.
+        result["stage"] = "capture:ipv6_ext"
+        root = result["ipv6_extension_probe"]["variants"].get("net_raw_root") or {}
+        if root.get("outcome") != "admitted":
+            raise CheckError("The root NET_RAW generator was not admitted: " + json.dumps(root or None),
+                             "capture_failure")
+        result["captures"]["ipv6_ext"] = run_options_capture(dual, dual_network, dual_setup["interface"],
+                                                             dual["net_raw_root"], target6, directory, output)
+        if result["captures"]["ipv6_ext"]["status"] != "passed":
+            raise CheckError("The ipv6_ext capture failed: " + "; ".join(result["captures"]["ipv6_ext"]["problems"]),
+                             "capture_failure")
         # Last on the dual-stack bridge, because it moves the target into a
         # new namespace.
         result["stage"] = "capture:restart"
@@ -3003,6 +3432,10 @@ def capture_scenario(helper, target, run, output):
         if result["captures"]["restart"]["status"] != "passed":
             raise CheckError("The restart capture failed: " + "; ".join(result["captures"]["restart"]["problems"]),
                              "capture_failure")
+        if experiments:
+            result["stage"] = "experiments:loopback"
+            result["experiments"]["kept_running_loopback"] = loopback_observation(helper, target, run, label,
+                                                                                   directory, output)
         del result["stage"]
         result["status"] = "passed"
     except (check.CheckError, KeyError, ValueError, TypeError) as error:
@@ -3219,7 +3652,8 @@ def main(argv=None):
                     raise CheckError("The target and the helper must use one platform: " + reference)
                 print("Capturing in the namespace of a container of " + reference, flush=True)
                 run = uuid.uuid4().hex[:12]
-                report["targets"][reference] = capture_scenario(image, target, run, output / ("capture-" + run))
+                report["targets"][reference] = capture_scenario(image, target, run, output / ("capture-" + run),
+                                                                experiments=args.capture_experiments)
                 save(output, report)
             failed = [reference for reference, result in report["targets"].items() if result["status"] != "passed"]
             if failed:
