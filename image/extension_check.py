@@ -39,6 +39,7 @@ import ipaddress
 import json
 from pathlib import Path
 import re
+import select
 import shutil
 import struct
 import subprocess
@@ -73,13 +74,24 @@ RESPONSE = 1024
 SAMPLES = 9
 
 # Peer-selective profiles of contract 1 (docs/EXTENSIONS.md). Each leaf selects
-# the target's egress to one (family, peer, TCP destination port).
+# the target's egress to one (family, peer, TCP port), with an optional
+# fourth member that says what the port is: "dport" (the default), the TCP
+# destination port; "sport", the TCP source port, so that a leaf selects what
+# a server in the target sends back to a peer that connected to it; or
+# "setup", the destination port of TCP segments with SYN set only, so that a
+# leaf selects connection setup and leaves established connections alone.
 ROOT, CHILD, BAND = "7e00:", "7e10:", "7e00:3"
 SELECTED_PORT, OTHER_PORT, REVERSE_PORT = 7000, 7001, 6999
 PEERS = ("peer-b", "peer-c", "peer-d")
+MATCHES = ("dport", "sport", "setup")
 SELECTORS = {"ipv4-tcp-u32": [(4, "peer-b", SELECTED_PORT)],
              "ipv6-tcp-u32": [(6, "peer-b", SELECTED_PORT)],
-             "multi-peer-u32": [(4, "peer-b", SELECTED_PORT), (4, "peer-c", OTHER_PORT), (6, "peer-b", SELECTED_PORT)]}
+             "multi-peer-u32": [(4, "peer-b", SELECTED_PORT), (4, "peer-c", OTHER_PORT), (6, "peer-b", SELECTED_PORT)],
+             "tcp-sport-u32": [(4, "peer-b", SELECTED_PORT, "sport"), (6, "peer-b", SELECTED_PORT, "sport")],
+             "tcp-setup-u32": [(4, "peer-b", SELECTED_PORT, "setup"), (6, "peer-b", SELECTED_PORT, "setup")]}
+# The TCP flags byte (header byte 13) and its SYN bit. tc packs a
+# "match u8 0x02 0x02 at <offset>" key into the word that holds the byte.
+TCP_FLAGS, TCP_SYN = 13, 0x02
 FOREIGN_PREF = 20
 SELECTOR_SAMPLES, CONTROL_SAMPLES = 5, 3
 LOSS_TIMEOUT = 0.8
@@ -187,8 +199,24 @@ while True:
         c.close()
 """ % (PORT, RESPONSE)
 
-# Answers every connection on each port given, over IPv4 and IPv6.
+# Answers every request of every connection on each port given, over IPv4
+# and IPv6: each "ping" line gets RESPONSE bytes, until the client closes, so
+# one connection can carry requests before and after a selector exists.
 PEER_SERVER = """import socket, sys, threading
+def answer(c):
+    try:
+        with c:
+            pending = b""
+            while True:
+                chunk = c.recv(64)
+                if not chunk:
+                    break
+                pending += chunk
+                while b"\\n" in pending:
+                    _, pending = pending.split(b"\\n", 1)
+                    c.sendall(b"x" * %d)
+    except OSError:
+        pass
 def serve(port):
     s = socket.socket(socket.AF_INET6)
     s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -197,11 +225,7 @@ def serve(port):
     s.listen(64)
     while True:
         c, _ = s.accept()
-        try:
-            c.recv(64)
-            c.sendall(b"x" * %d)
-        finally:
-            c.close()
+        threading.Thread(target=answer, args=(c,), daemon=True).start()
 threads = [threading.Thread(target=serve, args=(int(port),)) for port in sys.argv[1:]]
 for thread in threads:
     thread.start()
@@ -236,6 +260,47 @@ for _ in range(count):
 times.sort()
 print(json.dumps({"count": count, "answered": len(times), "outcomes": sorted(set(outcomes)),
                   "median_ms": times[len(times) // 2] if times else None, "elapsed_ms": elapsed}))
+"""
+
+# Holds one connection open and times requests on it: it connects once and
+# prints {"connected": true}, then answers each "COUNT TIMEOUT" line on its
+# standard input with a result shaped like SELECT_CLIENT's. A timeout ends
+# the connection, so later requests report "closed".
+PERSISTENT_CLIENT = """import json, socket, sys, time
+host, port, size = sys.argv[1], int(sys.argv[2]), int(sys.argv[3])
+c = socket.create_connection((host, port), timeout=10)
+print(json.dumps({"connected": True}), flush=True)
+for line in sys.stdin:
+    count, timeout = int(line.split()[0]), float(line.split()[1])
+    outcomes, times = [], []
+    for _ in range(count):
+        start = time.monotonic()
+        if c is None:
+            outcomes.append("closed")
+            continue
+        try:
+            c.settimeout(timeout)
+            c.sendall(b"ping\\n")
+            data = b""
+            while len(data) < size:
+                chunk = c.recv(4096)
+                if not chunk:
+                    break
+                data += chunk
+            outcome = "answered" if len(data) == size else "short"
+        except socket.timeout:
+            outcome = "timeout"
+        except OSError as error:
+            outcome = "error: " + str(error)
+        if outcome != "answered":
+            c.close()
+            c = None
+        outcomes.append(outcome)
+        if outcome == "answered":
+            times.append((time.monotonic() - start) * 1000)
+    times.sort()
+    print(json.dumps({"count": count, "answered": len(times), "outcomes": sorted(set(outcomes)),
+                      "median_ms": times[len(times) // 2] if times else None}), flush=True)
 """
 
 # Receives whole transfers on each port given, over IPv4 and IPv6, and
@@ -776,21 +841,40 @@ class Pairs(list):
         return [value for name, value in self if name == key]
 
 
-def u32_keys(family, peer, port):
-    """The keys that tc prints for a destination, TCP and destination port
-    selector, in order: (offset, value, mask, offmask). tc packs each match
-    into a word-aligned key, so an IPv6 next header and port appear at
-    offsets 4 and 40, not 6 and 42."""
+def u32_keys(family, peer, port, match="dport"):
+    """The keys that tc prints for a destination, TCP and port selector, in
+    order: (offset, value, mask, offmask). tc packs each match into a
+    word-aligned key, so an IPv6 next header and destination port appear at
+    offsets 4 and 40, not 6 and 42; a source port shares the destination
+    port's word in its upper half, and the SYN bit of a "setup" leaf the word
+    of the TCP flags byte. Every offset assumes TCP directly after a base IP
+    header."""
     if family == 4:
         keys = [(16, int(ipaddress.IPv4Address(peer)), 0xffffffff), (8, 0x00060000, 0x00ff0000)]
-        port_offset = 20
+        tcp = 20
     else:
         address = int(ipaddress.IPv6Address(peer))
         keys = [(24 + 4 * index, (address >> (96 - 32 * index)) & 0xffffffff, 0xffffffff) for index in range(4)]
         keys.append((4, 0x00000600, 0x0000ff00))
-        port_offset = 40
-    keys.append((port_offset, port, 0x0000ffff))
+        tcp = 40
+    if match == "sport":
+        keys.append((tcp, port << 16, 0xffff0000))
+    else:
+        keys.append((tcp, port, 0x0000ffff))
+    if match == "setup":
+        flags = tcp + TCP_FLAGS
+        shift = 8 * (3 - flags % 4)
+        keys.append((flags - flags % 4, TCP_SYN << shift, TCP_SYN << shift))
     return [{"off": off, "value": "%08x" % value, "mask": "%08x" % mask, "offmask": ""} for off, value, mask in keys]
+
+
+def leaf_spec(leaf):
+    """A profile leaf as (family, role, port, match)."""
+    family, role, port, *rest = leaf
+    match = rest[0] if rest else "dport"
+    if match not in MATCHES:
+        raise ValueError("unknown selector match %r" % match)
+    return family, role, port, match
 
 
 def layout(profile):
@@ -802,12 +886,12 @@ def layout(profile):
     numbers the u32 tables of one qdisc in the order that their preferences
     are created."""
     leaves, group = [], 0
-    spec = SELECTORS[profile] if isinstance(profile, str) else profile
+    spec = [leaf_spec(leaf) for leaf in (SELECTORS[profile] if isinstance(profile, str) else profile)]
     for family, protocol in ((4, "ip"), (6, "ipv6")):
-        selected = [(role, port) for leaf_family, role, port in spec if leaf_family == family]
-        for node, (role, port) in enumerate(selected, 1):
+        selected = [(role, port, match) for leaf_family, role, port, match in spec if leaf_family == family]
+        for node, (role, port, match) in enumerate(selected, 1):
             table = "%x:" % (0x800 + group)
-            leaves.append({"family": family, "role": role, "port": port, "protocol": protocol,
+            leaves.append({"family": family, "role": role, "port": port, "match": match, "protocol": protocol,
                            "pref": 10 + group, "table": table, "handle": "%s:%x" % (table, node)})
         if selected:
             group += 1
@@ -816,6 +900,11 @@ def layout(profile):
 
 def path_name(role, family, port):
     return "%s ipv%d %d" % (role, family, port)
+
+
+def reverse_name(role, family, port):
+    """A connection from a peer to a server in the target's namespace."""
+    return "%s to target ipv%d %d" % (role, family, port)
 
 
 def selector_leaves(raw, leaves):
@@ -850,7 +939,7 @@ def selector_leaves(raw, leaves):
                              "mask": "%08x" % int(match.get("mask"), 16), "offmask": match.get("offmask")})
             except (TypeError, ValueError) as error:
                 raise CheckError("A u32 key that cannot be read: " + json.dumps(match), "runtime_failure") from error
-        expected = u32_keys(leaf["family"], leaf["peer"], leaf["port"])
+        expected = u32_keys(leaf["family"], leaf["peer"], leaf["port"], leaf.get("match", "dport"))
         problems = []
         if options.get("flowid") != BAND:
             problems.append("flowid %s" % options.get("flowid"))
@@ -1009,11 +1098,15 @@ def install_root(shaper, device, delay, netem=None):
 def install_leaves(shaper, device, leaves):
     for leaf in leaves:
         match = "ip" if leaf["family"] == 4 else "ip6"
+        kind = leaf.get("match", "dport")
+        keys = ["match", match, "dst", "%s/%d" % (leaf["peer"], 32 if leaf["family"] == 4 else 128),
+                "match", match, "protocol", "6", "0xff",
+                "match", match, "sport" if kind == "sport" else "dport", str(leaf["port"]), "0xffff"]
+        if kind == "setup":
+            keys += ["match", "u8", "0x%02x" % TCP_SYN, "0x%02x" % TCP_SYN,
+                     "at", str((20 if leaf["family"] == 4 else 40) + TCP_FLAGS)]
         tc(shaper, "filter", "add", "dev", device, "protocol", leaf["protocol"], "parent", ROOT,
-           "pref", str(leaf["pref"]), "handle", leaf["handle"], "u32",
-           "match", match, "dst", "%s/%d" % (leaf["peer"], 32 if leaf["family"] == 4 else 128),
-           "match", match, "protocol", "6", "0xff", "match", match, "dport", str(leaf["port"]), "0xffff",
-           "flowid", BAND)
+           "pref", str(leaf["pref"]), "handle", leaf["handle"], "u32", *keys, "flowid", BAND)
 
 
 def remove_hierarchy(shaper, device, leaves):
@@ -1044,6 +1137,7 @@ def selector_scenario(helper, target, run, profile, delay, output):
     roles = ("target", "shaper", "driver", "observer", "fresh") + PEERS
     names = {role: network + "-" + role for role in roles}
     result = {"profile": profile, "reference": target["reference"], "image_id": target["image_id"], "status": "running"}
+    established = {}
     output.mkdir()
     common = ["--detach", "--label", label, "--pull=never", "--user=0:0", "--platform", helper["platform"]]
     servers = ["--entrypoint=python3", helper["image_id"], "-c", PEER_SERVER]
@@ -1054,7 +1148,8 @@ def selector_scenario(helper, target, run, profile, delay, output):
         shared = "container:" + names["target"]
         docker("run", *common, "--name", names["shaper"], "--network", shared, "--cap-drop=ALL",
                "--cap-add=NET_ADMIN", "--entrypoint=sleep", helper["image_id"], "infinity")
-        docker("run", *common, "--name", names["driver"], "--network", shared, "--cap-drop=ALL", *servers, str(REVERSE_PORT))
+        docker("run", *common, "--name", names["driver"], "--network", shared, "--cap-drop=ALL", *servers,
+               str(REVERSE_PORT), str(SELECTED_PORT), str(OTHER_PORT))
         for peer in PEERS:
             docker("run", *common, "--name", names[peer], "--network", network, "--cap-drop=ALL", *servers,
                    str(SELECTED_PORT), str(OTHER_PORT))
@@ -1075,18 +1170,28 @@ def selector_scenario(helper, target, run, profile, delay, output):
         device = interface["name"]
         for leaf in leaves:
             leaf["peer"] = endpoints[leaf["role"]][leaf["family"]]
-        result.update(interface=interface, selected=[{key: leaf[key] for key in ("family", "role", "peer", "port",
+        result.update(interface=interface, selected=[{key: leaf[key] for key in ("family", "role", "peer", "port", "match",
                                                                                   "protocol", "pref", "handle")}
                                                      for leaf in leaves])
-        selected = {path_name(leaf["role"], leaf["family"], leaf["port"]): (names["driver"], leaf["peer"], leaf["port"])
-                    for leaf in leaves}
-        # Every other peer, family and port, and a reverse connection of each
-        # family from peer B to the target, are controls.
+        # A "sport" leaf selects what the target's server sends back to a
+        # peer that connected to it; every other leaf selects connections
+        # that the target opens to the peer.
+        selected = {}
+        for leaf in leaves:
+            if leaf["match"] == "sport":
+                selected[reverse_name(leaf["role"], leaf["family"], leaf["port"])] = (
+                    names[leaf["role"]], endpoints["target"][leaf["family"]], leaf["port"])
+            else:
+                selected[path_name(leaf["role"], leaf["family"], leaf["port"])] = (names["driver"], leaf["peer"], leaf["port"])
+        # Every other peer, family and port in both directions are controls:
+        # connections from the target to each peer, and from each peer to
+        # the target's servers.
         controls = {path_name(role, family, port): (names["driver"], endpoints[role][family], port)
                     for role in PEERS for family in (4, 6) for port in (SELECTED_PORT, OTHER_PORT)
                     if path_name(role, family, port) not in selected}
-        for family in (4, 6):
-            controls["reverse ipv%d" % family] = (names["peer-b"], endpoints["target"][family], REVERSE_PORT)
+        controls.update({reverse_name(role, family, port): (names[role], endpoints["target"][family], port)
+                         for role in PEERS for family in (4, 6) for port in (SELECTED_PORT, OTHER_PORT, REVERSE_PORT)
+                         if reverse_name(role, family, port) not in selected})
         for name, (client, host, port) in list(selected.items()) + list(controls.items()):
             code, text = docker("exec", client, "python3", "-c", READY, host, str(port), check_exit=False)
             if code:
@@ -1101,6 +1206,15 @@ def selector_scenario(helper, target, run, profile, delay, output):
 
         result["root_before"] = root_qdisc(names["shaper"], device)
         result["baseline"] = measure_paths(selected, "baseline", SELECTOR_SAMPLES)
+        # A "setup" leaf selects only connection setup: a connection that the
+        # target opened on its path before the leaf exists must keep its
+        # requests fast under the delay and answered under the loss.
+        for leaf in leaves:
+            if leaf["match"] == "setup":
+                name = path_name(leaf["role"], leaf["family"], leaf["port"])
+                established[name] = Persistent(names["driver"], leaf["peer"], leaf["port"], name, output)
+        result["established_baseline"] = {name: client.measure(SELECTOR_SAMPLES, 10, "baseline")
+                                          for name, client in established.items()}
         # The root and its child alone select nothing: an apply that stops
         # before its leaves delays no packet.
         install_root(names["shaper"], device, delay)
@@ -1117,11 +1231,17 @@ def selector_scenario(helper, target, run, profile, delay, output):
         result["controls_delayed"] = measure_paths(controls, "delayed")
         result["after_controls"] = qdiscs("shaper")
         result["delayed"] = measure_paths(selected, "delayed", SELECTOR_SAMPLES)
+        result["established_delayed"] = {name: client.measure(SELECTOR_SAMPLES, 10, "delayed")
+                                         for name, client in established.items()}
         result["after_delayed"] = qdiscs("shaper")
         result["drain"] = drained(names["shaper"], device)
         apply_loss(names["shaper"], device, result["drain"])
         result["lost"] = measure_paths(selected, "loss", 1, LOSS_TIMEOUT)
         result["controls_lost"] = measure_paths(controls, "loss")
+        result["established_lost"] = {name: client.measure(CONTROL_SAMPLES, 10, "loss")
+                                      for name, client in established.items()}
+        for client in established.values():
+            client.close()
         result["after_loss"] = qdiscs("shaper")
         # A filter that another owner adds under the root is foreign state:
         # the readback refuses it, and accepts the hierarchy again once that
@@ -1169,11 +1289,51 @@ def selector_scenario(helper, target, run, profile, delay, output):
     except (check.CheckError, KeyError, ValueError) as error:
         result.update(status="failed", error=str(error), failure_kind=getattr(error, "kind", "checker_failure"))
     finally:
+        for client in established.values():
+            client.close()
         result["cleanup"] = cleanup(label, output)
         if result["cleanup"]["status"] != "passed":
             result["status"] = "failed"
         (output / "result.json").write_text(json.dumps(result, indent=2) + "\n")
     return result
+
+
+class Persistent:
+    """One PERSISTENT_CLIENT connection, opened from a container and kept
+    until close: each measure times requests on that same connection."""
+
+    def __init__(self, container, host, port, name, output):
+        self.name, self.output = name, output
+        self.process = subprocess.Popen(["docker", "exec", "-i", container, "python3", "-c", PERSISTENT_CLIENT,
+                                         host, str(port), str(RESPONSE)],
+                                        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+        line = self._line(30, "connect")
+        if not json.loads(line).get("connected"):
+            raise CheckError("The established connection on %s did not open: %s" % (name, line), "runtime_failure")
+
+    def _line(self, timeout, label):
+        ready = select.select([self.process.stdout], [], [], timeout)[0]
+        line = self.process.stdout.readline() if ready else ""
+        with (self.output / "timings.log").open("a") as log:
+            log.write("established %s %s: %s" % (label, self.name, line or "no answer\n"))
+        if not line:
+            raise CheckError("The established connection on %s gave no answer (%s)" % (self.name, label),
+                             "runtime_failure")
+        return line
+
+    def measure(self, count, timeout, label):
+        self.process.stdin.write("%d %s\n" % (count, timeout))
+        self.process.stdin.flush()
+        return json.loads(self._line(count * timeout + 30, label))
+
+    def close(self):
+        if self.process.poll() is None:
+            try:
+                self.process.stdin.close()
+                self.process.wait(timeout=30)
+            except (OSError, subprocess.TimeoutExpired):
+                self.process.kill()
+                self.process.wait()
 
 
 def selector_problems(result, delay):
@@ -1184,8 +1344,21 @@ def selector_problems(result, delay):
     def median(observation):
         return observation["median_ms"] if observation["answered"] == observation["count"] else None
 
-    for phase in ("baseline", "partial", "restored", "controls_delayed", "controls_lost"):
-        for name, observation in result[phase].items():
+    # Every "setup" leaf needs its established connection in every phase:
+    # a missing phase or path is missing evidence, not a pass.
+    established = [path_name(leaf["role"], leaf["family"], leaf["port"])
+                   for leaf in result["selected"] if leaf.get("match") == "setup"]
+    for phase in ("established_baseline", "established_delayed", "established_lost"):
+        observed = result.get(phase)
+        if established and not isinstance(observed, dict):
+            problems.append("no %s observations of the established connections" % phase)
+            continue
+        for name in established:
+            if name not in observed:
+                problems.append("%s: no observation of the established connection on %s" % (phase, name))
+    for phase in ("baseline", "partial", "restored", "controls_delayed", "controls_lost",
+                  "established_baseline", "established_delayed", "established_lost"):
+        for name, observation in (result.get(phase) or {}).items():
             value = median(observation)
             if value is None or value >= fast:
                 problems.append("%s %s: %s" % (phase, name, json.dumps(observation)))
