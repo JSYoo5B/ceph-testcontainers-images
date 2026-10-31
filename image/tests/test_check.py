@@ -311,3 +311,23 @@ class CephfsRecoveryToolQuickCheckTests(unittest.TestCase):
     def test_check_failure_is_reported_as_a_loading_failure(self):
         script = (check.HERE / "check-runtime.sh").read_text()
         self.assertIn("library-load:*|class-load:*|version:*) kind=loading_failure", script)
+
+
+class BlueStoreToolQuickCheckTests(unittest.TestCase):
+    """Runs the role gating and the OSD version checks with a recording check()."""
+
+    def checks(self, role):
+        script = (check.HERE / "check-runtime.sh").read_text()
+        gating = script[script.index("core=false\n"):script.index("version() {")]
+        start = script.index('if "$osd"; then\n')
+        end = script.index("\n", script.index("check version:ceph-bluestore-tool", start)) + 1
+        program = 'role=$1\ncheck() { echo "$1"; }\n' + gating + script[start:end] + "fi\n"
+        result = subprocess.run(["/bin/sh", "-c", program, "sh", role], capture_output=True, text=True, timeout=60)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return result.stdout.split()
+
+    def test_only_essential_and_all_check_the_tool(self):
+        for role in ("essential", "all"):
+            self.assertIn("version:ceph-bluestore-tool", self.checks(role), role)
+        for role in ("client", "cephfs", "rbd-aux", "rgw"):
+            self.assertNotIn("version:ceph-bluestore-tool", self.checks(role), role)

@@ -4,7 +4,7 @@ from pathlib import Path
 ROLES = ("essential", "client", "cephfs", "rbd-aux", "rgw")
 CORE_CLI = {"ceph", "ceph-conf"}
 EXECUTABLES = {
-    "essential": CORE_CLI | {"ceph-mon", "ceph-mgr", "ceph-osd", "ceph-authtool", "monmaptool", "crushtool"},
+    "essential": CORE_CLI | {"ceph-mon", "ceph-mgr", "ceph-osd", "ceph-bluestore-tool", "ceph-authtool", "monmaptool", "crushtool"},
     "client": CORE_CLI | {"rados", "rbd", "cryptsetup", "crushtool", "osdmaptool"},
     "cephfs": CORE_CLI | {"ceph-mds", "cephfs-mirror", "cephfs-journal-tool"},
     "rbd-aux": CORE_CLI | {"rados", "rbd", "rbd-mirror", "ceph-immutable-object-cache"},

@@ -315,6 +315,7 @@ plugins() {
 }
 if "$osd"; then
     check version:ceph-osd version ceph-osd
+    check version:ceph-bluestore-tool version ceph-bluestore-tool
     class_dir=$(ceph-osd --show-config-value osd_class_dir) || failed=1
     plugin_dir=$(ceph-osd --show-config-value plugin_dir) || failed=1
     class_load() {

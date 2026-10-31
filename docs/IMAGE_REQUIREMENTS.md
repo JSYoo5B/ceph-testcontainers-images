@@ -31,7 +31,7 @@ explicit role; only an explicit all selection supplies every role.
 
 | Role | Required capability |
 | --- | --- |
-| essential | MON, MGR, OSD; ceph CLI, keyring/monmap bootstrap, process inspection, release always-on MGR modules and volumes/rbd_support/mirroring/snap_schedule with dependencies; BlueStore, rbd/rgw/cephfs/hello/lock classes, compressor and erasure-code plugins |
+| essential | MON, MGR, OSD and the offline BlueStore tool `ceph-bluestore-tool`; ceph CLI, keyring/monmap bootstrap, process inspection, release always-on MGR modules and volumes/rbd_support/mirroring/snap_schedule with dependencies; BlueStore, rbd/rgw/cephfs/hello/lock classes, compressor and erasure-code plugins |
 | client | ceph/rados/rbd and offline CRUSH/OSD map diagnostics (`crushtool`, `osdmaptool`); Python rados/rbd/cephfs, ceph_argparse/ceph_daemon; libradosstriper, librbd LUKS1/LUKS2, libcryptsetup and cryptsetup executable; command/process utilities |
 | cephfs | MDS, cephfs-mirror and the offline journal tool `cephfs-journal-tool`, their libraries and local ceph CLI |
 | rbd-aux | rbd-mirror and cache-capable client runtime: rados/rbd CLI/bindings, ceph-immutable-object-cache and the librbd parent_cache plugin, local ceph CLI |
@@ -90,6 +90,7 @@ The table lists what a testcontainers module does with each component. Rows mark
 | `cephfs-mirror` | `cephfs` | CephFS snapshot mirroring daemon, started in its own container when CephFS mirroring between clusters is requested |
 | `radosgw-admin` | `rgw` | RGW multisite realm, zonegroup, zone, period and sync policy management, executed from a client container |
 | `ceph-osd` with object classes and plugins | `essential` | OSDs; RBD, RGW and CephFS operations call the object classes inside the OSD, and pools load the compressor and erasure-code plugins |
+| `ceph-bluestore-tool` | `essential` | Offline BlueStore operations, run from an essential container against a stopped OSD's store, such as `bluefs-bdev-expand` after the block file was grown |
 | OSD `hello` and `lock` object classes | `essential` | Built-in class requests and striper locking, with each class’s runtime dependencies |
 | `radosgw` | `rgw` | RGW gateways for S3, Swift and STS |
 | `radosgw-admin` | `rgw` | RGW users, keys, buckets and placement created from the gateway container |
