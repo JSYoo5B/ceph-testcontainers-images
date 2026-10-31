@@ -1170,7 +1170,7 @@ def selector_scenario(helper, target, run, profile, delay, output):
         device = interface["name"]
         for leaf in leaves:
             leaf["peer"] = endpoints[leaf["role"]][leaf["family"]]
-        result.update(interface=interface, selected=[{key: leaf[key] for key in ("family", "role", "peer", "port",
+        result.update(interface=interface, selected=[{key: leaf[key] for key in ("family", "role", "peer", "port", "match",
                                                                                   "protocol", "pref", "handle")}
                                                      for leaf in leaves])
         # A "sport" leaf selects what the target's server sends back to a
@@ -1344,9 +1344,21 @@ def selector_problems(result, delay):
     def median(observation):
         return observation["median_ms"] if observation["answered"] == observation["count"] else None
 
+    # Every "setup" leaf needs its established connection in every phase:
+    # a missing phase or path is missing evidence, not a pass.
+    established = [path_name(leaf["role"], leaf["family"], leaf["port"])
+                   for leaf in result["selected"] if leaf.get("match") == "setup"]
+    for phase in ("established_baseline", "established_delayed", "established_lost"):
+        observed = result.get(phase)
+        if established and not isinstance(observed, dict):
+            problems.append("no %s observations of the established connections" % phase)
+            continue
+        for name in established:
+            if name not in observed:
+                problems.append("%s: no observation of the established connection on %s" % (phase, name))
     for phase in ("baseline", "partial", "restored", "controls_delayed", "controls_lost",
                   "established_baseline", "established_delayed", "established_lost"):
-        for name, observation in result[phase].items():
+        for name, observation in (result.get(phase) or {}).items():
             value = median(observation)
             if value is None or value >= fast:
                 problems.append("%s %s: %s" % (phase, name, json.dumps(observation)))

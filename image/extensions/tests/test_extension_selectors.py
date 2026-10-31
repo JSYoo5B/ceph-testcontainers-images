@@ -274,10 +274,19 @@ class SelectorTests(unittest.TestCase):
 
     def passing(self, delay=120, profile="multi-peer-u32"):
         fast = {"count": 3, "answered": 3, "outcomes": ["answered"], "median_ms": 0.07}
-        selected = [extension_check.path_name(leaf["role"], leaf["family"], leaf["port"]) for leaf in leaves(profile)]
-        controls = {name: dict(fast) for name in ("peer-d ipv4 7000", "peer-c ipv6 7001", "reverse ipv4")}
+        layout = leaves(profile)
+        selected = [(extension_check.reverse_name if leaf["match"] == "sport" else extension_check.path_name)(
+            leaf["role"], leaf["family"], leaf["port"]) for leaf in layout]
+        setup = [extension_check.path_name(leaf["role"], leaf["family"], leaf["port"])
+                 for leaf in layout if leaf["match"] == "setup"]
+        controls = {name: dict(fast) for name in ("peer-d ipv4 7000", "peer-c ipv6 7001",
+                                                  extension_check.reverse_name("peer-b", 4, extension_check.REVERSE_PORT))}
         state = {"delay_ms": delay, "counters": {"packets": 0, "drops": 0}}
-        return {"selected": [{"handle": "800::%d" % n} for n in range(len(selected))], "sandbox_id": "a",
+        return {"selected": [dict(handle="800::%d" % n, match=leaf["match"], role=leaf["role"], family=leaf["family"],
+                                  port=leaf["port"]) for n, leaf in enumerate(layout)], "sandbox_id": "a",
+                "established_baseline": {name: dict(fast, count=5, answered=5) for name in setup},
+                "established_delayed": {name: dict(fast, count=5, answered=5) for name in setup},
+                "established_lost": {name: dict(fast) for name in setup},
                 "baseline": {name: dict(fast, count=5, answered=5) for name in selected},
                 "partial": {name: dict(fast) for name in selected},
                 "restored": {name: dict(fast, count=5, answered=5) for name in selected},
@@ -297,7 +306,7 @@ class SelectorTests(unittest.TestCase):
         self.assertEqual(extension_check.selector_problems(self.passing(), 120), [])
         changes = {
             "a slow control": lambda r: r["controls_delayed"]["peer-d ipv4 7000"].update(median_ms=125.0),
-            "a control that failed under loss": lambda r: r["controls_lost"]["reverse ipv4"].update(answered=2),
+            "a control that failed under loss": lambda r: r["controls_lost"]["peer-b to target ipv4 6999"].update(answered=2),
             "control traffic in the child": lambda r: r.update(after_controls={"delay_ms": 120, "counters": {"packets": 2}}),
             "a partial hierarchy that delays": lambda r: r["partial"]["peer-c ipv4 7001"].update(median_ms=121.0),
             "a partial hierarchy that counts": lambda r: r.update(after_partial={"delay_ms": 120, "counters": {"packets": 1}}),
@@ -324,6 +333,46 @@ class SelectorTests(unittest.TestCase):
             change(result)
             with self.subTest(name):
                 self.assertTrue(extension_check.selector_problems(result, 120))
+
+    def test_setup_receipts_need_established_connections_that_stay_fast(self):
+        for profile in ("multi-peer-u32", "tcp-sport-u32", "tcp-setup-u32"):
+            with self.subTest(profile):
+                self.assertEqual(extension_check.selector_problems(self.passing(profile=profile), 120), [])
+        path = "peer-b ipv6 7000"
+        changes = {
+            "an established connection delayed with the setup": lambda r: r["established_delayed"][path].update(median_ms=125.0),
+            "an established connection that lost a reply under loss": lambda r: r["established_lost"][path].update(
+                answered=2, outcomes=["answered", "timeout"]),
+            "an established connection closed under loss": lambda r: r["established_lost"][path].update(
+                answered=0, outcomes=["closed", "timeout"], median_ms=None),
+            "an established connection slow before the leaves": lambda r: r["established_baseline"][path].update(median_ms=40.0),
+            "an established path missing under loss": lambda r: r["established_lost"].pop(path),
+            "no established observations under delay": lambda r: r.pop("established_delayed"),
+            "established observations that are not a mapping": lambda r: r.update(established_baseline=[]),
+        }
+        for name, change in changes.items():
+            result = self.passing(profile="tcp-setup-u32")
+            change(result)
+            with self.subTest(name):
+                self.assertTrue(extension_check.selector_problems(result, 120))
+        # A profile without setup leaves needs no established connection.
+        result = self.passing(profile="tcp-sport-u32")
+        for phase in ("established_baseline", "established_delayed", "established_lost"):
+            result.pop(phase)
+        self.assertEqual(extension_check.selector_problems(result, 120), [])
+
+    def test_source_and_setup_keys_are_the_words_tc_prints(self):
+        sport = extension_check.u32_keys(4, "172.19.0.3", 7000, "sport")
+        self.assertEqual(sport[-1], {"off": 20, "value": "1b580000", "mask": "ffff0000", "offmask": ""})
+        sport6 = extension_check.u32_keys(6, "fd62:93fe:2c9e::3", 7000, "sport")
+        self.assertEqual(sport6[-1], {"off": 40, "value": "1b580000", "mask": "ffff0000", "offmask": ""})
+        setup = extension_check.u32_keys(4, "172.19.0.3", 7000, "setup")
+        self.assertEqual(setup[-2:], [{"off": 20, "value": "00001b58", "mask": "0000ffff", "offmask": ""},
+                                      {"off": 32, "value": "00020000", "mask": "00020000", "offmask": ""}])
+        setup6 = extension_check.u32_keys(6, "fd62:93fe:2c9e::3", 7000, "setup")
+        self.assertEqual(setup6[-1], {"off": 52, "value": "00020000", "mask": "00020000", "offmask": ""})
+        with self.assertRaises(ValueError):
+            extension_check.layout([(4, "peer-b", 7000, "flags")])
 
     def test_selectors_require_functional_checks(self):
         with self.assertRaises(SystemExit), contextlib.redirect_stderr(io.StringIO()):
