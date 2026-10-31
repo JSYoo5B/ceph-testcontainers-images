@@ -1,6 +1,7 @@
 """The host side of the capture end-state experiments: the supervisor
 channel, the order of one file-size-limit experiment, and the kept-running
 loopback judge. Nothing here runs Docker, tcpdump or a file-size limit."""
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -140,11 +141,13 @@ class ScriptedChannel:
         self.closed = True
 
 
-def applied(prefix, extra, sigxfsz="default"):
+def applied(prefix, extra, sigxfsz="default", digest=None):
+    """A self-consistent acknowledgement; by default for PREFIX's own bytes."""
+    digest = hashlib.sha256(PREFIX).hexdigest() if digest is None else digest
     return {"op": "limit", "status": "applied", "prefix": prefix, "extra": extra, "bytes": prefix + extra,
             "before": [-1, -1], "after": [prefix + extra, prefix + extra], "own_before": [-1, -1],
             "own_after": [-1, -1], "size_before": prefix, "size_after": prefix,
-            "prefix_sha256": "0" * 64, "sigxfsz": experiment.OBSERVED_DISPOSITION[sigxfsz]}
+            "prefix_sha256": digest, "sigxfsz": experiment.OBSERVED_DISPOSITION[sigxfsz]}
 
 
 class LimitExperimentTests(unittest.TestCase):
@@ -185,6 +188,11 @@ class LimitExperimentTests(unittest.TestCase):
                           ("readback mismatch", dict(applied(len(PREFIX), extra), after=[-1, -1])),
                           ("wrong disposition", dict(applied(len(PREFIX), extra), sigxfsz="ignored")),
                           ("another event", {"op": "wait_exit", "exited": False}),
+                          # Self-consistent acknowledgements of another limit.
+                          ("another prefix", applied(len(PREFIX) + 76, extra)),
+                          ("another extra", applied(len(PREFIX), extra + 1)),
+                          ("another digest", applied(len(PREFIX), extra, digest="1" * 64)),
+                          ("a shorter prefix", applied(len(PREFIX) - 76, extra)),
                           ("disconnected", extension_check.CheckError("The supervisor disconnected", "channel"))):
             with self.subTest(name=name):
                 record, log, channel = self.run_experiment(ack)

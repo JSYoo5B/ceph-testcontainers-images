@@ -2842,6 +2842,22 @@ def stable_prefix(capturer, base):
     return data
 
 
+def limit_binding_problems(ack, prefix, spec):
+    """Why a limit acknowledgement does not answer the one limit command for
+    exactly the prefix that the host read back: limit_problems, which checks
+    the acknowledgement against itself, plus its prefix, extra, bytes and
+    prefix digest against the command and the verified bytes. A
+    self-consistent acknowledgement of another limit releases nothing."""
+    import capture_experiment as experiment
+    problems = experiment.limit_problems(ack, {"sigxfsz": spec["sigxfsz"]})
+    expected = {"prefix": len(prefix), "extra": spec["extra"], "bytes": len(prefix) + spec["extra"],
+                "prefix_sha256": hashlib.sha256(prefix).hexdigest()}
+    for key, value in expected.items():
+        if ack.get(key) != value:
+            problems.append("the acknowledgement's %s is %r, the command's %r" % (key, ack.get(key), value))
+    return problems
+
+
 def limit_experiment(names, interface, peer, target, directory, output, cut, channel=SupervisorChannel):
     """One file-size-limit experiment on the first bridge. It never raises
     and never gates: tcpdump runs under the supervisor, seed traffic fills a
@@ -2874,7 +2890,7 @@ def limit_experiment(names, interface, peer, target, directory, output, cut, cha
         supervisor.send(experiment.limit_command(len(prefix), spec["extra"]))
         record["steps"].append("limit sent")
         ack = supervisor.event()
-        refused = experiment.limit_problems(ack, {"sigxfsz": spec["sigxfsz"]}) if ack.get("op") == "limit" \
+        refused = limit_binding_problems(ack, prefix, spec) if ack.get("op") == "limit" \
             else ["the acknowledgement is not a limit event"]
         record["acknowledgement"] = {"status": ack.get("status"), "problems": refused}
         if refused:
