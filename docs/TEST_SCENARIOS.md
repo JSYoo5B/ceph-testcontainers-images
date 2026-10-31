@@ -84,6 +84,7 @@ the image's effective paths rather than a distribution's fixed layout.
 | Mirror/admin executables | rbd-aux/cephfs/rgw | Run `rbd-mirror`, `cephfs-mirror` and `radosgw-admin` with `--version`; verifies startup and version identity, while replication is checked in separate functional scenarios |
 | OSD object-class files | essential | Query `osd_class_dir` and locate the rbd, rgw, cephfs, hello and lock shared objects; verifies the required class files exist |
 | OSD object-class loading | essential | Preload each required class into `ceph-osd` with eager ELF relocation, run `--version` and reject loader errors even if the process exits zero; verifies class dependency and OSD symbol resolution, without claiming class methods executed |
+| BlueStore tool | essential | Run `ceph-bluestore-tool --version` and parse release/commit; verifies the executable and its shared-library closure load. It does not open or modify a store |
 | OSD plugin files | essential | Query `plugin_dir` and require shared objects in the compressor and erasure-code groups; verifies plugin files are present, without claiming every plugin has loaded or processed data |
 | Gateway prerequisites | rgw | Require `readlink` on PATH and run `radosgw`/`radosgw-admin` version checks; verifies required gateway/admin executables start and the socket-inspection utility is available |
 | Metadata-server prerequisite | cephfs | Run `ceph-mds --version`; verifies the MDS executable and its startup dependency closure load |

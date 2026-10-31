@@ -4,7 +4,7 @@ This default production contract follows the execution/dependency analysis in is
 
 | Role | Required capability |
 | --- | --- |
-| essential | MON, MGR, OSD; ceph CLI, keyring/monmap bootstrap, process inspection, release always-on MGR modules and volumes/rbd_support/mirroring/snap_schedule with dependencies; BlueStore, rbd/rgw/cephfs/hello/lock classes, compressor and erasure-code plugins |
+| essential | MON, MGR, OSD and the offline BlueStore tool `ceph-bluestore-tool`; ceph CLI, keyring/monmap bootstrap, process inspection, release always-on MGR modules and volumes/rbd_support/mirroring/snap_schedule with dependencies; BlueStore, rbd/rgw/cephfs/hello/lock classes, compressor and erasure-code plugins |
 | client | ceph/rados/rbd and offline CRUSH/OSD map diagnostics (`crushtool`, `osdmaptool`); Python rados/rbd/cephfs, ceph_argparse/ceph_daemon; libradosstriper, librbd LUKS1/LUKS2, libcryptsetup and cryptsetup executable; command/process utilities |
 | cephfs | MDS, cephfs-mirror and the offline journal tool `cephfs-journal-tool`, their libraries and local ceph CLI |
 | rbd-aux | rbd-mirror and cache-capable client runtime: rados/rbd CLI/bindings, ceph-immutable-object-cache and the librbd parent_cache plugin, local ceph CLI |
@@ -20,6 +20,13 @@ The client quick check creates and prints an OSD map, exports its CRUSH map,
 decodes/recompiles it, then verifies exact CRUSH bytes after import/export.
 The package closure includes the map-tool owner package; unrelated daemon
 executables remain excluded. Essential retains its bootstrap `crushtool`.
+
+The essential role carries `ceph-bluestore-tool` for offline operations on a
+stopped OSD's store, for example `bluefs-bdev-expand` after a sparse block file
+was lengthened. It comes from the same package as `ceph-osd` on the RPM and deb
+sources, so no package is added there. The Alpine experiment installs
+`ceph19-osd-tools`, which holds it; the role filter keeps the other offline OSD
+tools in that package out of every role.
 
 The cephfs role carries `cephfs-journal-tool` for offline MDS journal
 inspection, export and header backup. It comes from the same ceph-common

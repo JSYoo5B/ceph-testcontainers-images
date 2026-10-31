@@ -86,7 +86,9 @@ def load(kind, analyze):
 def roots(kind):
     if kind == 'apk':
         return {
-            'essential': ('ceph19-mon','ceph19-mgr','ceph19-osd-daemon','ceph19-common','py3-setuptools'),
+            # Alpine splits ceph-bluestore-tool and the other offline OSD tools into
+            # ceph19-osd-tools; the role filter keeps only ceph-bluestore-tool.
+            'essential': ('ceph19-mon','ceph19-mgr','ceph19-osd-daemon','ceph19-osd-tools','ceph19-common','py3-setuptools'),
             'client': ('ceph19-common','ceph19-base','py3-cephfs19','libradosstriper19','cryptsetup'),
             'cephfs': ('ceph19-mds','cephfs19-mirror','ceph19-common','py3-cephfs19'),
             'rbd-aux': ('ceph19','rbd-mirror19','ceph19-common','py3-rbd19'),

@@ -127,7 +127,7 @@ def fixture_inventory():
         'ceph-mon': ['/usr/bin/ceph-mon', '/usr/bin/ceph-authtool', '/usr/bin/monmaptool', '/usr/bin/crushtool',
                      '/usr/bin/osdmaptool'],
         'ceph-mgr': ['/usr/bin/ceph-mgr'],
-        'ceph-osd': ['/usr/bin/ceph-osd'],
+        'ceph-osd': ['/usr/bin/ceph-osd', '/usr/bin/ceph-bluestore-tool', '/usr/bin/ceph-objectstore-tool'],
         'ceph-base': [],
         'rbd-mirror': ['/usr/bin/rbd-mirror'],
         'ceph-immutable-object-cache': ['/usr/bin/ceph-immutable-object-cache'],
@@ -235,3 +235,37 @@ class CephfsRecoveryToolTests(unittest.TestCase):
         extra = {'/usr/bin/'+JOURNAL_TOOL}
         for role in ('essential', 'client', 'rbd-aux', 'rgw'):
             self.assertTrue(extra.isdisjoint(files[role]))
+
+
+BLUESTORE_TOOL = 'ceph-bluestore-tool'
+
+
+class BlueStoreToolTests(unittest.TestCase):
+    """ceph-bluestore-tool belongs to the essential role (Refs #24)."""
+
+    def test_selected_for_essential_on_every_backend(self):
+        for backend in (None, 'rpm', 'deb', 'apk'):
+            with self.subTest(backend=backend):
+                self.assertIn(BLUESTORE_TOOL, contract.executables('essential', set(), backend))
+        self.assertTrue(contract.permits_path('essential', '/usr/bin/'+BLUESTORE_TOOL, {BLUESTORE_TOOL}))
+
+    def test_not_selected_for_other_roles(self):
+        for role in ('client', 'cephfs', 'rbd-aux', 'rgw'):
+            with self.subTest(role=role):
+                self.assertNotIn(BLUESTORE_TOOL, contract.executables(role, {BLUESTORE_TOOL}))
+                self.assertFalse(contract.permits_path(role, '/usr/bin/'+BLUESTORE_TOOL, {BLUESTORE_TOOL}))
+
+    def test_the_package_ceph_osd_already_brings_adds_only_this_tool(self):
+        files, *_ = CephfsRecoveryToolTests.role_file_lists(self, 'deb')
+        self.assertIn('/usr/bin/'+BLUESTORE_TOOL, files['essential'])
+        # ceph-objectstore-tool comes from the same package but stays filtered.
+        self.assertNotIn('/usr/bin/ceph-objectstore-tool', files['essential'])
+        for role in ('client', 'cephfs', 'rbd-aux', 'rgw'):
+            self.assertNotIn('/usr/bin/'+BLUESTORE_TOOL, files[role], role)
+
+    def test_alpine_installs_the_package_that_holds_it(self):
+        import backend as backends
+        self.assertIn('ceph19-osd-tools', backends.roots('apk')['essential'])
+        for role, roots in backends.roots('apk').items():
+            if role != 'essential':
+                self.assertNotIn('ceph19-osd-tools', roots, role)
