@@ -254,6 +254,28 @@ def tcp6_frame(source, destination, sport, dport, flags, payload=b"", next_heade
     return b"\x00" * 12 + b"\x86\xdd" + ip + tcp
 
 
+def tcp6_options_frame(source, destination, sport, dport, flags, payload=b"", header=None):
+    """An Ethernet/IPv6/TCP frame with one Destination Options header (by
+    default the checker's eight-byte header) between the base header and TCP."""
+    header = extension_check.EXT_HEADER if header is None else header
+    tcp = struct.pack(">HHIIBBHHH", sport, dport, 1, 1, 5 << 4, flags, 65535, 0, 0) + payload
+    ip = struct.pack(">IHBB16s16s", 6 << 28, len(header) + len(tcp), 60, 64,
+                     extension_check.ipaddress.IPv6Address(source).packed,
+                     extension_check.ipaddress.IPv6Address(destination).packed)
+    return b"\x00" * 12 + b"\x86\xdd" + ip + header + tcp
+
+
+def options_flow(client, target, peer_port=40000, client_frame=tcp6_options_frame, reply_frame=None):
+    """One connection whose client frames carry the options header and whose
+    replies are plain IPv6, as the generator's socket sends them."""
+    reply = reply_frame or tcp6_frame
+    return (client_frame(client, target, peer_port, PORT, 0x02), reply(target, client, PORT, peer_port, 0x12),
+            client_frame(client, target, peer_port, PORT, 0x10),
+            client_frame(client, target, peer_port, PORT, 0x18, extension_check.capture_request(PORT)),
+            reply(target, client, PORT, peer_port, 0x18, RESPONSE), client_frame(client, target, peer_port, PORT, 0x11),
+            reply(target, client, PORT, peer_port, 0x11))
+
+
 def capture_file(*frames, snaplen=SNAPLEN):
     """A classic pcap that cuts every frame at the snaplen, as tcpdump does."""
     data = struct.pack("<IHHiIII", 0xa1b2c3d4, 2, 4, 0, 0, snaplen, 1)
@@ -285,6 +307,9 @@ PEER6, TARGET6 = "fd00:c0de::3", "fd00:c0de::2"
 PEER4, TARGET4 = "172.31.0.3", "172.31.0.2"
 FLOW6 = flow(PEER6, TARGET6, frame=tcp6_frame)
 OTHER6 = tcp6_frame(PEER6, TARGET6, 40001, EXCLUDED, 0x02)
+# The extension-header generator on the dual-stack bridge, and its flow.
+GENERATOR6 = "fd00:c0de::4"
+OPTIONS_FLOW = options_flow(GENERATOR6, TARGET6)
 BEFORE, AFTER = extension_check.CAPTURE_RESTART_PORTS
 RESTART_FLOW = flow(PEER4, TARGET4, BEFORE)
 
@@ -412,6 +437,55 @@ class CaptureEvidenceTests(unittest.TestCase):
         # The IPv4 oracle does not take the IPv6 flow either.
         self.assertNotEqual(self.problems("traffic", capture_file(*FLOW6))[1], [])
 
+    def options_problems(self, data, peer=GENERATOR6, target=TARGET6):
+        records = len(extension_check.parse_pcap(data, SNAPLEN)[0])
+        return extension_check.capture_problems("ipv6_ext", finished(records), data, peer, target, SNAPLEN,
+                                                extension_check.CAPTURE_PACKETS)
+
+    def test_the_options_flow_needs_the_header_on_the_client_and_plain_replies(self):
+        summary, problems = self.options_problems(capture_file(*OPTIONS_FLOW))
+        self.assertEqual(problems, [])
+        self.assertEqual(summary["options"], {"to_target": 4, "from_target": 0,
+                                              "headers": [extension_check.EXT_HEADER.hex()], "seen": ["request", "syn"]})
+        self.assertEqual(summary["seen"], ["request", "response", "syn", "syn_ack"])
+
+    def test_options_controls_fail(self):
+        other_header = bytes([6, 0, 1, 4, 1, 0, 0, 0])
+        plain_client = options_flow(GENERATOR6, TARGET6, client_frame=tcp6_frame)
+        header_replies = options_flow(GENERATOR6, TARGET6, reply_frame=tcp6_options_frame)
+        cut_header = tcp6_options_frame(GENERATOR6, TARGET6, 40000, PORT, 0x10)[:14 + 40 + 6]
+        overlong = tcp6_options_frame(GENERATOR6, TARGET6, 40000, PORT, 0x10, header=bytes([6, 3, 1, 4, 0, 0, 0, 0]))
+        after_header = tcp6_options_frame(GENERATOR6, TARGET6, 40000, PORT, 0x10, header=bytes([17, 0, 1, 4, 0, 0, 0, 0]))
+        for name, data in (
+                ("plain traffic alone", capture_file(*plain_client)),
+                ("the SYN without the header", capture_file(tcp6_frame(GENERATOR6, TARGET6, 40000, PORT, 0x02),
+                                                            *OPTIONS_FLOW[1:])),
+                ("the request without the header",
+                 capture_file(*OPTIONS_FLOW[:3], tcp6_frame(GENERATOR6, TARGET6, 40000, PORT, 0x18,
+                                                            extension_check.capture_request(PORT)), *OPTIONS_FLOW[4:])),
+                ("another header", capture_file(*options_flow(GENERATOR6, TARGET6, client_frame=lambda *a, **k:
+                                                             tcp6_options_frame(*a, header=other_header, **k)))),
+                ("replies with the header", capture_file(*header_replies)),
+                ("a cut options header", capture_file(*OPTIONS_FLOW, cut_header)),
+                ("an options header longer than the frame", capture_file(*OPTIONS_FLOW, overlong)),
+                ("UDP after the header", capture_file(*OPTIONS_FLOW, after_header)),
+                ("the excluded port with the header", capture_file(*OPTIONS_FLOW, tcp6_options_frame(
+                    GENERATOR6, TARGET6, 40001, EXCLUDED, 0x02))),
+                ("another peer", capture_file(*OPTIONS_FLOW, tcp6_options_frame("fd00:c0de::9", TARGET6, 40002, PORT, 0x02))),
+                ("no SYN-ACK", capture_file(*(frame for frame in OPTIONS_FLOW if frame != OPTIONS_FLOW[1]))),
+                ("an IPv4 record", capture_file(*OPTIONS_FLOW, flow(PEER4, TARGET4)[0])),
+                ("empty", capture_file())):
+            with self.subTest(name=name):
+                self.assertNotEqual(self.options_problems(data)[1], [])
+        # The plain IPv6 oracle does not take a header-bearing frame.
+        self.assertNotEqual(self.ipv6_problems(capture_file(*OPTIONS_FLOW), peer=GENERATOR6)[1], [])
+
+    def test_the_options_filter_reads_one_eight_byte_header_by_fixed_offsets(self):
+        expression = extension_check.options_filter(GENERATOR6)
+        self.assertEqual(expression, "ip6 and host %s and (tcp port %d or (ip6[6] = 60 and ip6[40] = 6 and ip6[41] = 0"
+                                     " and ip6[4:2] >= 28 and (ip6[48:2] = %d or ip6[50:2] = %d)))"
+                         % (GENERATOR6, PORT, PORT, PORT))
+
 
 # A final record whose header promises 60 bytes, of which 10 were written.
 CUT_RECORD = struct.pack("<IIII", 1, 0, 60, 60) + b"\x00" * 10
@@ -534,7 +608,7 @@ class FakeCaptureEngine:
                  killed_status=137, killed_statistics=False, cut_tail=False, loss_end="exited", loss_status=1,
                  interface_survives=False, keeps_ipv4=False, no_ipv6=False, restart_end="exited", restart_status=1,
                  restart_leaks=False, follows=False, interface_survives_restart=False, same_sandbox=False,
-                 renewed_address=TARGET4, generator=None, generator_run_fails=False):
+                 renewed_address=TARGET4, generator=None, generator_run_fails=False, options_frames=None):
         self.test, self.uid, self.early_exit = test, uid, early_exit
         # The generator-admission probe's output by variant (None: the
         # kernel's behavior, see ext_output), and whether starting an
@@ -564,6 +638,8 @@ class FakeCaptureEngine:
         self.follows, self.interface_survives_restart = follows, interface_survives_restart
         self.same_sandbox, self.renewed_address = same_sandbox, renewed_address
         self.target_restarted = False
+        # The frames of the extension-header capture (None: OPTIONS_FLOW).
+        self.options_frames = options_frames
 
     def __call__(self, *command, timeout=120, check_exit=True):
         self.calls.append(list(command))
@@ -575,8 +651,8 @@ class FakeCaptureEngine:
             if role.endswith("6"):
                 network += "-dual"
                 address = {"target6": self.renewed_address if self.target_restarted else TARGET4,
-                           "peer6": PEER4}[role]
-                address6 = "" if self.no_ipv6 else {"target6": TARGET6, "peer6": PEER6}[role]
+                           "peer6": PEER4, "netrawroot6": "172.31.0.4"}[role]
+                address6 = "" if self.no_ipv6 else {"target6": TARGET6, "peer6": PEER6, "netrawroot6": GENERATOR6}[role]
             else:
                 address, address6 = {"target": TARGET, "peer": PEER}[role], ""
             sandbox = "sandbox-%s-%d" % (role, self.target_restarted and not self.same_sandbox)
@@ -633,7 +709,11 @@ class FakeCaptureEngine:
             return 0, ""
         if script == extension_check.EXT_PROBE:
             variant = {"peer6": "capability_free", "netrawuser6": "net_raw_user", "netrawroot6": "net_raw_root"}[role]
-            self.test.assertEqual(command[5:], (TARGET6, str(PORT), "1000", extension_check.EXT_HEADER.hex()))
+            self.test.assertIn(command[5:], [(TARGET6, str(port), "1000", extension_check.EXT_HEADER.hex())
+                                             for port in (PORT, EXCLUDED)])
+            if self.latest.endswith("ipv6_ext"):
+                self.test.assertEqual(variant, "net_raw_root")
+                self.captures[self.latest]["exchanged"] = True
             return 0, self.generator.get(variant, default_ext_output(variant))
         if script == extension_check.CAPTURE_EXCHANGE:
             self.captures[self.latest]["exchanged"] = True
@@ -676,6 +756,8 @@ class FakeCaptureEngine:
             frames = FLOW + ((OTHER,) if self.keeps_excluded else ())
         elif kind == "ipv6":
             frames = FLOW6 + (flow(PEER4, TARGET4) if self.keeps_ipv4 else ())
+        elif kind == "ipv6_ext":
+            frames = OPTIONS_FLOW if self.options_frames is None else self.options_frames
         else:
             frames = ()
         if kind == "restart" and self.target_restarted:
@@ -753,7 +835,7 @@ class CaptureScenarioTests(unittest.TestCase):
         result = self.scenario(engine)
         self.assertEqual(result["status"], "passed", result.get("error"))
         self.assertEqual(set(result["captures"]),
-                         {"traffic", "empty", "bound", "abrupt", "target_loss", "ipv6", "restart"})
+                         {"traffic", "empty", "bound", "abrupt", "target_loss", "ipv6", "ipv6_ext", "restart"})
         self.assertEqual({name: control["status"] for name, control in result["refusals"].items()},
                          dict.fromkeys(("invalid_filter", "unavailable_interface", "without_net_raw"), "passed"))
         runs = [call for call in engine.calls if call[0] == "run"]
