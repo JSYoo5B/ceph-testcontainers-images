@@ -46,6 +46,9 @@ preflight checks eligibility before interpreting source execution failures.
 Umbrella separates common OSD files from the classic implementation. Extraction
 preserves the installed `ceph-osd` alternatives link chain and its
 `ceph-osd-classic` target in the essential role, keeping the public entrypoint.
+Distribution inputs explicitly install the matching-version
+`ceph-mgr-mirroring` package; its split module is selected into essential
+alongside the core manager modules.
 
 An upstream source Git tag, registry image, APT package and native qualification
 are separate observations. Umbrella's registry and distribution artifacts were

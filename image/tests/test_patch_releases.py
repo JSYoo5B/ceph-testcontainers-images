@@ -34,6 +34,10 @@ class PatchReleasesTest(unittest.TestCase):
             self.assertEqual(args["CEPH_PACKAGE_VERSION"], name + "-1" + suite)
             self.assertEqual(args["CEPH_RELEASE"], name)
             self.assertEqual(args["CEPH_SUITE"], suite)
+        for variant in ("debian", "ubuntu"):
+            args = patches.build_args("21.2.0", variant)
+            self.assertEqual(args["CEPH_MGR_PACKAGES"],
+                             "ceph-mgr-mirroring=" + args["CEPH_PACKAGE_VERSION"])
 
     def test_selection_is_bounded_and_duplicate_free(self):
         self.assertEqual(patches.selected("all"), list(patches.PATCHES))
@@ -51,6 +55,8 @@ class PatchReleasesTest(unittest.TestCase):
             lambda e: e["debian"].update(package="20.2.4-1bookworm"),
             lambda e: e["debian"].update(unavailable={}),
             lambda e: e["ubuntu"].update(architectures=["amd64", "amd64"]),
+            lambda e: e["ubuntu"].update(mgr_packages="ceph-mgr-mirroring"),
+            lambda e: e["ubuntu"].update(mgr_packages="ceph-mgr-mirroring=21.2.0-1noble"),
         )
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "inputs.json"

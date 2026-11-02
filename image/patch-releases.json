@@ -866,7 +866,7 @@
         "base_name": "debian:bookworm-slim",
         "suite": "bookworm",
         "package": "21.2.0-1bookworm",
-        "mgr_packages": "",
+        "mgr_packages": "ceph-mgr-mirroring=21.2.0-1bookworm",
         "architectures": [
           "amd64",
           "arm64"
@@ -883,6 +883,15 @@
               "url": "https://download.ceph.com/debian-21.2.0/dists/bookworm/main/binary-arm64/Packages.gz",
               "sha256": "221e30c3538af27f9d31d16ed819c5e5f850dfb01892cffb4f4222d00789aba2"
             }
+          },
+          "additional_packages": {
+            "ceph-mgr-mirroring": {
+              "version": "21.2.0-1bookworm",
+              "architecture": "all",
+              "filename": "pool/main/c/ceph/ceph-mgr-mirroring_21.2.0-1bookworm_all.deb",
+              "size": 33996,
+              "sha256": "8d13770158a11ee2c56144de0188d5309629b30d6e7ac9cf9a5f7f7736208e00"
+            }
           }
         }
       },
@@ -891,7 +900,7 @@
         "base_name": "ubuntu:24.04",
         "suite": "noble",
         "package": "21.2.0-1noble",
-        "mgr_packages": "",
+        "mgr_packages": "ceph-mgr-mirroring=21.2.0-1noble",
         "architectures": [
           "amd64",
           "arm64"
@@ -907,6 +916,15 @@
             "arm64": {
               "url": "https://download.ceph.com/debian-21.2.0/dists/noble/main/binary-arm64/Packages.gz",
               "sha256": "252d4e2532da18b58df96b3a3243acd2507d70dd65ec442b16130fd8a22309c4"
+            }
+          },
+          "additional_packages": {
+            "ceph-mgr-mirroring": {
+              "version": "21.2.0-1noble",
+              "architecture": "all",
+              "filename": "pool/main/c/ceph/ceph-mgr-mirroring_21.2.0-1noble_all.deb",
+              "size": 34630,
+              "sha256": "b9f662c89e4fac28a035cb61d26bcd2753ca53024262f88c81292b9daabc9d35"
             }
           }
         }

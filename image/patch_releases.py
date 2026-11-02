@@ -34,6 +34,13 @@ def load(path=None):
                         or not value.get("package", "").startswith(name + "-")
                         or value.get("suite") not in ("bookworm", "jammy", "noble")):
                     raise ValueError("Distribution input must pin its base and matching Ceph package")
+                extras = value.get("mgr_packages")
+                if not isinstance(extras, str):
+                    raise ValueError("Manager package inputs must be explicit")
+                for extra in extras.split():
+                    package, separator, version = extra.partition("=")
+                    if package.startswith("ceph-") and (not separator or version != value["package"]):
+                        raise ValueError("Extra Ceph packages must pin the matching package version")
             if set(value.get("unavailable", {})) != set(ARCHITECTURES) - set(arches):
                 raise ValueError("Every unavailable architecture needs an explicit reason")
     return data["releases"]
