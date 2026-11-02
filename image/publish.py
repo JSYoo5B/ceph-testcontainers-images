@@ -246,6 +246,8 @@ def collect_candidates(directory, revision, run_id, release, channel=None):
             require(candidate.get("channel") in (None, "production"),
                     "A discovery candidate cannot enter production promotion")
         require(candidate.get("release") == release, "Candidates must be built for release " + release)
+        if channel:
+            validate_discovery_cohort(path, candidate)
         require(set(candidate.get("images", {})) == set(active_roles()), "Incomplete candidate roles")
         builds = set()
         for role, entry in candidate["images"].items():
@@ -266,6 +268,22 @@ def collect_candidates(directory, revision, run_id, release, channel=None):
     require(set(result) == expected, "Every committed eligible candidate platform must pass" if channel
             else "All six candidate platforms must pass")
     return result
+
+
+def validate_discovery_cohort(candidate_path, candidate):
+    """A successful upload is insufficient when later owned cleanup failed."""
+    try:
+        report = json.loads(candidate_path.with_name("report.json").read_text())
+    except (OSError, ValueError) as error:
+        raise PublishError("Final discovery cohort report is missing or unreadable") from error
+    require(isinstance(report, dict) and report.get("status") == "passed"
+            and report.get("publication") == "passed", "Final discovery cohort did not pass")
+    require(all(report.get(field) == candidate.get(field)
+                for field in ("release", "variant", "architecture", "revision", "run_id")),
+            "Final discovery cohort report belongs to a different candidate")
+    errors = report.get("cleanup_errors", [])
+    require(isinstance(errors, list) and not errors and report.get("image_cleanup") == "passed",
+            "Final discovery cohort cleanup did not pass")
 
 
 def promote(args):

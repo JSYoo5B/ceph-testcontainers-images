@@ -38,6 +38,9 @@ def discovery_candidates(root, cohorts=ALL_COHORTS):
         for entry in value["images"].values():
             entry["native_versions"] = {"ceph": {"release": RELEASE, "commit": "b" * 40}}
         publish.save(path, value)
+        publish.save(path.with_name("report.json"), {field: value[field] for field in
+                     ("release", "variant", "architecture", "revision", "run_id")} |
+                     {"status": "passed", "publication": "passed", "image_cleanup": "passed"})
 
 
 class DiscoveryPublicationTests(unittest.TestCase):
@@ -145,6 +148,46 @@ class DiscoveryPublicationTests(unittest.TestCase):
                     publish.collect_candidates(root, "a" * 40, "123-1", RELEASE, publish.DISCOVERY)
             path.unlink()
             with self.assertRaises(publish.PublishError):
+                publish.collect_candidates(root, "a" * 40, "123-1", RELEASE, publish.DISCOVERY)
+
+    def test_final_cleanup_failure_after_staging_blocks_all_registry_promotion(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            discovery_candidates(root)
+            candidate = json.loads((root / "official-arm64/candidate.json").read_text())
+            self.assertEqual(candidate["status"], "passed")
+            path = root / "official-arm64/report.json"
+            final = json.loads(path.read_text())
+            # This is the builder's actual failure boundary: staging completed,
+            # then its finally block failed to remove an owned builder or image.
+            final.update(status="failed", cleanup_errors=["owned builder cleanup failed"])
+            self.assertEqual(final["publication"], "passed")
+            publish.save(path, final)
+            args = SimpleNamespace(candidates=root, revision="a" * 40, run_id="123-1", release=RELEASE)
+            with mock.patch.object(publish, "run") as run, \
+                    mock.patch.object(publish, "verify_image") as verify, self.assertRaises(publish.PublishError):
+                publish.promote_discovery(args)
+            run.assert_not_called()
+            verify.assert_not_called()
+
+    def test_missing_failed_or_mismatched_final_cohort_evidence_cannot_promote(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            discovery_candidates(root)
+            path = root / "official-arm64/report.json"
+            original = json.loads(path.read_text())
+            changes = [{"publication": "failed"}, {"status": "unavailable"},
+                       {"image_cleanup": "retained_unpublished"},
+                       {"cleanup_errors": ["image cleanup failed"]}, {"cleanup_errors": None}]
+            changes += [{field: "different"} for field in
+                        ("release", "variant", "architecture", "revision", "run_id")]
+            for change in changes:
+                with self.subTest(change=change):
+                    publish.save(path, original | change)
+                    with self.assertRaises(publish.PublishError):
+                        publish.collect_candidates(root, "a" * 40, "123-1", RELEASE, publish.DISCOVERY)
+            path.unlink()
+            with self.assertRaisesRegex(publish.PublishError, "missing or unreadable"):
                 publish.collect_candidates(root, "a" * 40, "123-1", RELEASE, publish.DISCOVERY)
 
     def test_committed_eligibility_controls_partial_indexes_not_a_missing_candidate(self):
