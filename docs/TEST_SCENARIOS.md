@@ -83,16 +83,20 @@ the image's effective paths rather than a distribution's fixed layout.
 | Monmap creation | essential | Create a temporary monmap with a supplied FSID and v1/v2 MON addresses; verifies the monmap tool accepts the runtime bootstrap inputs |
 | Mirror/admin executables | rbd-aux/cephfs/rgw | Run `rbd-mirror`, `cephfs-mirror` and `radosgw-admin` with `--version`; verifies startup and version identity, while replication is checked in separate functional scenarios |
 | OSD object-class files | essential | Query `osd_class_dir` and locate the rbd, rgw, cephfs, hello and lock shared objects; verifies the required class files exist |
-| OSD object-class loading | essential | Preload each required class into `ceph-osd` with eager ELF relocation, run `--version` and reject loader errors even if the process exits zero; verifies class dependency and OSD symbol resolution, without claiming class methods executed |
+| OSD object-class ELF relocation | essential | On glibc, use the loader's trace/warn/eager-relocation mode in the OSD export scope, require the requested class in the trace and reject loader errors in either output stream even on exit zero. On musl, retain the native preload/version probe. Unknown libc fails the check |
 | BlueStore tool | essential | Run `ceph-bluestore-tool --version` and parse release/commit; verifies the executable and its shared-library closure load. It does not open or modify a store |
 | OSD plugin files | essential | Query `plugin_dir` and require shared objects in the compressor and erasure-code groups; verifies plugin files are present, without claiming every plugin has loaded or processed data |
 | Gateway prerequisites | rgw | Require `readlink` on PATH and run `radosgw`/`radosgw-admin` version checks; verifies required gateway/admin executables start and the socket-inspection utility is available |
 | Metadata-server prerequisite | cephfs | Run `ceph-mds --version`; verifies the MDS executable and its startup dependency closure load |
 | CephFS journal tool | cephfs | Run `cephfs-journal-tool --version` and parse release/commit; verifies the executable and its shared-library closure load. It does not read or modify a journal. Skipped for the Alpine experiment, whose contract omits the tool |
 
-OSD object-class loading does not require Python or a compiler in the OSD
-image. Class method execution, encrypted I/O and striper data operations
-are verified by their functional scenarios.
+OSD object-class relocation checks do not require Python or a compiler in the
+OSD image. The glibc trace probe does not execute constructors, IFUNC resolvers
+or class initialization. Tool/version startup is checked separately. Class
+method execution, encrypted I/O and striper data operations are verified by
+their functional scenarios. A preload into `ceph-osd --version` runs before
+normal OSD initialization and is not equivalent to loading a class in a
+running OSD.
 
 A quick PASS proves these prerequisites. Functional PASS requires the
 cluster operations below; file presence and `--version` do not qualify.

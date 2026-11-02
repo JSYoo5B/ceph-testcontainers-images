@@ -34,6 +34,9 @@ use Jammy because their Noble repositories are absent; 20.2.1, 20.2.2 and
 20.2.4 use Noble. Umbrella uses Bookworm/Noble for the distribution variants.
 Its official Rocky Linux 10 AMD64 source requires an x86-64-v3 CPU; the build
 preflight checks eligibility before interpreting source execution failures.
+Umbrella separates common OSD files from the classic implementation. Extraction
+preserves the installed `ceph-osd` alternatives link chain and its
+`ceph-osd-classic` target in the essential role, keeping the public entrypoint.
 
 An upstream source Git tag, registry image, APT package and native qualification
 are separate observations. Umbrella's registry and distribution artifacts were
@@ -52,6 +55,10 @@ runtime contract on its native architecture. Quick checks establish required
 executables, libraries, bindings, observed Ceph release/build and cleanup.
 They **do not** establish cluster interoperability or resolve known historical
 Ceph failures, such as Squid 19.2.6 RGW realm bootstrap behavior.
+The glibc object-class quick probe checks ELF dependencies and strong symbol
+relocation without running pre-main constructors or IFUNC resolvers. Normal
+tool/version execution is checked separately; class initialization and methods
+need functional evidence. The native musl preload probe is preserved.
 
 Only the exact checked local config/layer identities are staged. Promotion
 verifies registry configs/layers and creates indexes containing exactly the
