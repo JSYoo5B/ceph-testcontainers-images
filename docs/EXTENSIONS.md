@@ -200,6 +200,68 @@ The reference sources behind the design (research references, not the identity o
 
 Not done: the native orchestration (establishing the prefix with the selected traffic, choosing a limit of prefix plus 5 or 17 bytes, further traffic, `SIGTERM`), the loopback diagnostic for a tcpdump that keeps running, and any native result on either architecture. The Docker-free tests use fakes, synthetic pcap files whose last record header or body is cut, and synthetic supervisor outputs; they run no real file-size limit.
 
+## blockio helper (contract 1, quick check only)
+
+The blockio helper supplies user-space tools for bounded block-I/O fixtures.
+It contains no Ceph component. The module creates and owns its scratch storage,
+loop devices and device-mapper mappings; the image never installs packages or
+configures the engine at run time. The reference helper has a quick image check
+and is not published. No kernel or privileged-runtime support is implied by
+passing that check.
+
+### Image contract
+
+| Requirement | Detail |
+| --- | --- |
+| Platform and user | Linux `amd64` or `arm64`; the module runs the helper as root. |
+| Entry | The module overrides entrypoint and command; `sleep infinity` keeps the helper idle. |
+| Executables on `PATH` | `sh`, `sleep`, `python3`, `dmsetup`, `losetup`, `blockdev`. |
+| Device-mapper CLI | `dmsetup --help` loads and advertises `create`, `remove`, `suspend`, `resume`, `load`, `table`, `info`, `--verifyudev`, `--noudevsync` and `--uuid`. |
+| Loop CLI | `losetup --help` advertises `--find`, `--show`, `--detach`, `--associated`, `--list`, `--json` and `--output`; `losetup --version` reports util-linux. |
+| Block CLI | `blockdev --help` advertises `--getsize64`; `blockdev --version` reports util-linux. |
+| Command supervision | `python3` imports `base64`, `ctypes`, `errno`, `json`, `os`, `select`, `signal`, `struct`, `subprocess`, `sys`, `tempfile` and `time`; `prctl(PR_SET_CHILD_SUBREAPER)` succeeds through `ctypes`. |
+| Filesystem and closure | `/tmp` is writable; each executable loads with its shared-library dependencies. |
+
+Labels do not establish compatibility. The reference image declares
+`io.ceph-testcontainers.extension=blockio` and
+`io.ceph-testcontainers.extension.contract=1`, but the checker accepts any image
+that passes the executable and behavior checks above.
+
+### Quick check
+
+```sh
+make blockio-image
+make blockio-check
+python3 image/extension_check.py --extension blockio --image my-registry/blockio-helper:dev
+```
+
+The [probe](../image/extensions/blockio/check-blockio.sh) runs as root with
+`--network=none` and `--cap-drop=ALL`. It uses only help for `dmsetup`, and help
+and version for `losetup` and `blockdev`. It neither opens host devices nor
+queries targets, allocates devices, loads kernel modules or creates mappings.
+The help commands exercise the executables' loader closure. `extension-report.json`
+records the checks and util-linux versions, and `quick.log` records their output.
+`--functional`, `--target` and netem-specific options are rejected.
+
+### Reference helper and runtime admission
+
+[image/extensions/blockio](../image/extensions/blockio) uses the pinned
+`debian:bookworm-slim` base and installs Debian's `python3`, `dmsetup`, `mount`
+and `util-linux` packages. In bookworm, `mount` supplies `losetup`, and
+`util-linux` supplies `blockdev`. Package licenses and corresponding-source
+pointers remain in the image with `/usr/share/ceph-testcontainers/SOURCES.txt`.
+CI builds and checks the image on native amd64 and arm64 runners independently
+of Ceph releases and published extensions.
+
+Privileged root execution, access to the engine host's `/dev`, a private bounded
+tmpfs and already registered device-mapper linear/error/delay targets belong to
+the module's runtime admission. An absent target must be rejected before any
+attempt to use it; module loading and automatic target loading are outside the
+contract. The caller must own and clean up every loop device and mapping, and
+must refuse unrelated or still-open devices. This image-only check establishes
+none of those properties. A functional qualification and publication need
+separate checks; existing publication gates remain unchanged.
+
 ## clock-probe helper (contract 1, quick check only)
 
 The clock-probe helper is the placement for the clock-skew and time-jump scratch work in [ceph-testcontainers-go#66](https://github.com/JSYoo5B/ceph-testcontainers-go/issues/66). That research needs a C compiler and a pinned libfaketime interposer inside an isolated scratch container, and the essential role images carry neither. The helper provides them, so that a fixture needs no toolchain on the runner, no matching of the image's libc and no network at test time. The helper contains no Ceph component. Nothing in it applies an offset to a Ceph daemon, decides what a clock fault means or qualifies a clock-fault backend: a module starts the helper as a scratch container of its own and runs its own probe in it.

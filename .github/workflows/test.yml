@@ -212,6 +212,42 @@ jobs:
           path: ${{ runner.temp }}/clock-probe/
           if-no-files-found: warn
 
+  blockio-extension:
+    # The blockio helper has only its quick check so far; it is built and
+    # checked here on both architectures and never published.
+    strategy:
+      fail-fast: false
+      matrix:
+        architecture: [amd64, arm64]
+        include:
+          - architecture: amd64
+            runner: ubuntu-24.04
+          - architecture: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.9'
+      - uses: docker/setup-buildx-action@v4
+        with:
+          driver: docker-container
+      - name: Build the helper
+        run: make blockio-image PLATFORM="linux/${{ matrix.architecture }}" IMAGE_REPOSITORY=ceph-check
+      - name: Check the blockio contract
+        run: |
+          python3 image/extension_check.py --extension blockio --image ceph-check:extension-blockio \
+            --platform "linux/${{ matrix.architecture }}" --output-dir "$RUNNER_TEMP/blockio"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: extension-blockio-${{ matrix.architecture }}-check
+          retention-days: ${{ job.status == 'failure' && 14 || 7 }}
+          path: ${{ runner.temp }}/blockio/
+          if-no-files-found: warn
+
   promote-extension:
     if: inputs.publish
     needs: netem-extension

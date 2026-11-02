@@ -1,4 +1,4 @@
-.PHONY: check base-check checker-test functional-test roles-test extension-test extension-images extension-selectors extension-check capture-image capture-check capture-functional-check clock-probe-image clock-probe-check image-check official-check role-images role-images-full debian-images ubuntu-images alpine-images
+.PHONY: check base-check checker-test functional-test roles-test extension-test extension-images extension-selectors extension-check capture-image capture-check capture-functional-check clock-probe-image clock-probe-check blockio-image blockio-check image-check official-check role-images role-images-full debian-images ubuntu-images alpine-images
 CEPH_RELEASE ?= 20.2.4
 OFFICIAL_IMAGE ?= $(shell python3 image/releases.py official $(CEPH_RELEASE))
 IMAGE_REPOSITORY ?= ceph-testcontainers
@@ -102,6 +102,17 @@ clock-probe-image:
 # Example: make clock-probe-check CLOCK_PROBE_IMAGE=my-registry/clock-probe:dev
 clock-probe-check:
 	python3 image/extension_check.py --extension clock-probe --image "$(CLOCK_PROBE_IMAGE)"
+
+# Block-I/O tools only; the caller admits the privileged kernel/device runtime.
+BLOCKIO_IMAGE ?= $(IMAGE_REPOSITORY):extension-blockio
+
+blockio-image:
+	$(call registry_cache) \
+	docker buildx build --load --platform "$(PLATFORM)" --provenance=false $$cache_args \
+		-t "$(IMAGE_REPOSITORY):extension-blockio" image/extensions/blockio
+
+blockio-check:
+	python3 image/extension_check.py --extension blockio --image "$(BLOCKIO_IMAGE)"
 
 # The selector profiles of the netem contract, one per line; CI checks them all.
 EXTENSION_SELECTORS = python3 -c 'import sys; sys.path.insert(0, "image"); import extension_check; print("\n".join(extension_check.SELECTORS))'
