@@ -423,8 +423,7 @@
         "package": "19.2.6-1jammy",
         "mgr_packages": "python3-distutils",
         "architectures": [
-          "amd64",
-          "arm64"
+          "amd64"
         ],
         "metadata": {
           "release_url": "https://download.ceph.com/debian-19.2.6/dists/jammy/Release",
@@ -438,6 +437,29 @@
               "url": "https://download.ceph.com/debian-19.2.6/dists/jammy/main/binary-arm64/Packages.gz",
               "sha256": "af0f68bb2c7b496ff34029708bedf0fbc9a70845e807d67106ae01abcb9e3e61"
             }
+          }
+        },
+        "unavailable": {
+          "arm64": "Required libradosstriper1 artifact does not match signed APT metadata; no authenticated matching artifact or Noble alternative was available."
+        },
+        "unavailable_evidence": {
+          "arm64": {
+            "classification": "upstream_metadata_artifact_mismatch",
+            "checked_at": "2026-11-02T03:03:32Z",
+            "package_url": "https://download.ceph.com/debian-19.2.6/pool/main/c/ceph/libradosstriper1_19.2.6-1jammy_arm64.deb",
+            "expected": {
+              "size": 437982,
+              "sha256": "f9503cf10e1ec7656c36d4047955fe78970be595692c8d44b9140f01178a8795"
+            },
+            "observed": {
+              "size": 437970,
+              "sha256": "78d35ff92ecbc40e51509186f194bce8e2a662ccc2de2004f9072c0218703b68",
+              "reads": "canonical and cache-bypassed HTTPS"
+            },
+            "release_signature_key": "08B73419AC32B4E966C1A330E84AC2C0460F3994",
+            "release_signature_sha256": "676efc421b436331668811d1549d56ecbf9d4546df86963df7f6a3bc43ca35d2",
+            "noble_release_http_status": 404,
+            "original_failure_run": 41377472802
           }
         }
       }

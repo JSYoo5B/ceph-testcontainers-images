@@ -22,11 +22,20 @@ APT metadata used to establish availability. Its 14 patch versions are:
 - Umbrella: 21.2.0.
 
 All official sources have amd64 and arm64 children. Debian Bookworm and Ubuntu
-Jammy/Noble packages provide 80 eligible native cohorts, yielding 480 platform
+Jammy/Noble packages provide 79 eligible native cohorts, yielding 474 platform
 role images. The exceptions are Debian 19.2.0–19.2.3 arm64: the required
 matching-release packages are absent, and alternative Debian suites return
 404. These four cohorts remain explicitly unavailable; no source build or
 substitution with another distribution/release is performed.
+
+Ubuntu 19.2.6 arm64 has a different input failure: its signed Jammy metadata
+requires a 437982-byte `libradosstriper1` archive with SHA256 `f9503cf1…`,
+but canonical and cache-bypassed downloads both return 437970 bytes with
+SHA256 `78d35ff9…`. The current Release signature and metadata hashes verify;
+the package bytes do not. Noble is unavailable. The catalogue retains full
+expected/observed identities and the original failed build run. This cohort
+remains externally blocked, and its Ubuntu index has only the checked amd64
+child. No integrity check is disabled to use the mismatching archive.
 
 Early Debian packages use `19.2.x-1~bpo12+1`, rather than the newer
 `-1bookworm` suffix. Ubuntu Squid uses Jammy. Tentacle 20.2.0 and 20.2.3 also
@@ -74,8 +83,8 @@ ghcr.io/jsyoo5b/ceph-testcontainers-images:discovery-<variant>-<patch>-<role>
 ghcr.io/jsyoo5b/ceph-testcontainers-images:discovery-<variant>-<patch>-<role>-linux-<architecture>
 ```
 
-Variants are `official`, `debian` and `ubuntu`. Debian's four old single-child
-indexes intentionally have no arm64 child. Consumers should retain the digest
+Variants are `official`, `debian` and `ubuntu`. Debian's four old versions and
+Ubuntu 19.2.6 intentionally have no arm64 child. Consumers should retain the digest
 and actual build evidence from the promotion artifacts, rather than infer a
 support guarantee from a version or tag name.
 

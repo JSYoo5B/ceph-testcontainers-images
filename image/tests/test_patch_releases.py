@@ -14,13 +14,18 @@ import releases
 class PatchReleasesTest(unittest.TestCase):
     def test_inventory_and_production_are_distinct(self):
         self.assertEqual(len(patches.PATCHES), 14)
-        self.assertEqual(sum(len(patches.expected_cohorts(name)) for name in patches.PATCHES), 80)
+        self.assertEqual(sum(len(patches.expected_cohorts(name)) for name in patches.PATCHES), 79)
         self.assertEqual(set(releases.RELEASES), {"19.2.5", "20.2.4"})
         for name in ("19.2.0", "19.2.1", "19.2.2", "19.2.3"):
             self.assertNotIn(("debian", "arm64"), patches.expected_cohorts(name))
             self.assertIn("arm64", patches.release(name)["debian"]["unavailable"])
             self.assertEqual(patches.build_args(name, "debian")["CEPH_PACKAGE_VERSION"], name + "-1~bpo12+1")
         self.assertEqual(len(patches.expected_cohorts("21.2.0")), 6)
+        self.assertNotIn(("ubuntu", "arm64"), patches.expected_cohorts("19.2.6"))
+        evidence = patches.release("19.2.6")["ubuntu"]["unavailable_evidence"]["arm64"]
+        self.assertEqual(evidence["classification"], "upstream_metadata_artifact_mismatch")
+        self.assertNotEqual(evidence["expected"]["sha256"], evidence["observed"]["sha256"])
+        self.assertNotEqual(evidence["expected"]["size"], evidence["observed"]["size"])
 
     def test_exact_package_repository_selection(self):
         for name, suite in (("19.2.0", "jammy"), ("20.2.0", "jammy"),
