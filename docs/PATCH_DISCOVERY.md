@@ -137,3 +137,7 @@ Per-version private builders/cache and owned temporary image tags bound disk
 use without globally pruning unrelated Docker resources. Raw image archives
 are not retained as workflow artifacts; reports, package/source manifests,
 native checks, candidate digests and promotion receipts are retained instead.
+Timeout settlement escalates signals for the entire owned process group even
+after its leader exits. An unconfirmed stop is recorded separately, blocks
+resource cleanup and stops the packed job before another patch starts; the
+summary lists the remaining patches as `not_started`.

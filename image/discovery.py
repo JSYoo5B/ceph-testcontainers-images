@@ -23,6 +23,7 @@ ROOT = Path(__file__).resolve().parents[1]
 REPOSITORY = "ceph-discovery"
 REGISTRY = "ghcr.io/jsyoo5b/ceph-testcontainers-images"
 COHORT_SECONDS = 6 * 60 * 60 - 300
+STOP_STEPS = ((signal.SIGINT, 30), (signal.SIGTERM, 10), (signal.SIGKILL, 5))
 
 
 class CommandError(RuntimeError):
@@ -35,6 +36,28 @@ class EnvironmentIneligible(ValueError):
     classification = "environment_ineligible"
 
 
+def settle_group(process):
+    """Reap the leader, but settle its entire owned group independently."""
+    for action, allowance in STOP_STEPS:
+        try:
+            os.killpg(process.pid, action)
+        except ProcessLookupError:
+            process.poll()
+            return True
+        deadline = time.monotonic() + allowance
+        while True:
+            process.poll()
+            try:
+                os.killpg(process.pid, 0)
+            except ProcessLookupError:
+                return True
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            time.sleep(min(0.05, remaining))
+    return False
+
+
 def run(command, log, timeout, env=None, check_result=True):
     """Own the process group so timeout settlement also reaches build children."""
     with log.open("w") as output:
@@ -43,16 +66,12 @@ def run(command, log, timeout, env=None, check_result=True):
         try:
             code = process.wait(timeout=timeout)
         except subprocess.TimeoutExpired:
-            for action, allowance in ((signal.SIGINT, 30), (signal.SIGTERM, 10), (signal.SIGKILL, 5)):
-                try:
-                    os.killpg(process.pid, action)
-                except ProcessLookupError:
-                    break
-                try:
-                    process.wait(timeout=allowance)
-                    break
-                except subprocess.TimeoutExpired:
-                    continue
+            try:
+                settled = settle_group(process)
+            except OSError as error:
+                raise CommandError("stop_unconfirmed", command) from error
+            if not settled:
+                raise CommandError("stop_unconfirmed", command)
             raise CommandError("timeout", command)
     if check_result and code:
         raise CommandError("command_failed", command, code)
@@ -150,14 +169,21 @@ def one(args, release, deadline, invoke=run):
     env = dict(os.environ, BUILDX_BUILDER=builder)
     owned, cleanup_tags, introduced_source = False, [], None
     builder_dispatched, checked, published = False, False, False
+    stop_confirmed = True
     preparation, assemble, role_tags, source = build_commands(release, args.variant, args.architecture, directory)
     prefix = REPOSITORY + ":discovery-" + args.variant + "-" + release + "-*"
 
     def command(argv, name, limit, check_result=True, cleanup=False):
+        nonlocal stop_confirmed
         remaining = 120 if cleanup else deadline - time.monotonic()
         if remaining <= 0:
             raise CommandError("cohort_timeout", argv)
-        return invoke(argv, directory / (name + ".log"), min(limit, remaining), env, check_result)
+        try:
+            return invoke(argv, directory / (name + ".log"), min(limit, remaining), env, check_result)
+        except CommandError as error:
+            if error.classification == "stop_unconfirmed":
+                stop_confirmed = False
+            raise
 
     def local_tags(name, cleanup=False):
         command(["docker", "image", "ls", "--filter", "reference=" + prefix,
@@ -171,6 +197,8 @@ def one(args, release, deadline, invoke=run):
                 if "x86-64-v3 (supported, searched)" not in (directory / "cpu-preflight.log").read_text():
                     raise EnvironmentIneligible("Umbrella official AMD64 requires x86-64-v3")
             except (OSError, CommandError) as error:
+                if isinstance(error, CommandError) and error.classification == "stop_unconfirmed":
+                    raise
                 raise EnvironmentIneligible("Cannot qualify Umbrella x86-64-v3 CPU: " + str(error)) from error
         if local_tags("ownership-before"):
             raise ValueError("Refuse to overwrite pre-existing local discovery tags")
@@ -206,7 +234,7 @@ def one(args, release, deadline, invoke=run):
             result["publication"] = "failed"
     finally:
         errors = []
-        if owned and (published or not checked):
+        if stop_confirmed and owned and (published or not checked):
             try:
                 observed = local_tags("ownership-after", cleanup=True)
                 allowed = set(role_tags.values()) | {tags(args.variant, release)[1]}
@@ -218,14 +246,20 @@ def one(args, release, deadline, invoke=run):
             except (CommandError, ValueError, OSError) as error:
                 errors.append(str(error))
         else:
-            result["image_cleanup"] = "retained_unpublished" if checked else "not_owned"
-        if builder_dispatched:
+            result["image_cleanup"] = ("not_attempted_unconfirmed_stop" if not stop_confirmed
+                                       else "retained_unpublished" if checked else "not_owned")
+        if stop_confirmed and builder_dispatched:
             try:
                 command(["docker", "buildx", "rm", builder], "builder-cleanup", 120, cleanup=True)
             except (CommandError, OSError) as error:
                 errors.append(str(error))
         if errors:
             result.update(status="failed", cleanup_errors=errors)
+        if not stop_confirmed:
+            result.setdefault("classification", "stop_unconfirmed")
+            result.setdefault("image_cleanup", "not_completed_unconfirmed_stop")
+            result.update(status="failed", process_stop="unconfirmed",
+                          builder_cleanup="not_confirmed")
         save(directory / "report.json", result)
     return result
 
@@ -268,9 +302,14 @@ def main(argv=None, invoke=run):
         return 0
     args.output.mkdir(parents=True, exist_ok=True)
     deadline = time.monotonic() + COHORT_SECONDS
-    results = [one(args, name, deadline, invoke) for name in args.names]
+    results = []
+    for name in args.names:
+        results.append(one(args, name, deadline, invoke))
+        if results[-1].get("process_stop") == "unconfirmed":
+            break
     failed = any(result["status"] not in ("passed", "unavailable") for result in results)
     save(args.output / "summary.json", {"status": "failed" if failed else "complete", "results": results,
+                                       "not_started": args.names[len(results):],
                                        "finished_at": datetime.now(timezone.utc).isoformat()})
     return 1 if failed else 0
 

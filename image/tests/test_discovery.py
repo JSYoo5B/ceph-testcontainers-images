@@ -6,10 +6,15 @@ Docker, image contents, package installation or native Ceph compatibility.
 import contextlib
 import io
 import json
+import os
 from pathlib import Path
 import sys
+import signal
+import subprocess
 import tempfile
 import unittest
+from unittest import mock
+import time
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import discovery
@@ -185,6 +190,87 @@ class DiscoveryTests(unittest.TestCase):
         with self.assertRaises(discovery.CommandError) as raised:
             discovery.run([sys.executable, "-c", "import time; time.sleep(5)"], log, 0.03)
         self.assertEqual(raised.exception.classification, "timeout")
+
+    def test_timeout_settles_descendants_after_leader_exits(self):
+        for ignore_term in (False, True):
+            with self.subTest(ignore_term=ignore_term):
+                pidfile = self.root / ("child-" + str(ignore_term))
+                marker = pidfile.with_suffix(".marker")
+                parentfile = pidfile.with_suffix(".parent")
+                child = ("import os,signal,time; from pathlib import Path; "
+                         "signal.signal(signal.SIGINT,signal.SIG_IGN); "
+                         + ("signal.signal(signal.SIGTERM,signal.SIG_IGN); " if ignore_term else "")
+                         + "Path(" + repr(str(pidfile)) + ").write_text(str(os.getpid())); "
+                         "time.sleep(1.4); Path(" + repr(str(marker)) + ").write_text('late write'); time.sleep(10)")
+                parent = ("import os,signal,subprocess,sys,time; from pathlib import Path; "
+                          "signal.signal(signal.SIGINT,lambda *_:sys.exit(0)); "
+                          "Path(" + repr(str(parentfile)) + ").write_text(str(os.getpid())); "
+                          "subprocess.Popen([sys.executable,'-c'," + repr(child) + "]); time.sleep(10)")
+                started = time.monotonic()
+                try:
+                    with mock.patch.object(discovery, "STOP_STEPS", (
+                            (signal.SIGINT, .12), (signal.SIGTERM, .12), (signal.SIGKILL, 1))):
+                        with self.assertRaises(discovery.CommandError) as raised:
+                            discovery.run([sys.executable, "-c", parent], pidfile.with_suffix(".log"), .5)
+                    self.assertEqual(raised.exception.classification, "timeout")
+                    self.assertTrue(pidfile.exists(), "descendant must install signal handlers before timeout")
+                    with self.assertRaises(ProcessLookupError):
+                        os.killpg(int(parentfile.read_text()), 0)
+                    time.sleep(max(0, 1.7 - (time.monotonic() - started)))
+                    self.assertFalse(marker.exists(), "descendant wrote after timeout settlement")
+                finally:
+                    if parentfile.exists():
+                        try:
+                            os.killpg(int(parentfile.read_text()), signal.SIGKILL)
+                        except ProcessLookupError:
+                            pass
+
+    def test_unconfirmed_group_stop_is_distinct_from_settled_timeout(self):
+        # A separate reaper owns this real process when settlement is unavailable.
+        real_popen = subprocess.Popen
+        owned = []
+        def capture(*args, **kwargs):
+            process = real_popen(*args, **kwargs)
+            owned.append(process)
+            return process
+        try:
+            with mock.patch.object(discovery.subprocess, "Popen", side_effect=capture), \
+                    mock.patch.object(discovery, "settle_group", return_value=False):
+                with self.assertRaises(discovery.CommandError) as raised:
+                    discovery.run([sys.executable, "-c", "import time; time.sleep(10)"],
+                                  self.root / "unconfirmed.log", .03)
+            self.assertEqual(raised.exception.classification, "stop_unconfirmed")
+        finally:
+            for process in owned:
+                os.killpg(process.pid, signal.SIGKILL)
+                process.wait(timeout=2)
+
+    def test_unconfirmed_stop_blocks_cleanup_and_remaining_patches(self):
+        commands = Commands()
+        def unconfirmed(command, *args, **kwargs):
+            if command[:2] == ["docker", "pull"]:
+                raise discovery.CommandError("stop_unconfirmed", command)
+            return commands(command, *args, **kwargs)
+        self.assertEqual(self.execute(unconfirmed, "--releases", "19.2.0,19.2.1"), 1)
+        self.assertEqual(self.report()["process_stop"], "unconfirmed")
+        self.assertEqual(self.report()["image_cleanup"], "not_attempted_unconfirmed_stop")
+        self.assertFalse(any(c[:3] in (["docker", "image", "rm"], ["docker", "buildx", "rm"])
+                             for c, _, _ in commands.calls))
+        summary = json.loads((self.root / "run/summary.json").read_text())
+        self.assertEqual(summary["not_started"], ["19.2.1"])
+        self.assertFalse((self.root / "run/19.2.1").exists())
+
+    def test_unconfirmed_cleanup_stop_blocks_next_cleanup_command(self):
+        commands = Commands(fail=("19.2.0",))
+        def unconfirmed(command, *args, **kwargs):
+            if command[:3] == ["docker", "image", "rm"]:
+                raise discovery.CommandError("stop_unconfirmed", command)
+            return commands(command, *args, **kwargs)
+        self.assertEqual(self.execute(unconfirmed, "--releases", "19.2.0,19.2.1"), 1)
+        self.assertEqual(self.report()["classification"], "timeout")
+        self.assertEqual(self.report()["process_stop"], "unconfirmed")
+        self.assertFalse(any(c[:3] == ["docker", "buildx", "rm"] for c, _, _ in commands.calls))
+        self.assertFalse((self.root / "run/19.2.1").exists())
 
     def test_ownership_collision_refuses_without_mutating_docker(self):
         commands = Commands()
