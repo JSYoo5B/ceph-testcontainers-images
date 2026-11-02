@@ -12,6 +12,37 @@ import contract
 import package_roles as packaging
 import ceph_license
 
+
+def required_entrypoint_aliases(required):
+    """Installed alternatives links need not appear in any package file list.
+
+    Materialize only symlink entrypoints required by the existing contract.
+    The assembler follows their original links; it does not synthesize aliases
+    or copy every alternatives entry. Refuse broken/cyclic source chains.
+    """
+    aliases = set()
+    for paths in required.values():
+        for entrypoint in paths:
+            if not os.path.islink(entrypoint):
+                continue
+            current, seen = os.path.normpath(entrypoint), set()
+            for _ in range(40):
+                if current in seen:
+                    raise RuntimeError('Required executable has a cyclic alias: ' + entrypoint)
+                seen.add(current)
+                if not os.path.islink(current):
+                    if not os.path.isfile(current) or not os.access(current, os.X_OK):
+                        raise RuntimeError('Required executable alias target is missing/non-executable: ' + entrypoint)
+                    aliases.add(entrypoint)
+                    break
+                target = os.readlink(current)
+                current = os.path.normpath(target if os.path.isabs(target)
+                                          else os.path.join(os.path.dirname(current), target))
+            else:
+                raise RuntimeError('Required executable alias chain exceeds its bound: ' + entrypoint)
+    return aliases
+
+
 def configure(kind):
     supplement = None
     release = os.environ.get('RESTORE_CEPH_LICENSE')
@@ -36,7 +67,9 @@ def configure(kind):
     ceph_bins = {Path(p).name for name,pkg in inventory.items() if any(x in name for x in ('ceph','rados','rbd'))
                  for p in pkg['files'] if str(Path(p).parent) in ('/usr/bin','/usr/sbin','/bin','/sbin')}
     packaging.include_path = lambda role,p: contract.permits_path(role,p,ceph_bins)
-    packaging.EXCLUDED_EXECUTABLES = {role:sorted(ceph_bins-executables[role]) for role in contract.ROLES}
+    packaging.EXCLUDED_EXECUTABLES = {
+        role: sorted(ceph_bins - executables[role] - contract.implementation_names(role, ceph_bins))
+        for role in contract.ROLES}
     analyze.BASE = base
     analyze.installed_inventory = lambda: inventory
     analyze.closure = closure
@@ -53,7 +86,8 @@ def configure(kind):
     original_extras = analyze.extra_paths
     utility_paths = {shutil.which(name) for name in ('sh','mkdir','cp','cat','rm','test','sleep','hostname','awk')}
     utility_paths.discard(None)
-    analyze.extra_paths = lambda: original_extras() | utility_paths
+    entrypoint_aliases = required_entrypoint_aliases(packaging.REQUIRED_EXECUTABLES)
+    analyze.extra_paths = lambda: original_extras() | utility_paths | entrypoint_aliases
     if kind == 'rpm':
         return
     source_listing = packaging.source_listing

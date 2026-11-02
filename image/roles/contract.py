@@ -22,6 +22,15 @@ SOURCE_LACKS = {"apk": {"cephfs-journal-tool"}}
 def executables(role, available, backend=None):
     names = EXECUTABLES[role] | (OPTIONAL_EXECUTABLES.get(role, set()) & set(available))
     return names - SOURCE_LACKS.get(backend, set())
+
+
+def implementation_names(role, available):
+    """Umbrella's Debian ceph-osd entrypoint selects this packaged implementation.
+
+    Keep the public contract at ceph-osd. Its classic implementation is payload
+    of the essential role only, not an additional command for every role.
+    """
+    return {'ceph-osd-classic'} if 'ceph-osd' in EXECUTABLES[role] and 'ceph-osd-classic' in available else set()
 SCENARIOS = {
     "cluster-lifecycle": ("essential", "client"),
     "rbd": ("essential", "client"),
@@ -44,6 +53,6 @@ def permits_path(role, path, ceph_bins):
     for candidate in (path, os.path.realpath(path)):
         candidate = Path(candidate)
         if str(candidate.parent) in ('/usr/bin','/usr/sbin','/bin','/sbin'):
-            if candidate.name in ceph_bins - executables(role, ceph_bins):
+            if candidate.name in ceph_bins - (executables(role, ceph_bins) | implementation_names(role, ceph_bins)):
                 return False
     return True
