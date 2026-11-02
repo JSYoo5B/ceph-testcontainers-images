@@ -2,14 +2,22 @@
 import os
 from pathlib import Path
 import shutil
+import json
+import subprocess
 
 import analyze
 import assemble
 import backend
 import contract
 import package_roles as packaging
+import ceph_license
 
 def configure(kind):
+    supplement = None
+    release = os.environ.get('RESTORE_CEPH_LICENSE')
+    if release:
+        version = subprocess.check_output(['ceph', '--version'], text=True).strip()
+        supplement = ceph_license.restore(release, version, Path(__file__).resolve().parent)
     inventory, closure, base = backend.load(kind, analyze)
     packaging.ROLES = contract.ROLES
     packaging.ROOT_PACKAGES = backend.roots(kind)
@@ -32,8 +40,16 @@ def configure(kind):
     analyze.BASE = base
     analyze.installed_inventory = lambda: inventory
     analyze.closure = closure
-    candidates = ('/usr/share/doc/ceph/COPYING','/usr/share/licenses/ceph/COPYING','/usr/share/doc/ceph-common/copyright')
+    candidates = ceph_license.CANDIDATES
     packaging.COPYING = next(p for p in candidates if Path(p).is_file())
+    # The required COPYING probe follows the actual retained license path;
+    # an alternative source layout must not silently remove this proof.
+    packaging.METADATA_PROBE_PATHS = tuple(
+        packaging.COPYING.lstrip('/') if p == 'usr/share/doc/ceph/COPYING' else p
+        for p in packaging.METADATA_PROBE_PATHS)
+    if supplement is not None:
+        packaging.role_notices['license-supplement.json'] = (json.dumps(supplement, indent=2,
+                                                                       sort_keys=True) + '\n').encode()
     original_extras = analyze.extra_paths
     utility_paths = {shutil.which(name) for name in ('sh','mkdir','cp','cat','rm','test','sleep','hostname','awk')}
     utility_paths.discard(None)
@@ -46,7 +62,7 @@ def configure(kind):
     # the fully installed source, including Alpine's documented ELF adjustment.
     extras = analyze.extra_paths
     analyze.extra_paths = lambda: extras() | {packaging.COPYING}
-    packaging.role_notices = {p.name:p.read_bytes() for p in Path('/usr/share/ceph-testcontainers').glob('modifications.json')}
+    packaging.role_notices.update({p.name:p.read_bytes() for p in Path('/usr/share/ceph-testcontainers').glob('modifications.json')})
     packaging.source_notice = lambda source,version: (
         'roles runtime; see source-packages.txt for selected source packages. Extracted from '+source+'\n'+version+'\n'
         +Path('/usr/share/ceph-testcontainers/SOURCES.txt').read_text())

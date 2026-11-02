@@ -1,0 +1,96 @@
+{
+  "schema": 1,
+  "releases": {
+    "19.2.0": {
+      "release": "19.2.0",
+      "commit": "16063ff2022298c9300e49a547a16ffda59baf13",
+      "asset": "licenses/COPYING-b3b44316a3230ed0193d522bc15d8ce3fb310ce777f7b86efdb1e5bd89109a13.txt",
+      "sha256": "b3b44316a3230ed0193d522bc15d8ce3fb310ce777f7b86efdb1e5bd89109a13",
+      "url": "https://raw.githubusercontent.com/ceph/ceph/16063ff2022298c9300e49a547a16ffda59baf13/COPYING"
+    },
+    "19.2.1": {
+      "release": "19.2.1",
+      "commit": "58a7fab8be0a062d730ad7da874972fd3fba59fb",
+      "asset": "licenses/COPYING-b3b44316a3230ed0193d522bc15d8ce3fb310ce777f7b86efdb1e5bd89109a13.txt",
+      "sha256": "b3b44316a3230ed0193d522bc15d8ce3fb310ce777f7b86efdb1e5bd89109a13",
+      "url": "https://raw.githubusercontent.com/ceph/ceph/58a7fab8be0a062d730ad7da874972fd3fba59fb/COPYING"
+    },
+    "19.2.2": {
+      "release": "19.2.2",
+      "commit": "0eceb0defba60152a8182f7bd87d164b639885b8",
+      "asset": "licenses/COPYING-b3b44316a3230ed0193d522bc15d8ce3fb310ce777f7b86efdb1e5bd89109a13.txt",
+      "sha256": "b3b44316a3230ed0193d522bc15d8ce3fb310ce777f7b86efdb1e5bd89109a13",
+      "url": "https://raw.githubusercontent.com/ceph/ceph/0eceb0defba60152a8182f7bd87d164b639885b8/COPYING"
+    },
+    "19.2.3": {
+      "release": "19.2.3",
+      "commit": "c92aebb279828e9c3c1f5d24613efca272649e62",
+      "asset": "licenses/COPYING-2cca0fe8cbdab212a49817ff4d216db06629bc85d941ac3c2e6ca8b328b28d71.txt",
+      "sha256": "2cca0fe8cbdab212a49817ff4d216db06629bc85d941ac3c2e6ca8b328b28d71",
+      "url": "https://raw.githubusercontent.com/ceph/ceph/c92aebb279828e9c3c1f5d24613efca272649e62/COPYING"
+    },
+    "19.2.4": {
+      "release": "19.2.4",
+      "commit": "7cc0193a616a3333d22b7762037fa5b73a4d06a6",
+      "asset": "licenses/COPYING-2cca0fe8cbdab212a49817ff4d216db06629bc85d941ac3c2e6ca8b328b28d71.txt",
+      "sha256": "2cca0fe8cbdab212a49817ff4d216db06629bc85d941ac3c2e6ca8b328b28d71",
+      "url": "https://raw.githubusercontent.com/ceph/ceph/7cc0193a616a3333d22b7762037fa5b73a4d06a6/COPYING"
+    },
+    "19.2.5": {
+      "release": "19.2.5",
+      "commit": "abc7aa7f2701e5d46878fd5e6bb7e2955f1a395a",
+      "asset": "licenses/COPYING-2cca0fe8cbdab212a49817ff4d216db06629bc85d941ac3c2e6ca8b328b28d71.txt",
+      "sha256": "2cca0fe8cbdab212a49817ff4d216db06629bc85d941ac3c2e6ca8b328b28d71",
+      "url": "https://raw.githubusercontent.com/ceph/ceph/abc7aa7f2701e5d46878fd5e6bb7e2955f1a395a/COPYING"
+    },
+    "19.2.6": {
+      "release": "19.2.6",
+      "commit": "f9fd95b4335bad6a26d7a74468f55d269e8dbef4",
+      "asset": "licenses/COPYING-2cca0fe8cbdab212a49817ff4d216db06629bc85d941ac3c2e6ca8b328b28d71.txt",
+      "sha256": "2cca0fe8cbdab212a49817ff4d216db06629bc85d941ac3c2e6ca8b328b28d71",
+      "url": "https://raw.githubusercontent.com/ceph/ceph/f9fd95b4335bad6a26d7a74468f55d269e8dbef4/COPYING"
+    },
+    "19.2.7": {
+      "release": "19.2.7",
+      "commit": "9ec952b9f9668e9fa97e29a4c2b51e951674df2a",
+      "asset": "licenses/COPYING-2cca0fe8cbdab212a49817ff4d216db06629bc85d941ac3c2e6ca8b328b28d71.txt",
+      "sha256": "2cca0fe8cbdab212a49817ff4d216db06629bc85d941ac3c2e6ca8b328b28d71",
+      "url": "https://raw.githubusercontent.com/ceph/ceph/9ec952b9f9668e9fa97e29a4c2b51e951674df2a/COPYING"
+    },
+    "20.2.0": {
+      "release": "20.2.0",
+      "commit": "69f84cc2651aa259a15bc192ddaabd3baba07489",
+      "asset": "licenses/COPYING-26f44ffbf74cdf08b3e1fdcaf1d4cfa3893ba62107950e086868a686d5ff86c2.txt",
+      "sha256": "26f44ffbf74cdf08b3e1fdcaf1d4cfa3893ba62107950e086868a686d5ff86c2",
+      "url": "https://raw.githubusercontent.com/ceph/ceph/69f84cc2651aa259a15bc192ddaabd3baba07489/COPYING"
+    },
+    "20.2.1": {
+      "release": "20.2.1",
+      "commit": "6a49aff47758778a5f5951e731d437c317f72fb2",
+      "asset": "licenses/COPYING-26f44ffbf74cdf08b3e1fdcaf1d4cfa3893ba62107950e086868a686d5ff86c2.txt",
+      "sha256": "26f44ffbf74cdf08b3e1fdcaf1d4cfa3893ba62107950e086868a686d5ff86c2",
+      "url": "https://raw.githubusercontent.com/ceph/ceph/6a49aff47758778a5f5951e731d437c317f72fb2/COPYING"
+    },
+    "20.2.2": {
+      "release": "20.2.2",
+      "commit": "0fcffee29411e3a38036764817b6e1afc59741cc",
+      "asset": "licenses/COPYING-26f44ffbf74cdf08b3e1fdcaf1d4cfa3893ba62107950e086868a686d5ff86c2.txt",
+      "sha256": "26f44ffbf74cdf08b3e1fdcaf1d4cfa3893ba62107950e086868a686d5ff86c2",
+      "url": "https://raw.githubusercontent.com/ceph/ceph/0fcffee29411e3a38036764817b6e1afc59741cc/COPYING"
+    },
+    "20.2.3": {
+      "release": "20.2.3",
+      "commit": "06c2f9c35b67055a8a6fb99d1be236b3c4832ace",
+      "asset": "licenses/COPYING-26f44ffbf74cdf08b3e1fdcaf1d4cfa3893ba62107950e086868a686d5ff86c2.txt",
+      "sha256": "26f44ffbf74cdf08b3e1fdcaf1d4cfa3893ba62107950e086868a686d5ff86c2",
+      "url": "https://raw.githubusercontent.com/ceph/ceph/06c2f9c35b67055a8a6fb99d1be236b3c4832ace/COPYING"
+    },
+    "20.2.4": {
+      "release": "20.2.4",
+      "commit": "7f793731f1b39eb4f465e960113d2363c311b964",
+      "asset": "licenses/COPYING-26f44ffbf74cdf08b3e1fdcaf1d4cfa3893ba62107950e086868a686d5ff86c2.txt",
+      "sha256": "26f44ffbf74cdf08b3e1fdcaf1d4cfa3893ba62107950e086868a686d5ff86c2",
+      "url": "https://raw.githubusercontent.com/ceph/ceph/7f793731f1b39eb4f465e960113d2363c311b964/COPYING"
+    }
+  }
+}
