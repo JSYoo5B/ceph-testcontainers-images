@@ -11,6 +11,28 @@ patch builds into six native jobs, one per variant/architecture. Each patch's
 promotion needs every eligible cohort in the committed input inventory, even
 if another patch in the same packed job fails.
 
+## Published snapshot
+
+The November 2, 2026 campaign published all eight Squid and five Tentacle
+patches listed below: 438 native platform images and 234 role indexes across
+official, Debian and Ubuntu variants. The
+[digest inventory](../.github/ceph-discovery-images.json) records index digests,
+native children, observed Ceph builds and per-patch publication-run provenance.
+Only patches whose promotion and registry health checks passed appear there.
+
+An additional native ARM check used the exact published official 19.2.3
+digests. RBD, CephFS, RGW S3 and the `hello` object-class scenario passed for
+both the aggregate image and a cluster composed of separate role images,
+including owned cleanup. This selected functional evidence is recorded in
+the digest inventory; it does not qualify every scenario or every patch.
+
+Umbrella 21.2.0 remains **unpublished**. Preparation handles its OSD alternatives
+and split mirroring package. A subsequent official AMD64 probe passed all six
+builds and smoke checks, but essential/all quick checks still failed because
+the required MGR `snap_schedule` module was absent. Further Umbrella adaptation
+and the remaining native qualification were deferred; available upstream
+images/packages are not a passing role-image result.
+
 ## Inputs and eligibility
 
 [The input catalogue](../image/patch-releases.json) pins actual upstream OCI
@@ -22,8 +44,10 @@ APT metadata used to establish availability. Its 14 patch versions are:
 - Umbrella: 21.2.0.
 
 All official sources have amd64 and arm64 children. Debian Bookworm and Ubuntu
-Jammy/Noble packages provide 79 eligible native cohorts, yielding 474 platform
-role images. The exceptions are Debian 19.2.0–19.2.3 arm64: the required
+Jammy/Noble inputs identify 79 input-eligible native cohorts, representing 474
+potential platform role images before native qualification. The published
+snapshot above excludes Umbrella's six unqualified cohorts. The exceptions to
+input eligibility include Debian 19.2.0–19.2.3 arm64: the required
 matching-release packages are absent, and alternative Debian suites return
 404. These four cohorts remain explicitly unavailable; no source build or
 substitution with another distribution/release is performed.
