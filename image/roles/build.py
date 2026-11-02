@@ -19,6 +19,7 @@ import uuid
 
 
 import contract
+import ceph_license
 
 ROLES = contract.ROLES + ("all",)
 HERE = Path(__file__).resolve().parent
@@ -220,6 +221,8 @@ def arguments(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--package-backend", choices=("rpm", "deb", "apk"), default="rpm")
     parser.add_argument("--source-runtime-env", action="store_true", help="Retain source Ceph runtime environment for extracted distro images")
+    parser.add_argument("--restore-ceph-license", metavar="RELEASE",
+                        help="Restore omitted COPYING only for the exact verified source build")
     parser.add_argument("--source-image", required=True, help="Official Ceph image tag or immutable digest")
     parser.add_argument("--repository", default="ceph-testcontainers", help="Local output repository; no push is performed")
     parser.add_argument("--tag", help="Output tag prefix; defaults to official-<Ceph release>")
@@ -279,18 +282,32 @@ def main():
         report["source"] = {"resolved_image": immutable, "image_id": source["Id"], "platform": platform,
                             "architecture": source["Architecture"], "local_size_bytes": source["Size"]}
         save_json(output / "source-image.json", source)
+        license_record = None
+        if args.restore_ceph_license:
+            observed = run(["docker", "run", "--rm", "--network=none", "--platform", platform,
+                            "--entrypoint", "ceph", immutable, "--version"], capture=True)
+            license_record, _ = ceph_license.load_record(args.restore_ceph_license, observed, HERE)
+            report["ceph_license"] = license_record
+            save_json(output / "build-report.json", report)
         with tempfile.TemporaryDirectory(prefix="ceph-roles-") as work:
             work = Path(work)
             context = work / "context"
             context.mkdir()
             scripts = work / "ceph-roles"
             scripts.mkdir()
-            for name in ("assemble.py", "analyze.py", "package_roles.py", "runtime.py", "contract.py", "backend.py"):
+            for name in ("assemble.py", "analyze.py", "package_roles.py", "runtime.py", "contract.py", "backend.py", "ceph_license.py"):
                 shutil.copy2(HERE / name, scripts / name)
+            if license_record is not None:
+                save_json(scripts / "ceph-licenses.json", {"schema": 1, "releases": {
+                    args.restore_ceph_license: license_record}})
+                (scripts / "licenses").mkdir()
+                shutil.copy2(HERE / license_record["asset"], scripts / license_record["asset"])
             create = ["docker", "create", "--network=none", "--platform", platform,
                       "--label", "io.ceph-testcontainers.role-build=" + timestamp,
                       "-e", "SOURCE_IMAGE=" + immutable, "-e", "SOURCE_IMAGE_ID=" + source["Id"]]
             create += ["-e", "PACKAGE_BACKEND=" + args.package_backend]
+            if license_record is not None:
+                create += ["-e", "RESTORE_CEPH_LICENSE=" + args.restore_ceph_license]
             script = "runtime.py"
             create += ["--entrypoint", "python3", immutable, "/tmp/ceph-roles/" + script]
             container_id = run(create, capture=True)

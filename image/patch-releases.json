@@ -1,0 +1,934 @@
+{
+  "schema": 1,
+  "purpose": "Discovery image inputs; does not expand production-supported releases.",
+  "releases": {
+    "19.2.0": {
+      "codename": "squid",
+      "official": {
+        "source": "quay.io/ceph/ceph:v19.2.0@sha256:200087c35811bf28e8a8073b15fa86c07cce85c575f1ccd62d1d6ddbfdc6770a",
+        "architectures": [
+          "amd64",
+          "arm64"
+        ],
+        "children": {
+          "amd64": "sha256:7ab116e5ea815b5d67c5f4523dd9fa2809b14c46cd297aef7736937f77226d44",
+          "arm64": "sha256:6b84b248426fd7da2bcf4c2e20505e7e59056f0c783b802ee25e29f6c3065eb4"
+        }
+      },
+      "debian": {
+        "base": "debian:bookworm-slim@sha256:3783cc01769c7b2b1b83a5c5ad96c815348e28ed7da68e2e3687004faa906251",
+        "base_name": "debian:bookworm-slim",
+        "suite": "bookworm",
+        "package": "19.2.0-1~bpo12+1",
+        "mgr_packages": "python3-distutils",
+        "architectures": [
+          "amd64"
+        ],
+        "metadata": {
+          "release_url": "https://download.ceph.com/debian-19.2.0/dists/bookworm/Release",
+          "release_sha256": "56e32791080849a31eb39f4664882741ced44e4affba0994d27ea57fb41f346d",
+          "indexes": {
+            "amd64": {
+              "url": "https://download.ceph.com/debian-19.2.0/dists/bookworm/main/binary-amd64/Packages.gz",
+              "sha256": "1e0ac901be1e0f40be9113758a49400bcaa0d2c1f427a48be6a020298352aa2d"
+            }
+          }
+        },
+        "unavailable": {
+          "arm64": "Required matching-release Ceph packages absent; alternate Debian suites return 404."
+        }
+      },
+      "ubuntu": {
+        "base": "ubuntu:22.04@sha256:5ec03bb3441e8b0bf3b4f9cd4629a1ae763010dc3035bb8da3ae6cf026486401",
+        "base_name": "ubuntu:22.04",
+        "suite": "jammy",
+        "package": "19.2.0-1jammy",
+        "mgr_packages": "python3-distutils",
+        "architectures": [
+          "amd64",
+          "arm64"
+        ],
+        "metadata": {
+          "release_url": "https://download.ceph.com/debian-19.2.0/dists/jammy/Release",
+          "release_sha256": "ba9d465fd545018aa233dd59e31cb7ed2e232ceda248c7b259e7fd124aff9e39",
+          "indexes": {
+            "amd64": {
+              "url": "https://download.ceph.com/debian-19.2.0/dists/jammy/main/binary-amd64/Packages.gz",
+              "sha256": "bbfa25a1e3cbfecebee92829b41d1898d1b11d9b02d31ded35c3068ce61485b7"
+            },
+            "arm64": {
+              "url": "https://download.ceph.com/debian-19.2.0/dists/jammy/main/binary-arm64/Packages.gz",
+              "sha256": "298e02295d2bd5ffc668952ca1108680f5d5b6bed71ee9d2c2d42cef2e4b9582"
+            }
+          }
+        }
+      }
+    },
+    "19.2.1": {
+      "codename": "squid",
+      "official": {
+        "source": "quay.io/ceph/ceph:v19.2.1@sha256:41d3f5e46ff7de28544cc8869fdea13fca824dcef83936cb3288ed9de935e4de",
+        "architectures": [
+          "amd64",
+          "arm64"
+        ],
+        "children": {
+          "amd64": "sha256:bdc3b02014e968bee304c678cd480f9b5e19e823b49c9144678312df47729231",
+          "arm64": "sha256:c196115d21866fb934a33d29d234040aba13fdae4efcb250c58d43ebd4f99145"
+        }
+      },
+      "debian": {
+        "base": "debian:bookworm-slim@sha256:3783cc01769c7b2b1b83a5c5ad96c815348e28ed7da68e2e3687004faa906251",
+        "base_name": "debian:bookworm-slim",
+        "suite": "bookworm",
+        "package": "19.2.1-1~bpo12+1",
+        "mgr_packages": "python3-distutils",
+        "architectures": [
+          "amd64"
+        ],
+        "metadata": {
+          "release_url": "https://download.ceph.com/debian-19.2.1/dists/bookworm/Release",
+          "release_sha256": "d0e6cbbec6aedc6e878f6397995244b32a4629869986a1e5d21dd3e51d23ede9",
+          "indexes": {
+            "amd64": {
+              "url": "https://download.ceph.com/debian-19.2.1/dists/bookworm/main/binary-amd64/Packages.gz",
+              "sha256": "bdbce3f672a43e3bdc92091349272c5514910323e9fe48f8641807fbc98ccee7"
+            }
+          }
+        },
+        "unavailable": {
+          "arm64": "Required matching-release Ceph packages absent; alternate Debian suites return 404."
+        }
+      },
+      "ubuntu": {
+        "base": "ubuntu:22.04@sha256:5ec03bb3441e8b0bf3b4f9cd4629a1ae763010dc3035bb8da3ae6cf026486401",
+        "base_name": "ubuntu:22.04",
+        "suite": "jammy",
+        "package": "19.2.1-1jammy",
+        "mgr_packages": "python3-distutils",
+        "architectures": [
+          "amd64",
+          "arm64"
+        ],
+        "metadata": {
+          "release_url": "https://download.ceph.com/debian-19.2.1/dists/jammy/Release",
+          "release_sha256": "261821393f37b20f31c581f404fd925164e98a0cca7643b859048addc46424f5",
+          "indexes": {
+            "amd64": {
+              "url": "https://download.ceph.com/debian-19.2.1/dists/jammy/main/binary-amd64/Packages.gz",
+              "sha256": "5f4f960ec8758de4258595d29f6fc81773cdd6ad69f1ee6a555599579a1b5fbe"
+            },
+            "arm64": {
+              "url": "https://download.ceph.com/debian-19.2.1/dists/jammy/main/binary-arm64/Packages.gz",
+              "sha256": "7ed4a34bfd9fdce621fa0930d8197f45059199104d69302f1d5416651b92e935"
+            }
+          }
+        }
+      }
+    },
+    "19.2.2": {
+      "codename": "squid",
+      "official": {
+        "source": "quay.io/ceph/ceph:v19.2.2@sha256:8214ebff6133ac27d20659038df6962dbf9d77da21c9438a296b2e2059a56af6",
+        "architectures": [
+          "amd64",
+          "arm64"
+        ],
+        "children": {
+          "amd64": "sha256:8b3bf5dbfe5f899bfe5ca6bb7ce920c98a9dc50d74e5e23285b5be1853ee41be",
+          "arm64": "sha256:bbb708df6515b99b141bd5021eeb452c7c50ea66795fba73e86d3e695c02bd55"
+        }
+      },
+      "debian": {
+        "base": "debian:bookworm-slim@sha256:3783cc01769c7b2b1b83a5c5ad96c815348e28ed7da68e2e3687004faa906251",
+        "base_name": "debian:bookworm-slim",
+        "suite": "bookworm",
+        "package": "19.2.2-1~bpo12+1",
+        "mgr_packages": "python3-distutils",
+        "architectures": [
+          "amd64"
+        ],
+        "metadata": {
+          "release_url": "https://download.ceph.com/debian-19.2.2/dists/bookworm/Release",
+          "release_sha256": "c9e8d66da7fd2bf65a2c73a2f50d86e019cd0d9a0508dee4010efb496fff4094",
+          "indexes": {
+            "amd64": {
+              "url": "https://download.ceph.com/debian-19.2.2/dists/bookworm/main/binary-amd64/Packages.gz",
+              "sha256": "1a91c086e1144387769f05d7fc65b2d67fdd65872467bcabd5a8cf14e1a15b86"
+            }
+          }
+        },
+        "unavailable": {
+          "arm64": "Required matching-release Ceph packages absent; alternate Debian suites return 404."
+        }
+      },
+      "ubuntu": {
+        "base": "ubuntu:22.04@sha256:5ec03bb3441e8b0bf3b4f9cd4629a1ae763010dc3035bb8da3ae6cf026486401",
+        "base_name": "ubuntu:22.04",
+        "suite": "jammy",
+        "package": "19.2.2-1jammy",
+        "mgr_packages": "python3-distutils",
+        "architectures": [
+          "amd64",
+          "arm64"
+        ],
+        "metadata": {
+          "release_url": "https://download.ceph.com/debian-19.2.2/dists/jammy/Release",
+          "release_sha256": "abd17dd20f58f301277ce77af7bf36c5d9fab20da8c071e3a4e41217375cc5d9",
+          "indexes": {
+            "amd64": {
+              "url": "https://download.ceph.com/debian-19.2.2/dists/jammy/main/binary-amd64/Packages.gz",
+              "sha256": "c6a8d9e0984e8b4366f085962b673ec788fecb6f693e38a25eaa7d9aeae86c93"
+            },
+            "arm64": {
+              "url": "https://download.ceph.com/debian-19.2.2/dists/jammy/main/binary-arm64/Packages.gz",
+              "sha256": "74083bd620d4555c709c35d8219d64f44a3d85d4b9b8f5eca5cd24758f61228e"
+            }
+          }
+        }
+      }
+    },
+    "19.2.3": {
+      "codename": "squid",
+      "official": {
+        "source": "quay.io/ceph/ceph:v19.2.3@sha256:af0c5903e901e329adabe219dfc8d0c3efc1f05102a753902f33ee16c26b6cee",
+        "architectures": [
+          "amd64",
+          "arm64"
+        ],
+        "children": {
+          "amd64": "sha256:7c69e59beaeea61ca714e71cb84ff6d5e533db7f1fd84143dd9ba6649a5fd2ec",
+          "arm64": "sha256:865adb13cc6c0c0fbea23e7217ecf1555975816a8b999792b54d1f5c3fea0717"
+        }
+      },
+      "debian": {
+        "base": "debian:bookworm-slim@sha256:3783cc01769c7b2b1b83a5c5ad96c815348e28ed7da68e2e3687004faa906251",
+        "base_name": "debian:bookworm-slim",
+        "suite": "bookworm",
+        "package": "19.2.3-1~bpo12+1",
+        "mgr_packages": "python3-distutils",
+        "architectures": [
+          "amd64"
+        ],
+        "metadata": {
+          "release_url": "https://download.ceph.com/debian-19.2.3/dists/bookworm/Release",
+          "release_sha256": "3b3edcaf91c6e30c35a48377ee4d21fecc807b7915e6f24e83a19d4977a95b7b",
+          "indexes": {
+            "amd64": {
+              "url": "https://download.ceph.com/debian-19.2.3/dists/bookworm/main/binary-amd64/Packages.gz",
+              "sha256": "85ae0268499f6ffe43ce3bd0eeed1d9aefa238115951b7d808ed492b4a17e7a6"
+            }
+          }
+        },
+        "unavailable": {
+          "arm64": "Required matching-release Ceph packages absent; alternate Debian suites return 404."
+        }
+      },
+      "ubuntu": {
+        "base": "ubuntu:22.04@sha256:5ec03bb3441e8b0bf3b4f9cd4629a1ae763010dc3035bb8da3ae6cf026486401",
+        "base_name": "ubuntu:22.04",
+        "suite": "jammy",
+        "package": "19.2.3-1jammy",
+        "mgr_packages": "python3-distutils",
+        "architectures": [
+          "amd64",
+          "arm64"
+        ],
+        "metadata": {
+          "release_url": "https://download.ceph.com/debian-19.2.3/dists/jammy/Release",
+          "release_sha256": "5704a0c5d239e364941db2768ef56319f2c7e2dabf1678abda0130d9008a8a65",
+          "indexes": {
+            "amd64": {
+              "url": "https://download.ceph.com/debian-19.2.3/dists/jammy/main/binary-amd64/Packages.gz",
+              "sha256": "dd9193a000c0df775354f7c1dd517e398a6f829c0de75be1e7051d0438118540"
+            },
+            "arm64": {
+              "url": "https://download.ceph.com/debian-19.2.3/dists/jammy/main/binary-arm64/Packages.gz",
+              "sha256": "e2ab0dab3f34ca5735208dd971c75cbe4e2e9585edace039b8d14b92f5b1c0c9"
+            }
+          }
+        }
+      }
+    },
+    "19.2.4": {
+      "codename": "squid",
+      "official": {
+        "source": "quay.io/ceph/ceph:v19.2.4@sha256:4940f3e4da8077b68e577c2dcbf313c7c2f9c3b61654c52fcb28884a6ef96a7b",
+        "architectures": [
+          "amd64",
+          "arm64"
+        ],
+        "children": {
+          "amd64": "sha256:81389a0dc83f2e4d6d86641848e41e50f5a8ef9f39537841450a72f42da9aab9",
+          "arm64": "sha256:df65ae8e6055ee284a478b7af1f4d0e5b33062cfd6840b34d4e6f7423edacf6c"
+        }
+      },
+      "debian": {
+        "base": "debian:bookworm-slim@sha256:3783cc01769c7b2b1b83a5c5ad96c815348e28ed7da68e2e3687004faa906251",
+        "base_name": "debian:bookworm-slim",
+        "suite": "bookworm",
+        "package": "19.2.4-1bookworm",
+        "mgr_packages": "python3-distutils",
+        "architectures": [
+          "amd64",
+          "arm64"
+        ],
+        "metadata": {
+          "release_url": "https://download.ceph.com/debian-19.2.4/dists/bookworm/Release",
+          "release_sha256": "78893c1728b4d15f719d079eac179e01eebbbe30f22144b3c4cad89e3efaddab",
+          "indexes": {
+            "amd64": {
+              "url": "https://download.ceph.com/debian-19.2.4/dists/bookworm/main/binary-amd64/Packages.gz",
+              "sha256": "c544cf3b4f02e576e188bb485c0e5d114c83f123e7af23acc5eb2e2912e031d9"
+            },
+            "arm64": {
+              "url": "https://download.ceph.com/debian-19.2.4/dists/bookworm/main/binary-arm64/Packages.gz",
+              "sha256": "29e770754ef22ecc2ce6f7e54d8971e25da92d465c1016f7282848ebc15ce811"
+            }
+          }
+        }
+      },
+      "ubuntu": {
+        "base": "ubuntu:22.04@sha256:5ec03bb3441e8b0bf3b4f9cd4629a1ae763010dc3035bb8da3ae6cf026486401",
+        "base_name": "ubuntu:22.04",
+        "suite": "jammy",
+        "package": "19.2.4-1jammy",
+        "mgr_packages": "python3-distutils",
+        "architectures": [
+          "amd64",
+          "arm64"
+        ],
+        "metadata": {
+          "release_url": "https://download.ceph.com/debian-19.2.4/dists/jammy/Release",
+          "release_sha256": "57cd41a640ba3bc393399399f4084b4cb195a69579f7799455ac154427476820",
+          "indexes": {
+            "amd64": {
+              "url": "https://download.ceph.com/debian-19.2.4/dists/jammy/main/binary-amd64/Packages.gz",
+              "sha256": "387b7e9e496fcba77b756c5d265c06728e3068ef84d6e5b1d49954ac349cb2c7"
+            },
+            "arm64": {
+              "url": "https://download.ceph.com/debian-19.2.4/dists/jammy/main/binary-arm64/Packages.gz",
+              "sha256": "f772b6e0137d5d33f39fb293f1f7d4391a19bea6daba533dc4f09cf7a680889c"
+            }
+          }
+        }
+      }
+    },
+    "19.2.5": {
+      "codename": "squid",
+      "official": {
+        "source": "quay.io/ceph/ceph:v19.2.5@sha256:1bb011052bc6d347d3418adcbf7d88156860d45697bc6323594a11410084064b",
+        "architectures": [
+          "amd64",
+          "arm64"
+        ],
+        "children": {
+          "amd64": "sha256:8d438f810ac1a2f582e7a7267daf9f0b7e10bff30071f246f2e03e932add39d3",
+          "arm64": "sha256:b9cabf6a1d28aabc3a36295a09670b4041b221a15e9e4bbd7f73f8470fb03f5e"
+        }
+      },
+      "debian": {
+        "base": "debian:bookworm-slim@sha256:3783cc01769c7b2b1b83a5c5ad96c815348e28ed7da68e2e3687004faa906251",
+        "base_name": "debian:bookworm-slim",
+        "suite": "bookworm",
+        "package": "19.2.5-1bookworm",
+        "mgr_packages": "python3-distutils",
+        "architectures": [
+          "amd64",
+          "arm64"
+        ],
+        "metadata": {
+          "release_url": "https://download.ceph.com/debian-19.2.5/dists/bookworm/Release",
+          "release_sha256": "f0c95dbbb336914e5d6c61911de7ace1913f152f6cc149aa84fd098c782d0d3d",
+          "indexes": {
+            "amd64": {
+              "url": "https://download.ceph.com/debian-19.2.5/dists/bookworm/main/binary-amd64/Packages.gz",
+              "sha256": "601b19a422419a70498380c455c8010731ac2cfc57f03c95c7dcdc4d39a1a11b"
+            },
+            "arm64": {
+              "url": "https://download.ceph.com/debian-19.2.5/dists/bookworm/main/binary-arm64/Packages.gz",
+              "sha256": "5478e64b91d69262a84d9650c0c175104357b14374dbd46aadf96ad925c5776d"
+            }
+          }
+        }
+      },
+      "ubuntu": {
+        "base": "ubuntu:22.04@sha256:5ec03bb3441e8b0bf3b4f9cd4629a1ae763010dc3035bb8da3ae6cf026486401",
+        "base_name": "ubuntu:22.04",
+        "suite": "jammy",
+        "package": "19.2.5-1jammy",
+        "mgr_packages": "python3-distutils",
+        "architectures": [
+          "amd64",
+          "arm64"
+        ],
+        "metadata": {
+          "release_url": "https://download.ceph.com/debian-19.2.5/dists/jammy/Release",
+          "release_sha256": "83926b239aa3aaf65246a8a304fc88dd1cb7ed6f2c2b1f49aeb8d8d338f80333",
+          "indexes": {
+            "amd64": {
+              "url": "https://download.ceph.com/debian-19.2.5/dists/jammy/main/binary-amd64/Packages.gz",
+              "sha256": "fece2f6a9e406f5a7165b2eb1a40ecb47ba176569c317f20fc9cce6ba8bb2ed1"
+            },
+            "arm64": {
+              "url": "https://download.ceph.com/debian-19.2.5/dists/jammy/main/binary-arm64/Packages.gz",
+              "sha256": "2bbbcd3f2431e27e24da2fd5e641eca52d0e9197a6e987c13bae328c5ab43104"
+            }
+          }
+        }
+      }
+    },
+    "19.2.6": {
+      "codename": "squid",
+      "official": {
+        "source": "quay.io/ceph/ceph:v19.2.6@sha256:ff836bb28e7d0be0ec4dd22e79407174452a96e11ee62e9cdd1fa47f4bcc3bdc",
+        "architectures": [
+          "amd64",
+          "arm64"
+        ],
+        "children": {
+          "amd64": "sha256:9217c31b7a5a900688d485adca40dd0c5c365008c15dd2c6429dfc888a9f5089",
+          "arm64": "sha256:b1b2e9e3f7b92eb6596ac2c782591a887a24246d49b65ea7affcecf2da3c6d22"
+        }
+      },
+      "debian": {
+        "base": "debian:bookworm-slim@sha256:3783cc01769c7b2b1b83a5c5ad96c815348e28ed7da68e2e3687004faa906251",
+        "base_name": "debian:bookworm-slim",
+        "suite": "bookworm",
+        "package": "19.2.6-1bookworm",
+        "mgr_packages": "python3-distutils",
+        "architectures": [
+          "amd64",
+          "arm64"
+        ],
+        "metadata": {
+          "release_url": "https://download.ceph.com/debian-19.2.6/dists/bookworm/Release",
+          "release_sha256": "14b1628df0ae5b614a81664039c384a759a9f9f6cc2063f8372264e900bb0eca",
+          "indexes": {
+            "amd64": {
+              "url": "https://download.ceph.com/debian-19.2.6/dists/bookworm/main/binary-amd64/Packages.gz",
+              "sha256": "a57a2bccc7fae7b3193f73a4a1d6fb47ca6c639760e5b5b769cfea17b1e42e18"
+            },
+            "arm64": {
+              "url": "https://download.ceph.com/debian-19.2.6/dists/bookworm/main/binary-arm64/Packages.gz",
+              "sha256": "922d018c818f1f783b940d6a4f4f6fd6bc083e015758a7c1bc994bf320bc967f"
+            }
+          }
+        }
+      },
+      "ubuntu": {
+        "base": "ubuntu:22.04@sha256:5ec03bb3441e8b0bf3b4f9cd4629a1ae763010dc3035bb8da3ae6cf026486401",
+        "base_name": "ubuntu:22.04",
+        "suite": "jammy",
+        "package": "19.2.6-1jammy",
+        "mgr_packages": "python3-distutils",
+        "architectures": [
+          "amd64"
+        ],
+        "metadata": {
+          "release_url": "https://download.ceph.com/debian-19.2.6/dists/jammy/Release",
+          "release_sha256": "c68c97f44ad5de81ef848cbf7b0b9ac10481507596643d745a3f1fa620b62190",
+          "indexes": {
+            "amd64": {
+              "url": "https://download.ceph.com/debian-19.2.6/dists/jammy/main/binary-amd64/Packages.gz",
+              "sha256": "7474d29919c2c2fe42d713c8f969610ffb75087339e6b28c8f8334bfdb1b4ad5"
+            },
+            "arm64": {
+              "url": "https://download.ceph.com/debian-19.2.6/dists/jammy/main/binary-arm64/Packages.gz",
+              "sha256": "af0f68bb2c7b496ff34029708bedf0fbc9a70845e807d67106ae01abcb9e3e61"
+            }
+          }
+        },
+        "unavailable": {
+          "arm64": "Required libradosstriper1 artifact does not match signed APT metadata; no authenticated matching artifact or Noble alternative was available."
+        },
+        "unavailable_evidence": {
+          "arm64": {
+            "classification": "upstream_metadata_artifact_mismatch",
+            "checked_at": "2026-11-02T03:03:32Z",
+            "package_url": "https://download.ceph.com/debian-19.2.6/pool/main/c/ceph/libradosstriper1_19.2.6-1jammy_arm64.deb",
+            "expected": {
+              "size": 437982,
+              "sha256": "f9503cf10e1ec7656c36d4047955fe78970be595692c8d44b9140f01178a8795"
+            },
+            "observed": {
+              "size": 437970,
+              "sha256": "78d35ff92ecbc40e51509186f194bce8e2a662ccc2de2004f9072c0218703b68",
+              "reads": "canonical and cache-bypassed HTTPS"
+            },
+            "release_signature_key": "08B73419AC32B4E966C1A330E84AC2C0460F3994",
+            "release_signature_sha256": "676efc421b436331668811d1549d56ecbf9d4546df86963df7f6a3bc43ca35d2",
+            "noble_release_http_status": 404,
+            "original_failure_run": 41377472802
+          }
+        }
+      }
+    },
+    "19.2.7": {
+      "codename": "squid",
+      "official": {
+        "source": "quay.io/ceph/ceph:v19.2.7@sha256:3fc0a79f1c671f0e75be24ba77a4ab32227e5ea080e16dfc0840a1dc6c30bf7e",
+        "architectures": [
+          "amd64",
+          "arm64"
+        ],
+        "children": {
+          "amd64": "sha256:b7363bbc7e9e905dcc91a0c542a81916e95a96724018b8d85a374d21714bb1f9",
+          "arm64": "sha256:6f41fc8005b9f3797218541b58c89b3b60552f3f3e0068c7d108031e005acb49"
+        }
+      },
+      "debian": {
+        "base": "debian:bookworm-slim@sha256:3783cc01769c7b2b1b83a5c5ad96c815348e28ed7da68e2e3687004faa906251",
+        "base_name": "debian:bookworm-slim",
+        "suite": "bookworm",
+        "package": "19.2.7-1bookworm",
+        "mgr_packages": "python3-distutils",
+        "architectures": [
+          "amd64",
+          "arm64"
+        ],
+        "metadata": {
+          "release_url": "https://download.ceph.com/debian-19.2.7/dists/bookworm/Release",
+          "release_sha256": "6184d05dbc0a32f94e55fefca21dfc7fcc29a7dd2fd73e797c210190411a0565",
+          "indexes": {
+            "amd64": {
+              "url": "https://download.ceph.com/debian-19.2.7/dists/bookworm/main/binary-amd64/Packages.gz",
+              "sha256": "32ac2b2385ef9713774268bf8e9af811e3e5a837e664fa9b49f7900c90d7251c"
+            },
+            "arm64": {
+              "url": "https://download.ceph.com/debian-19.2.7/dists/bookworm/main/binary-arm64/Packages.gz",
+              "sha256": "dfc4daac48609728d2fdaf502884d370e56e3449f7bb05281c821c6660efaa25"
+            }
+          }
+        }
+      },
+      "ubuntu": {
+        "base": "ubuntu:22.04@sha256:5ec03bb3441e8b0bf3b4f9cd4629a1ae763010dc3035bb8da3ae6cf026486401",
+        "base_name": "ubuntu:22.04",
+        "suite": "jammy",
+        "package": "19.2.7-1jammy",
+        "mgr_packages": "python3-distutils",
+        "architectures": [
+          "amd64",
+          "arm64"
+        ],
+        "metadata": {
+          "release_url": "https://download.ceph.com/debian-19.2.7/dists/jammy/Release",
+          "release_sha256": "ccd51a8db0a301194f14aee0188ac10d81385c8d0084e6522fa2d040f1de1a91",
+          "indexes": {
+            "amd64": {
+              "url": "https://download.ceph.com/debian-19.2.7/dists/jammy/main/binary-amd64/Packages.gz",
+              "sha256": "bca93b357c3460dea3c8d1b1ba16d82e00e12ad1966c93293c5ac02af0211ad2"
+            },
+            "arm64": {
+              "url": "https://download.ceph.com/debian-19.2.7/dists/jammy/main/binary-arm64/Packages.gz",
+              "sha256": "9f598805d7e3556c6c3c3001567c950c340b8f8e13a7be2e21f2d28b4310a741"
+            }
+          }
+        }
+      }
+    },
+    "20.2.0": {
+      "codename": "tentacle",
+      "official": {
+        "source": "quay.io/ceph/ceph:v20.2.0@sha256:1228c3d05e45fbc068a8c33614e4409b6dac688bcc77369b06009b5830fa8d86",
+        "architectures": [
+          "amd64",
+          "arm64"
+        ],
+        "children": {
+          "amd64": "sha256:4c65c801a8e5e5704934118b2c723e7233f2b5de8552bfc8f129dabe1fced0b1",
+          "arm64": "sha256:b6b80a4709abafffbb670baecaa4df693b6ef20c203293f1721c7a209d36a5ba"
+        }
+      },
+      "debian": {
+        "base": "debian:bookworm-slim@sha256:3783cc01769c7b2b1b83a5c5ad96c815348e28ed7da68e2e3687004faa906251",
+        "base_name": "debian:bookworm-slim",
+        "suite": "bookworm",
+        "package": "20.2.0-1bookworm",
+        "mgr_packages": "",
+        "architectures": [
+          "amd64",
+          "arm64"
+        ],
+        "metadata": {
+          "release_url": "https://download.ceph.com/debian-20.2.0/dists/bookworm/Release",
+          "release_sha256": "5579c2ef6b35bc56013b40b975b66ec7156c69818380e37373a282e74ee4d2a1",
+          "indexes": {
+            "amd64": {
+              "url": "https://download.ceph.com/debian-20.2.0/dists/bookworm/main/binary-amd64/Packages.gz",
+              "sha256": "57f5fe1a18c4073814c13ca4fa16aec9e2cc300623101710ab4b4581e3a492f0"
+            },
+            "arm64": {
+              "url": "https://download.ceph.com/debian-20.2.0/dists/bookworm/main/binary-arm64/Packages.gz",
+              "sha256": "e52f576adaabd72fd6d72097dae22cf0c6dc498291c2972adc1f52199deeefe3"
+            }
+          }
+        }
+      },
+      "ubuntu": {
+        "base": "ubuntu:22.04@sha256:5ec03bb3441e8b0bf3b4f9cd4629a1ae763010dc3035bb8da3ae6cf026486401",
+        "base_name": "ubuntu:22.04",
+        "suite": "jammy",
+        "package": "20.2.0-1jammy",
+        "mgr_packages": "",
+        "architectures": [
+          "amd64",
+          "arm64"
+        ],
+        "metadata": {
+          "release_url": "https://download.ceph.com/debian-20.2.0/dists/jammy/Release",
+          "release_sha256": "a9171860b5a9f2a58de88ff7f8cc03b3c24157c6504720a83972b18fe39e42d5",
+          "indexes": {
+            "amd64": {
+              "url": "https://download.ceph.com/debian-20.2.0/dists/jammy/main/binary-amd64/Packages.gz",
+              "sha256": "a9491855e58b84a2ceb32fe35465c303af4f2eb75ff3e5239bcaab15a6e4a143"
+            },
+            "arm64": {
+              "url": "https://download.ceph.com/debian-20.2.0/dists/jammy/main/binary-arm64/Packages.gz",
+              "sha256": "a3e14075bf1f5c4e35c1a7d027380b2ce554a0a25d83cd663c3d150461364d10"
+            }
+          }
+        }
+      }
+    },
+    "20.2.1": {
+      "codename": "tentacle",
+      "official": {
+        "source": "quay.io/ceph/ceph:v20.2.1@sha256:0bae386bc859cd9a05b804d1ca16cca8853a64f90809044e2bf43095419dc337",
+        "architectures": [
+          "amd64",
+          "arm64"
+        ],
+        "children": {
+          "amd64": "sha256:716b9433f2a76d5985868017f97e7ba5969b689f045ef992608bb8331f6b5d75",
+          "arm64": "sha256:8736101c29605d12e0d38f732d980585d784d06f368c1d044685ec3bee0926c2"
+        }
+      },
+      "debian": {
+        "base": "debian:bookworm-slim@sha256:3783cc01769c7b2b1b83a5c5ad96c815348e28ed7da68e2e3687004faa906251",
+        "base_name": "debian:bookworm-slim",
+        "suite": "bookworm",
+        "package": "20.2.1-1bookworm",
+        "mgr_packages": "",
+        "architectures": [
+          "amd64",
+          "arm64"
+        ],
+        "metadata": {
+          "release_url": "https://download.ceph.com/debian-20.2.1/dists/bookworm/Release",
+          "release_sha256": "0b64ce4c3084a190829efd246908e7a0e99e036de494b109d7e2c381a72ff2a5",
+          "indexes": {
+            "amd64": {
+              "url": "https://download.ceph.com/debian-20.2.1/dists/bookworm/main/binary-amd64/Packages.gz",
+              "sha256": "e0bddc9bcca33007067a0f55e015ac4e831338db5b61ef47881acd770d236652"
+            },
+            "arm64": {
+              "url": "https://download.ceph.com/debian-20.2.1/dists/bookworm/main/binary-arm64/Packages.gz",
+              "sha256": "87e9b1bb10e27e98ceb94fac96c348d5b79d51aa417244ac32b9383641e0ef29"
+            }
+          }
+        }
+      },
+      "ubuntu": {
+        "base": "ubuntu:24.04@sha256:534baea6a22c03a63003dbc8dbe78fe34bc0d7e595d9a9dc9834884ff530eb55",
+        "base_name": "ubuntu:24.04",
+        "suite": "noble",
+        "package": "20.2.1-1noble",
+        "mgr_packages": "",
+        "architectures": [
+          "amd64",
+          "arm64"
+        ],
+        "metadata": {
+          "release_url": "https://download.ceph.com/debian-20.2.1/dists/noble/Release",
+          "release_sha256": "0a86b075593a5b6d132d8231a492691909fc41586b6f379d6d181f079d1513bf",
+          "indexes": {
+            "amd64": {
+              "url": "https://download.ceph.com/debian-20.2.1/dists/noble/main/binary-amd64/Packages.gz",
+              "sha256": "92d863cd127827825881db0b49fcfc7d1b2e4da7ddf53a92dcace80ecd69158d"
+            },
+            "arm64": {
+              "url": "https://download.ceph.com/debian-20.2.1/dists/noble/main/binary-arm64/Packages.gz",
+              "sha256": "a771b94b430ad21e5570942c43ec6a226e8f2d6a33805e30b0c4e24938d7c544"
+            }
+          }
+        }
+      }
+    },
+    "20.2.2": {
+      "codename": "tentacle",
+      "official": {
+        "source": "quay.io/ceph/ceph:v20.2.2@sha256:6b4b5ae33acd3d736eb26d2a19238bce71a22f9cfb99cca887ba6312d0957644",
+        "architectures": [
+          "amd64",
+          "arm64"
+        ],
+        "children": {
+          "amd64": "sha256:55a5c2014b4db34589ad8886606409727f633319131bb663d37e0d489e350703",
+          "arm64": "sha256:99f4c2f3c65c21d9186e07d0fe6842f5b6ce635eda9d4d0c9b37cd0575436e92"
+        }
+      },
+      "debian": {
+        "base": "debian:bookworm-slim@sha256:3783cc01769c7b2b1b83a5c5ad96c815348e28ed7da68e2e3687004faa906251",
+        "base_name": "debian:bookworm-slim",
+        "suite": "bookworm",
+        "package": "20.2.2-1bookworm",
+        "mgr_packages": "",
+        "architectures": [
+          "amd64",
+          "arm64"
+        ],
+        "metadata": {
+          "release_url": "https://download.ceph.com/debian-20.2.2/dists/bookworm/Release",
+          "release_sha256": "a4612310918f0ec59629e895114c4798f978d7ea50b00c4ac1394bbbfad41cc2",
+          "indexes": {
+            "amd64": {
+              "url": "https://download.ceph.com/debian-20.2.2/dists/bookworm/main/binary-amd64/Packages.gz",
+              "sha256": "9ac731430891e6a5b566fca5109d38983d761f32c2c04ced997c26de56f9d48a"
+            },
+            "arm64": {
+              "url": "https://download.ceph.com/debian-20.2.2/dists/bookworm/main/binary-arm64/Packages.gz",
+              "sha256": "b8caf630c5edf0beec30cce69ccb975e44f0517a99807b918c1e835be4459068"
+            }
+          }
+        }
+      },
+      "ubuntu": {
+        "base": "ubuntu:24.04@sha256:534baea6a22c03a63003dbc8dbe78fe34bc0d7e595d9a9dc9834884ff530eb55",
+        "base_name": "ubuntu:24.04",
+        "suite": "noble",
+        "package": "20.2.2-1noble",
+        "mgr_packages": "",
+        "architectures": [
+          "amd64",
+          "arm64"
+        ],
+        "metadata": {
+          "release_url": "https://download.ceph.com/debian-20.2.2/dists/noble/Release",
+          "release_sha256": "368324efcae720ee94882ff8e023d19e21300f048a43f388dd34816af6892c2a",
+          "indexes": {
+            "amd64": {
+              "url": "https://download.ceph.com/debian-20.2.2/dists/noble/main/binary-amd64/Packages.gz",
+              "sha256": "a2c84100cbae3b40331a6783eade5c3f52518ee94d84c524f2c2629e72a89797"
+            },
+            "arm64": {
+              "url": "https://download.ceph.com/debian-20.2.2/dists/noble/main/binary-arm64/Packages.gz",
+              "sha256": "f78e3f9b305a67bf08b43b1b6f5397743898d478742aff290d6c511c829205c4"
+            }
+          }
+        }
+      }
+    },
+    "20.2.3": {
+      "codename": "tentacle",
+      "official": {
+        "source": "quay.io/ceph/ceph:v20.2.3@sha256:d195020de02512030118e772cef7859e92904e91eb4cb21acb503f8b94118137",
+        "architectures": [
+          "amd64",
+          "arm64"
+        ],
+        "children": {
+          "amd64": "sha256:c5299178c2c1140f0db892f06c7bb959c32ec7edc1ceb9b628bd581c0fd66f9e",
+          "arm64": "sha256:92095d2f2969702c3c5b3f503a0df9634da293e873825c3f7a4c8ead44fb1896"
+        }
+      },
+      "debian": {
+        "base": "debian:bookworm-slim@sha256:3783cc01769c7b2b1b83a5c5ad96c815348e28ed7da68e2e3687004faa906251",
+        "base_name": "debian:bookworm-slim",
+        "suite": "bookworm",
+        "package": "20.2.3-1bookworm",
+        "mgr_packages": "",
+        "architectures": [
+          "amd64",
+          "arm64"
+        ],
+        "metadata": {
+          "release_url": "https://download.ceph.com/debian-20.2.3/dists/bookworm/Release",
+          "release_sha256": "c85c443eb699f2c36032fd71bf6cac9e54b5da94e4d191c37aa1110b1ba30399",
+          "indexes": {
+            "amd64": {
+              "url": "https://download.ceph.com/debian-20.2.3/dists/bookworm/main/binary-amd64/Packages.gz",
+              "sha256": "daa31c9d94de7a3ac34f2bc465641f5b493a37ba40a31065d36272338d08f7d8"
+            },
+            "arm64": {
+              "url": "https://download.ceph.com/debian-20.2.3/dists/bookworm/main/binary-arm64/Packages.gz",
+              "sha256": "cb72ccbdbbcb624b19c5da7906ac0cd1780853d319c63e618cca9e7c817e3944"
+            }
+          }
+        }
+      },
+      "ubuntu": {
+        "base": "ubuntu:22.04@sha256:5ec03bb3441e8b0bf3b4f9cd4629a1ae763010dc3035bb8da3ae6cf026486401",
+        "base_name": "ubuntu:22.04",
+        "suite": "jammy",
+        "package": "20.2.3-1jammy",
+        "mgr_packages": "",
+        "architectures": [
+          "amd64",
+          "arm64"
+        ],
+        "metadata": {
+          "release_url": "https://download.ceph.com/debian-20.2.3/dists/jammy/Release",
+          "release_sha256": "82f9c217a31fa49dc5e260e902f1d52e24dc13861a746e52f318de458b163408",
+          "indexes": {
+            "amd64": {
+              "url": "https://download.ceph.com/debian-20.2.3/dists/jammy/main/binary-amd64/Packages.gz",
+              "sha256": "d3eae90d3c3989ee6c25604a2e9900fd987ae6976f34eb7de99b133354a29f51"
+            },
+            "arm64": {
+              "url": "https://download.ceph.com/debian-20.2.3/dists/jammy/main/binary-arm64/Packages.gz",
+              "sha256": "7944f8794acc8fef268ee4e001bbe106b5f7f023ed49bce8e76e8964368c6b53"
+            }
+          }
+        }
+      }
+    },
+    "20.2.4": {
+      "codename": "tentacle",
+      "official": {
+        "source": "quay.io/ceph/ceph:v20.2.4@sha256:6bb1c8a42fbc0bf87938946990b65174466997bc11c31eb5a323225a779fd8f9",
+        "architectures": [
+          "amd64",
+          "arm64"
+        ],
+        "children": {
+          "amd64": "sha256:09ee90f6f3e0c7b9954f71d214ee05e9bbaaaea3716b1dd619603283b829f8b8",
+          "arm64": "sha256:6e6bc7b28fa1b334108a3646af5533dfb50db508efdf5b358eb7dd0dd37a48aa"
+        }
+      },
+      "debian": {
+        "base": "debian:bookworm-slim@sha256:3783cc01769c7b2b1b83a5c5ad96c815348e28ed7da68e2e3687004faa906251",
+        "base_name": "debian:bookworm-slim",
+        "suite": "bookworm",
+        "package": "20.2.4-1bookworm",
+        "mgr_packages": "",
+        "architectures": [
+          "amd64",
+          "arm64"
+        ],
+        "metadata": {
+          "release_url": "https://download.ceph.com/debian-20.2.4/dists/bookworm/Release",
+          "release_sha256": "57515fa0959d029ebf4a9c2e1d3b2de419436817e1c3f850de2f84b4a20bf864",
+          "indexes": {
+            "amd64": {
+              "url": "https://download.ceph.com/debian-20.2.4/dists/bookworm/main/binary-amd64/Packages.gz",
+              "sha256": "0ad25c5bf94539907047d4d61bd4d7cad954ee4c4598ec8ffffe0d47b8d1cdf5"
+            },
+            "arm64": {
+              "url": "https://download.ceph.com/debian-20.2.4/dists/bookworm/main/binary-arm64/Packages.gz",
+              "sha256": "ea1443586db8b0aec8f92c3e8580157198dc5b151865396e81a66ac9c4c9a945"
+            }
+          }
+        }
+      },
+      "ubuntu": {
+        "base": "ubuntu:24.04@sha256:534baea6a22c03a63003dbc8dbe78fe34bc0d7e595d9a9dc9834884ff530eb55",
+        "base_name": "ubuntu:24.04",
+        "suite": "noble",
+        "package": "20.2.4-1noble",
+        "mgr_packages": "",
+        "architectures": [
+          "amd64",
+          "arm64"
+        ],
+        "metadata": {
+          "release_url": "https://download.ceph.com/debian-20.2.4/dists/noble/Release",
+          "release_sha256": "1cfb2ab5c744ed7b527682d065a69517234f96fc66ae75d18228c0b36a6777b1",
+          "indexes": {
+            "amd64": {
+              "url": "https://download.ceph.com/debian-20.2.4/dists/noble/main/binary-amd64/Packages.gz",
+              "sha256": "c65bdc075bb33adc92ddd12dd7efc9a75380b2ecdc09aefe4c0e9dae0c64474f"
+            },
+            "arm64": {
+              "url": "https://download.ceph.com/debian-20.2.4/dists/noble/main/binary-arm64/Packages.gz",
+              "sha256": "616c35f6659e0ee38e90d5c5ed3e360e0f8bb68c72d1cf0b38d210acf3ff1fda"
+            }
+          }
+        }
+      }
+    },
+    "21.2.0": {
+      "codename": "umbrella",
+      "official": {
+        "source": "quay.io/ceph/ceph:v21.2.0@sha256:c9e6ed4ac3fcf67b28f38358bb9619dee4d1dfb96ddd4b9b583eee316a15f04d",
+        "architectures": [
+          "amd64",
+          "arm64"
+        ],
+        "children": {
+          "amd64": "sha256:403c079a3f1efa7b58895750e9dd18c6da4701e60b746b084385c8cc545877b6",
+          "arm64": "sha256:fa8bece1f37c1faa1968107e33e1bbb6ecd776026b3f6fa55796715d1fab1c18"
+        }
+      },
+      "debian": {
+        "base": "debian:bookworm-slim@sha256:3783cc01769c7b2b1b83a5c5ad96c815348e28ed7da68e2e3687004faa906251",
+        "base_name": "debian:bookworm-slim",
+        "suite": "bookworm",
+        "package": "21.2.0-1bookworm",
+        "mgr_packages": "ceph-mgr-mirroring=21.2.0-1bookworm",
+        "architectures": [
+          "amd64",
+          "arm64"
+        ],
+        "metadata": {
+          "release_url": "https://download.ceph.com/debian-21.2.0/dists/bookworm/Release",
+          "release_sha256": "80d50b29a690513490f45aeb6ea0b493750f06e710e5c03b22fd1f891692c8df",
+          "indexes": {
+            "amd64": {
+              "url": "https://download.ceph.com/debian-21.2.0/dists/bookworm/main/binary-amd64/Packages.gz",
+              "sha256": "136d302929e5669b21eeeaa2d0c9aff1fb0f1b5c617c6e11b499007e66c65f62"
+            },
+            "arm64": {
+              "url": "https://download.ceph.com/debian-21.2.0/dists/bookworm/main/binary-arm64/Packages.gz",
+              "sha256": "221e30c3538af27f9d31d16ed819c5e5f850dfb01892cffb4f4222d00789aba2"
+            }
+          },
+          "additional_packages": {
+            "ceph-mgr-mirroring": {
+              "version": "21.2.0-1bookworm",
+              "architecture": "all",
+              "filename": "pool/main/c/ceph/ceph-mgr-mirroring_21.2.0-1bookworm_all.deb",
+              "size": 33996,
+              "sha256": "8d13770158a11ee2c56144de0188d5309629b30d6e7ac9cf9a5f7f7736208e00"
+            }
+          }
+        }
+      },
+      "ubuntu": {
+        "base": "ubuntu:24.04@sha256:534baea6a22c03a63003dbc8dbe78fe34bc0d7e595d9a9dc9834884ff530eb55",
+        "base_name": "ubuntu:24.04",
+        "suite": "noble",
+        "package": "21.2.0-1noble",
+        "mgr_packages": "ceph-mgr-mirroring=21.2.0-1noble",
+        "architectures": [
+          "amd64",
+          "arm64"
+        ],
+        "metadata": {
+          "release_url": "https://download.ceph.com/debian-21.2.0/dists/noble/Release",
+          "release_sha256": "9c1916a12783fc346690702c771ef5d9e872711e9079bee744d19e4503937c15",
+          "indexes": {
+            "amd64": {
+              "url": "https://download.ceph.com/debian-21.2.0/dists/noble/main/binary-amd64/Packages.gz",
+              "sha256": "7027061870c3c49be21361487d62cadcb0efadcb5d84baf9cf4fa788030b39d0"
+            },
+            "arm64": {
+              "url": "https://download.ceph.com/debian-21.2.0/dists/noble/main/binary-arm64/Packages.gz",
+              "sha256": "252d4e2532da18b58df96b3a3243acd2507d70dd65ec442b16130fd8a22309c4"
+            }
+          },
+          "additional_packages": {
+            "ceph-mgr-mirroring": {
+              "version": "21.2.0-1noble",
+              "architecture": "all",
+              "filename": "pool/main/c/ceph/ceph-mgr-mirroring_21.2.0-1noble_all.deb",
+              "size": 34630,
+              "sha256": "b9f662c89e4fac28a035cb61d26bcd2753ca53024262f88c81292b9daabc9d35"
+            }
+          }
+        }
+      }
+    }
+  }
+}

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""Publish the exact images that passed CI; promote only a complete release or
-an extension helper checked on both platforms."""
+"""Publish exact checked identities. Production requires full qualification;
+discovery has a separate runtime-contract-only namespace and input inventory."""
 import argparse
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
@@ -18,6 +18,8 @@ REGISTRY = "ghcr.io/jsyoo5b/ceph-testcontainers-images"
 VARIANTS = ("official", "debian", "ubuntu")
 ARCHITECTURES = ("amd64", "arm64")
 CONTRACT = "roles"
+DISCOVERY = "discovery"
+DISCOVERY_QUALIFICATION = "runtime-contract-only"
 
 def active_roles():
     return check.ROLES
@@ -62,6 +64,26 @@ def release_tag(release, variant, role, architecture=None):
         "-linux-" + architecture if architecture else "")
 
 
+def discovery_tag(release, variant, role, architecture=None):
+    return REGISTRY + ":discovery-" + variant + "-" + release + "-" + role + (
+        "-linux-" + architecture if architecture else "")
+
+
+def discovery_release(value):
+    """Use the committed source/eligibility inventory, not a release guess."""
+    import patch_releases
+    try:
+        patch_releases.release(value)
+    except (KeyError, ValueError) as error:
+        raise argparse.ArgumentTypeError(str(error)) from error
+    return value
+
+
+def discovery_cohorts(release):
+    import patch_releases
+    return set(patch_releases.expected_cohorts(release))
+
+
 def previous_manifest(tag):
     """The manifest a release tag points to, or None before its first publication."""
     try:
@@ -102,6 +124,38 @@ def validate_report(report, architecture, release):
             "Check report must come from the current checker and scenarios")
 
 
+def validate_discovery_report(report, architecture, release):
+    """Qualify image/tool contracts without claiming native interoperability."""
+    require(report.get("schema") == 4 and report.get("contract") == CONTRACT,
+            "Discovery needs the current role check report schema")
+    require(report.get("status") == "passed" and report.get("level") == "quick"
+            and report.get("preflight") == "passed", "Discovery needs a passing quick contract check")
+    require(report.get("scenarios") == "not_requested" and report.get("functional") == {}
+            and report.get("requested_scenarios") == [], "Discovery must not misstate functional qualification")
+    require(set(report.get("images", {})) == set(active_roles()), "All discovery contract images must be checked")
+    builds = set()
+    for image in report["images"].values():
+        require(image.get("status") == "passed" and image.get("platform") == "linux/" + architecture
+                and DIGEST.fullmatch(str(image.get("image_id", ""))) is not None,
+                "Every discovery image must pass with an immutable identity on the requested platform")
+        require(image.get("cleanup", {}).get("status") == "passed", "Discovery quick cleanup must pass")
+        checks = image.get("checks")
+        require(isinstance(checks, list) and checks and all(isinstance(item, dict)
+                and item.get("status") == "passed" for item in checks), "Discovery role checks must all pass")
+        versions = image.get("versions")
+        require(isinstance(versions, dict) and versions, "Discovery requires observed native version/build IDs")
+        for version in versions.values():
+            require(isinstance(version, dict) and version.get("release") == release
+                    and re.fullmatch(r"[0-9a-f]{40}", str(version.get("commit", ""))) is not None,
+                    "Discovery version/build differs from the selected patch or is unavailable")
+            builds.add((version["release"], version["commit"]))
+    require(len(builds) == 1, "Discovery roles must use the same Ceph build")
+    require(report.get("contract_sha256") == hashlib.sha256((check.HERE / "check-runtime.sh").read_bytes()).hexdigest()
+            and report.get("functional_sha256") == check.functional_sha256()
+            and report.get("checker_sha256") == hashlib.sha256(Path(check.__file__).read_bytes()).hexdigest(),
+            "Discovery report must come from the current checker and scenarios")
+
+
 def verify_image(entry):
     reference = REGISTRY + "@" + entry["digest"]
     metadata = raw_manifest(reference)
@@ -120,9 +174,20 @@ def verify_image(entry):
 
 
 def stage(args):
+    stage_checked(args, validate_report)
+
+
+def stage_discovery(args):
+    discovery_release(args.release)
+    require((args.variant, args.architecture) in discovery_cohorts(args.release),
+            "Discovery cohort is not eligible in the committed input inventory")
+    stage_checked(args, validate_discovery_report, DISCOVERY)
+
+
+def stage_checked(args, validate, channel=None):
     report_bytes = args.report.read_bytes()
     report = json.loads(report_bytes)
-    validate_report(report, args.architecture, args.release)
+    validate(report, args.architecture, args.release)
     require(re.fullmatch(r"[0-9a-f]{40}", args.revision) is not None, "Revision must be a full commit SHA")
     require(re.fullmatch(r"[0-9]+-[0-9]+", args.run_id) is not None, "Run identity must include run and attempt")
     prepared = {}
@@ -138,12 +203,16 @@ def stage(args):
         prepared[role] = {"role": role, "architecture": args.architecture,
                           "image_id": checked["image_id"], "config_digest": config_digest,
                           "rootfs_diff_ids": local["RootFS"]["Layers"]}
+        if channel:
+            prepared[role]["native_versions"] = checked["versions"]
     result = {"schema": 1, "release": args.release, "variant": args.variant, "architecture": args.architecture,
               "revision": args.revision, "run_id": args.run_id, "status": "uploading",
               "report_sha256": hashlib.sha256(report_bytes).hexdigest(), "contract": CONTRACT, "images": {}}
+    if channel:
+        result.update(channel=channel, qualification=DISCOVERY_QUALIFICATION)
     save(args.output, result)
     for role, entry in prepared.items():
-        tag = REGISTRY + ":ci-" + args.run_id + "-" + args.variant + "-" + args.release + "-" + role + "-linux-" + args.architecture
+        tag = REGISTRY + (":ci-discovery-" if channel else ":ci-") + args.run_id + "-" + args.variant + "-" + args.release + "-" + role + "-linux-" + args.architecture
         run(["docker", "tag", entry["image_id"], tag])
         (args.output.parent / ("push-" + role + ".log")).write_text(run(["docker", "push", tag]))
         entry.update(digest=manifest(tag)["digest"], candidate_tag=tag)
@@ -156,8 +225,12 @@ def stage(args):
     save(args.output, result)
 
 
-def collect_candidates(directory, revision, run_id, release):
+def collect_candidates(directory, revision, run_id, release, channel=None):
     result = {}
+    expected = (discovery_cohorts(release) if channel
+                else {(v, a) for v in VARIANTS for a in ARCHITECTURES})
+    require(expected and expected <= {(v, a) for v in VARIANTS for a in ARCHITECTURES},
+            "The committed discovery inventory has no valid eligible cohorts")
     for path in sorted(directory.rglob("candidate.json")):
         candidate = json.loads(path.read_text())
         key = (candidate.get("variant"), candidate.get("architecture"))
@@ -165,47 +238,101 @@ def collect_candidates(directory, revision, run_id, release):
         require(candidate.get("status") == "passed" and candidate.get("revision") == revision
                 and candidate.get("run_id") == run_id, "Candidates must pass in the same CI run and revision")
         require(candidate.get("contract") == CONTRACT, "Candidate contract differs")
+        if channel:
+            require(candidate.get("schema") == 1 and candidate.get("channel") == channel
+                    and candidate.get("qualification") == DISCOVERY_QUALIFICATION,
+                    "Discovery candidate channel/qualification differs")
+        else:
+            require(candidate.get("channel") in (None, "production"),
+                    "A discovery candidate cannot enter production promotion")
         require(candidate.get("release") == release, "Candidates must be built for release " + release)
+        if channel:
+            validate_discovery_cohort(path, candidate)
         require(set(candidate.get("images", {})) == set(active_roles()), "Incomplete candidate roles")
+        builds = set()
         for role, entry in candidate["images"].items():
             require(entry.get("role") == role and entry.get("architecture") == key[1], "Candidate role/platform mismatch")
             require(all(isinstance(entry.get(field), str) and DIGEST.fullmatch(entry[field])
                         for field in ("digest", "config_digest", "image_id")), "Invalid candidate identity")
+            if channel:
+                versions = entry.get("native_versions")
+                require(isinstance(versions, dict) and versions, "Discovery candidate has no native build evidence")
+                for version in versions.values():
+                    require(isinstance(version, dict) and version.get("release") == release
+                            and re.fullmatch(r"[0-9a-f]{40}", str(version.get("commit", ""))) is not None,
+                            "Discovery candidate build evidence differs")
+                    builds.add((version["release"], version["commit"]))
+        if channel:
+            require(len(builds) == 1, "Discovery candidate mixes Ceph builds")
         result[key] = candidate
-    require(set(result) == {(v, a) for v in VARIANTS for a in ARCHITECTURES}, "All six candidate platforms must pass")
+    require(set(result) == expected, "Every committed eligible candidate platform must pass" if channel
+            else "All six candidate platforms must pass")
     return result
+
+
+def validate_discovery_cohort(candidate_path, candidate):
+    """A successful upload is insufficient when later owned cleanup failed."""
+    try:
+        report = json.loads(candidate_path.with_name("report.json").read_text())
+    except (OSError, ValueError) as error:
+        raise PublishError("Final discovery cohort report is missing or unreadable") from error
+    require(isinstance(report, dict) and report.get("status") == "passed"
+            and report.get("publication") == "passed", "Final discovery cohort did not pass")
+    require(all(report.get(field) == candidate.get(field)
+                for field in ("release", "variant", "architecture", "revision", "run_id")),
+            "Final discovery cohort report belongs to a different candidate")
+    errors = report.get("cleanup_errors", [])
+    require(isinstance(errors, list) and not errors and report.get("image_cleanup") == "passed",
+            "Final discovery cohort cleanup did not pass")
 
 
 def promote(args):
     candidates = collect_candidates(args.candidates, args.revision, args.run_id, args.release)
+    promote_checked(args, candidates, release_tag)
+
+
+def promote_discovery(args):
+    discovery_release(args.release)
+    candidates = collect_candidates(args.candidates, args.revision, args.run_id, args.release, DISCOVERY)
+    promote_checked(args, candidates, discovery_tag, DISCOVERY)
+
+
+def promote_checked(args, candidates, tag_for, channel=None):
     entries = [entry for candidate in candidates.values() for entry in candidate["images"].values()]
     with ThreadPoolExecutor(max_workers=6) as pool:
         list(pool.map(verify_image, entries))
-    tags = [release_tag(args.release, v, r, a) for v in VARIANTS for r in active_roles() for a in (*ARCHITECTURES, None)]
+    variants = [v for v in VARIANTS if any(variant == v for variant, _ in candidates)]
+    architectures = {v: [a for a in ARCHITECTURES if (v, a) in candidates] for v in variants}
+    tags = [tag_for(args.release, v, r, a) for v in variants for r in active_roles()
+            for a in (*architectures[v], None)]
     with ThreadPoolExecutor(max_workers=6) as pool:
         previous = dict(zip(tags, pool.map(previous_manifest, tags)))
     result = {"status": "promoting", "release": args.release, "revision": args.revision, "run_id": args.run_id,
               "previous": previous, "platforms": {}, "indexes": {}}
+    if channel:
+        result.update(channel=channel, qualification=DISCOVERY_QUALIFICATION,
+                      cohorts=[{"variant": v, "architecture": a} for v, a in sorted(candidates)])
     save(args.output, result)
-    digests = {v: {a: {} for a in ARCHITECTURES} for v in VARIANTS}
+    digests = {v: {a: {} for a in architectures[v]} for v in variants}
     for (variant, architecture), candidate in candidates.items():
         for role, entry in candidate["images"].items():
-            tag = release_tag(args.release, variant, role, architecture)
+            tag = tag_for(args.release, variant, role, architecture)
             run(["docker", "buildx", "imagetools", "create", "--prefer-index=false", "--tag", tag,
                  REGISTRY + "@" + entry["digest"]])
             require(manifest(tag)["digest"] == entry["digest"], "Platform tag differs from tested candidate")
             digests[variant][architecture][role] = entry["digest"]
             result["platforms"][tag] = entry
             save(args.output, result)
-    for variant in VARIANTS:
+    for variant in variants:
         for role in active_roles():
-            tag = release_tag(args.release, variant, role)
-            expected = {("linux", a): digests[variant][a][role] for a in ARCHITECTURES}
+            tag = tag_for(args.release, variant, role)
+            expected = {("linux", a): digests[variant][a][role] for a in architectures[variant]}
             run(["docker", "buildx", "imagetools", "create", "--tag", tag] +
                 [REGISTRY + "@" + digest for digest in expected.values()])
             raw = raw_manifest(tag)
             observed = {(m["platform"]["os"], m["platform"]["architecture"]): m["digest"] for m in raw.get("manifests", [])}
-            require(len(raw.get("manifests", [])) == 2 and observed == expected, "Index differs from tested platforms")
+            require(len(raw.get("manifests", [])) == len(expected) and observed == expected,
+                    "Index differs from tested platforms")
             result["indexes"][tag] = manifest(tag)
             save(args.output, result)
             print("Promoted tested platforms: " + tag, flush=True)
@@ -475,15 +602,47 @@ def health(args):
     check_tags(tags)
 
 
+def discovery_health(args):
+    """Check only the platforms explicitly eligible in the committed survey."""
+    receipt = json.loads(args.promotion.read_text())
+    require(receipt.get("status") == "passed" and receipt.get("channel") == DISCOVERY
+            and receipt.get("qualification") == DISCOVERY_QUALIFICATION,
+            "Discovery promotion must have completed with its distinct qualification")
+    release = discovery_release(receipt.get("release"))
+    expected = discovery_cohorts(release)
+    cohorts = receipt.get("cohorts")
+    require(isinstance(cohorts, list) and len(cohorts) == len(expected)
+            and {(row.get("variant"), row.get("architecture")) for row in cohorts
+                 if isinstance(row, dict)} == expected, "Discovery promotion eligibility differs from the committed inventory")
+    tags = {discovery_tag(release, v, r): [a for a in ARCHITECTURES if (v, a) in expected]
+            for v in VARIANTS if any(variant == v for variant, _ in expected) for r in active_roles()}
+    require(set(receipt.get("indexes", {})) == set(tags), "Discovery promotion indexes are incomplete or foreign")
+    images = receipt.get("images", {})
+    require(set(images) == {v for v, _ in expected}, "Discovery promotion image variants differ")
+    identities = {}
+    for variant in images:
+        arches = {a for v, a in expected if v == variant}
+        require(set(images[variant]) == arches, "Discovery promotion image architectures differ")
+        for architecture, roles in images[variant].items():
+            require(set(roles) == set(active_roles())
+                    and all(isinstance(value, str) and DIGEST.fullmatch(value) for value in roles.values()),
+                    "Discovery promotion image digests are incomplete")
+        for role in active_roles():
+            identities[discovery_tag(release, variant, role)] = {
+                ("linux", a): images[variant][a][role] for a in arches}
+    check_tags(list(tags), tags, identities)
+
+
 def extension_health(args):
     """The same for every extension helper tag."""
     check_tags([extension_tag(extension) for extension in extensions().PUBLISHED])
 
 
-def check_tags(tags):
+def check_tags(tags, architectures_by_tag=None, identities_by_tag=None):
     problems = []
     checked = 0
     for tag in tags:
+        architectures = (architectures_by_tag or {}).get(tag, ARCHITECTURES)
         try:
             index = raw_manifest(tag)
         except PublishError as error:
@@ -491,8 +650,12 @@ def check_tags(tags):
             continue
         platforms = {(m.get("platform", {}).get("os"), m.get("platform", {}).get("architecture")): m.get("digest")
                      for m in index.get("manifests", [])}
-        if set(platforms) != {("linux", a) for a in ARCHITECTURES}:
-            problems.append(tag + ": tag does not list exactly linux/amd64 and linux/arm64")
+        if (set(platforms) != {("linux", a) for a in architectures}
+                or len(index.get("manifests", [])) != len(architectures)):
+            problems.append(tag + ": tag does not list exactly " + " and ".join("linux/" + a for a in architectures))
+            continue
+        if identities_by_tag is not None and platforms != identities_by_tag[tag]:
+            problems.append(tag + ": published platform digests differ from the checked promotion")
             continue
         for (_, architecture), digest in sorted(platforms.items()):
             checked += 1
@@ -521,6 +684,18 @@ def main():
         command.add_argument("--revision", required=True)
         command.add_argument("--run-id", required=True)
         command.add_argument("--output", type=Path, required=True)
+    discovery_upload = commands.add_parser("stage-discovery", help="Upload quick-contract discovery images only")
+    discovery_upload.add_argument("--report", type=Path, required=True)
+    discovery_upload.add_argument("--variant", choices=VARIANTS, required=True)
+    discovery_upload.add_argument("--architecture", choices=ARCHITECTURES, required=True)
+    discovery_promote = commands.add_parser("promote-discovery", help="Promote discovery images from all committed eligible native cohorts")
+    discovery_promote.add_argument("--candidates", type=Path, required=True)
+    discovery_promote.add_argument("--github-output", type=Path)
+    for command in (discovery_upload, discovery_promote):
+        command.add_argument("--release", type=discovery_release, required=True)
+        command.add_argument("--revision", required=True)
+        command.add_argument("--run-id", required=True)
+        command.add_argument("--output", type=Path, required=True)
     stage_helper = commands.add_parser("stage-extension", help="Upload a functionally checked extension helper")
     stage_helper.add_argument("--report", type=Path, required=True)
     stage_helper.add_argument("--extension", required=True)
@@ -536,6 +711,8 @@ def main():
     health_parser = commands.add_parser("health", help="Check that every published platform image still exists")
     health_parser.add_argument("--promotion", type=Path, help="Check the tags of this completed promotion")
     health_parser.add_argument("--release", dest="releases", action="append", choices=tuple(releases.RELEASES))
+    discovery_health_parser = commands.add_parser("health-discovery", help="Check published discovery indexes against committed eligibility")
+    discovery_health_parser.add_argument("--promotion", type=Path, required=True)
     commands.add_parser("extension-health", help="Check that every published helper platform image still exists")
     reference = commands.add_parser("published-reference", help="Print one platform of a promoted helper by digest")
     reference.add_argument("--extension", required=True)
@@ -548,6 +725,9 @@ def main():
         args.releases = args.releases or list(releases.RELEASES)
         health(args)
         return
+    if args.command == "health-discovery":
+        discovery_health(args)
+        return
     if args.command == "extension-health":
         extension_health(args)
         return
@@ -557,7 +737,8 @@ def main():
     if args.command == "check-artifacts":
         check_artifacts(args)
         return
-    {"stage": stage, "promote": promote, "stage-extension": stage_extension,
+    {"stage": stage, "promote": promote, "stage-discovery": stage_discovery,
+     "promote-discovery": promote_discovery, "stage-extension": stage_extension,
      "promote-extension": promote_extension}[args.command](args)
 
 

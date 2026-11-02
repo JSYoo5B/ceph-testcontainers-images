@@ -83,7 +83,7 @@ def load(kind, analyze):
             return set(re.findall(r'^P:(.+)$',(root/'lib/apk/db/installed').read_text(),re.M))
     return inventory, closure, ('ca-certificates','coreutils','procps')
 
-def roots(kind):
+def roots(kind, inventory=None):
     if kind == 'apk':
         return {
             # Alpine splits ceph-bluestore-tool and the other offline OSD tools into
@@ -103,5 +103,16 @@ def roots(kind):
         'rgw': ('ceph-radosgw' if kind=='rpm' else 'radosgw','ceph-common'),
     }
     if kind == 'deb':
-        result['essential'] += tuple(os.environ.get('CEPH_MGR_PACKAGES','').split())
+        # Apt consumes optional exact version pins; the installed inventory
+        # and dependency solver are keyed by package name, not name=version.
+        extra = os.environ.get('CEPH_MGR_PACKAGES', '').split()
+        if any(not re.fullmatch(r'[a-z0-9][a-z0-9+.-]*(?:=[A-Za-z0-9][A-Za-z0-9+.:~_-]*)?', p) for p in extra):
+            raise RuntimeError('Invalid extra MGR package name/version pin')
+        result['essential'] += tuple(p.partition('=')[0] for p in extra)
+    # Umbrella split the required mirroring module out of modules-core.
+    # Select its own installed package instead of weakening the module check;
+    # older sources keep their original closure and an absent module still fails.
+    if inventory is not None and 'ceph-mgr-mirroring' in inventory:
+        if 'ceph-mgr-mirroring' not in result['essential']:
+            result['essential'] += ('ceph-mgr-mirroring',)
     return result

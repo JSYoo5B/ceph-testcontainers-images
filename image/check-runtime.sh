@@ -318,21 +318,63 @@ if "$osd"; then
     check version:ceph-bluestore-tool version ceph-bluestore-tool
     class_dir=$(ceph-osd --show-config-value osd_class_dir) || failed=1
     plugin_dir=$(ceph-osd --show-config-value plugin_dir) || failed=1
+    class_libc() {
+        # Minimal roles need not contain ldd or getconf. Ask the installed ELF
+        # interpreter itself; an unknown or ambiguous libc must fail closed.
+        libc=
+        for loader in /lib/ld-musl-*.so.1 /lib64/ld-musl-*.so.1 \
+            /lib/ld-linux*.so.* /lib64/ld-linux*.so.*; do
+            test -x "$loader" || continue
+            LC_ALL=C "$loader" --version > "$work/libc-version" 2>&1 || :
+            detected=$(awk '
+                /GNU C Library|GNU libc|GLIBC/ {glibc=1}
+                /musl libc/ {musl=1}
+                END {if (glibc && !musl) print "glibc";
+                     else if (musl && !glibc) print "musl"}' "$work/libc-version")
+            test -n "$detected" || return 1
+            test -z "$libc" || test "$libc" = "$detected" || return 1
+            libc=$detected
+        done
+        test -n "$libc" || return 1
+        printf '%s\n' "$libc"
+    }
+    class_relocate() {
+        library=$1
+        case "$library" in /*) ;; *) return 1 ;; esac
+        libc=$(class_libc) || return 1
+        status=0
+        if test "$libc" = glibc; then
+            # Like glibc ldd -r: check eager data/function ELF relocation in
+            # the OSD export scope, without pre-main C++ constructors. This
+            # intentionally does not execute constructors or IFUNC resolvers;
+            # actual class methods belong to the functional scenarios.
+            LC_ALL=C LD_TRACE_LOADED_OBJECTS=1 LD_WARN=1 LD_BIND_NOW=1 \
+                LD_DEBUG= LD_PROFILE= LD_AUDIT= LD_BIND_NOT= \
+                LD_PRELOAD="$library" ceph-osd --version \
+                > "$work/class-version" 2> "$work/class-error" || status=$?
+        elif test "$libc" = musl; then
+            # Preserve musl's existing native preload check.
+            LC_ALL=C LD_BIND_NOW=1 LD_PRELOAD="$library" ceph-osd --version \
+                > "$work/class-version" 2> "$work/class-error" || status=$?
+        else
+            return 1
+        fi
+        cat "$work/class-version" "$work/class-error"
+        test "$status" -eq 0 || return "$status"
+        # Trace warnings (including unresolved symbols) can still exit zero.
+        # Require the requested object in the trace: ignored/unsupported trace
+        # mode must never turn a successful --version into a passing check.
+        awk -v library="$library" -v libc="$libc" '
+            BEGIN {failed=0; loaded=0}
+            $1 == library && $2 ~ /^\(0x[[:xdigit:]]+\)$/ {loaded=1}
+            /cannot be preloaded|cannot open shared object|wrong ELF|invalid ELF|undefined symbol|ERROR: ld.so|Error loading|Error relocating|not found|symbol lookup error|relocation error|unsupported relocation|different size in shared object/ {failed=1}
+            END {exit (failed || (libc == "glibc" && !loaded))}
+            ' "$work/class-version" "$work/class-error"
+    }
     class_load() {
         for library in "$class_dir/libcls_$1.so"*; do
             if test -f "$library"; then
-                # Object classes reference OSD exports: load in ceph-osd itself,
-                # with eager ELF relocation, without Python or a host compiler.
-                status=0
-                LD_BIND_NOW=1 LD_PRELOAD="$library" ceph-osd --version \
-                    > "$work/class-version" 2> "$work/class-error" || status=$?
-                cat "$work/class-version" "$work/class-error"
-                test "$status" -eq 0 || return "$status"
-                # glibc can ignore an invalid/missing preload and still exit 0.
-                # That is a loading failure, even if ceph-osd prints a version.
-                awk 'BEGIN {failed=0}
-                    /cannot be preloaded|cannot open shared object|wrong ELF|invalid ELF|undefined symbol|ERROR: ld.so|Error loading|Error relocating/ {failed=1}
-                    END {exit failed}' "$work/class-error"
+                class_relocate "$library"
                 return $?
             fi
         done
