@@ -96,6 +96,9 @@ def build_commands(release, variant, architecture, directory):
                 "--source-image", source, "--skip-pull", "--platform", platform,
                 "--tag", "discovery-" + variant + "-" + release, "--repository", REPOSITORY,
                 "--check", "quick", "--output-dir", str(directory / "build")]
+    licenses = json.loads((ROOT / "image/roles/ceph-licenses.json").read_text())["releases"]
+    if variant == "official" and release in licenses:
+        assemble += ["--restore-ceph-license", release]
     return preparation, assemble, role_tags, source
 
 

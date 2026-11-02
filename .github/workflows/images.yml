@@ -199,6 +199,9 @@ jobs:
                   target = selected / candidate.parent.parent.name
                   target.mkdir()
                   shutil.copy2(candidate, target / 'candidate.json')
+                  report = candidate.with_name('report.json')
+                  if report.is_file():
+                      shutil.copy2(report, target / 'report.json')
               receipt = output / release / 'promotion.json'
               command = [sys.executable, 'image/publish.py', 'promote-discovery',
                          '--release', release, '--candidates', str(selected),
