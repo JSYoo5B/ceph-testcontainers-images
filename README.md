@@ -150,6 +150,10 @@ The netem helper is published as `ghcr.io/jsyoo5b/ceph-testcontainers-images:ext
 
 ## Published images
 
+Historical patch-comparison images, including Umbrella, use the separate
+[`discovery-*` publication channel](docs/PATCH_DISCOVERY.md). Its quick native
+role-contract qualification is distinct from production full interoperability.
+
 Production images use
 `ghcr.io/jsyoo5b/ceph-testcontainers-images:<variant>-<release>-<role>`
 for `linux/amd64` and `linux/arm64`. Roles are `essential`, `client`,

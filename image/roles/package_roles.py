@@ -42,10 +42,12 @@ image, for example under /usr/share/licenses and /usr/share/doc/ceph/COPYING.
 
 Corresponding source for every package is its source RPM, named in
 source-packages.txt:
-- Ceph {release} (source RPM ceph-{release}): https://download.ceph.com/rpm-{release}/el9/SRPMS/
+- Ceph {release} (source RPM ceph-{release}): https://download.ceph.com/rpm-{release}/
+  (the source RPM directory for the source image's Enterprise Linux release)
   and https://github.com/ceph/ceph/tree/{commit}
-- Packages from CentOS: https://mirror.stream.centos.org/9-stream/ (source trees)
-- Packages from the Fedora Project (EPEL): https://dl.fedoraproject.org/pub/epel/9/Everything/source/tree/
+- Packages from CentOS: https://mirror.stream.centos.org/ (source trees)
+- Packages from Rocky Linux: https://dl.rockylinux.org/pub/rocky/ (source trees)
+- Packages from the Fedora Project (EPEL): https://dl.fedoraproject.org/pub/epel/ (source trees)
 - Other vendors: the source RPM published with the binary package
 The official image above also contains the complete binary packages.
 

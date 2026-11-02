@@ -2,6 +2,15 @@ name: images
 on:
   workflow_dispatch:
     inputs:
+      mode:
+        type: choice
+        options: [production, discovery]
+        default: production
+        description: 'Production full qualification, or isolated patch-discovery tool contracts'
+      patches:
+        type: string
+        default: all
+        description: 'Discovery only: all or comma-separated versions from image/patch-releases.json'
       release:
         type: choice
         options: ['20.2.4', '19.2.5']
@@ -13,21 +22,30 @@ permissions:
   contents: read
 concurrency:
   # Release publications use disjoint tags, so Squid and Tentacle can qualify independently.
-  group: images-${{ github.event_name }}-${{ github.ref }}-${{ inputs.release || 'matrix' }}
+  group: images-${{ inputs.mode || 'production' }}-${{ github.event_name }}-${{ github.ref }}-${{ inputs.release || 'matrix' }}
   cancel-in-progress: false
 jobs:
   unit:
     runs-on: ubuntu-24.04
     outputs:
       releases: ${{ steps.releases.outputs.value }}
+      patches: ${{ steps.discovery-plan.outputs.releases }}
+      discovery_matrix: ${{ steps.discovery-plan.outputs.matrix }}
     steps:
       - uses: actions/checkout@v4
       - run: make base-check
       - id: releases
+        if: inputs.mode != 'discovery'
         env:
           RELEASE: ${{ inputs.release }}
         run: python3 -c 'import json,os; print("value="+json.dumps([os.environ["RELEASE"]] if os.environ["RELEASE"] else ["20.2.4","19.2.5"]))' >> "$GITHUB_OUTPUT"
+      - id: discovery-plan
+        if: inputs.mode == 'discovery'
+        env:
+          PATCHES: ${{ inputs.patches }}
+        run: python3 image/discovery.py plan --releases "$PATCHES" --github-output "$GITHUB_OUTPUT"
   build:
+    if: inputs.mode != 'discovery'
     needs: unit
     strategy:
       fail-fast: false
@@ -73,7 +91,7 @@ jobs:
             ${{ runner.temp }}/candidate
           retention-days: 14
   promote:
-    if: github.event_name == 'workflow_dispatch' && inputs.publish
+    if: github.event_name == 'workflow_dispatch' && inputs.mode != 'discovery' && inputs.publish
     needs: [unit, build]
     runs-on: ubuntu-24.04
     permissions:
@@ -101,3 +119,111 @@ jobs:
           name: images-promotion
           path: promotion.json
           retention-days: 30
+
+  discovery-build:
+    if: github.event_name == 'workflow_dispatch' && inputs.mode == 'discovery'
+    needs: unit
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.unit.outputs.discovery_matrix) }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 360
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/login-action@v3
+        if: inputs.publish
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build sequential patches and stage their exact contract-checked identities
+        env:
+          PATCHES: ${{ inputs.patches }}
+          PUBLISH: ${{ inputs.publish }}
+          VARIANT: ${{ matrix.variant }}
+          ARCHITECTURE: ${{ matrix.architecture }}
+        run: |
+          publication=()
+          if [ "$PUBLISH" = true ]; then publication+=(--publish); fi
+          python3 image/discovery.py build --releases "$PATCHES" \
+            --variant "$VARIANT" --architecture "$ARCHITECTURE" \
+            --revision "$GITHUB_SHA" --run-id "$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" \
+            --output "$RUNNER_TEMP/discovery" "${publication[@]}"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: discovery-${{ matrix.variant }}-${{ matrix.architecture }}
+          path: ${{ runner.temp }}/discovery/
+          retention-days: 30
+          if-no-files-found: warn
+
+  discovery-promote:
+    if: always() && github.event_name == 'workflow_dispatch' && inputs.mode == 'discovery' && inputs.publish && needs.unit.result == 'success'
+    needs: [unit, discovery-build]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: discovery-*
+          path: candidates
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Promote each complete patch independently and verify its registry indexes
+        env:
+          PATCHES: ${{ inputs.patches }}
+        run: |
+          python3 - <<'PY'
+          import json, os
+          from pathlib import Path
+          import shutil, subprocess, sys
+          sys.path.insert(0, 'image')
+          import patch_releases
+          output = Path(os.environ['RUNNER_TEMP']) / 'promotions'
+          output.mkdir()
+          failed, images = [], {}
+          for release in patch_releases.selected(os.environ['PATCHES']):
+              selected = output / release / 'candidates'
+              selected.mkdir(parents=True)
+              for candidate in Path('candidates').glob('*/' + release + '/candidate.json'):
+                  target = selected / candidate.parent.parent.name
+                  target.mkdir()
+                  shutil.copy2(candidate, target / 'candidate.json')
+              receipt = output / release / 'promotion.json'
+              command = [sys.executable, 'image/publish.py', 'promote-discovery',
+                         '--release', release, '--candidates', str(selected),
+                         '--revision', os.environ['GITHUB_SHA'],
+                         '--run-id', os.environ['GITHUB_RUN_ID'] + '-' + os.environ['GITHUB_RUN_ATTEMPT'],
+                         '--output', str(receipt)]
+              with (output / release / 'promotion.log').open('w') as log:
+                  status = subprocess.run(command, stdout=log, stderr=subprocess.STDOUT).returncode
+                  if status == 0:
+                      status = subprocess.run([sys.executable, 'image/publish.py', 'health-discovery',
+                                               '--promotion', str(receipt)], stdout=log, stderr=subprocess.STDOUT).returncode
+              if status:
+                  failed.append(release)
+                  print('Discovery publication incomplete: ' + release, flush=True)
+              else:
+                  images[release] = json.loads(receipt.read_text())['images']
+                  print('Discovery publication verified: ' + release, flush=True)
+          (output / 'images.json').write_text(json.dumps(images, indent=2) + '\n')
+          (output / 'incomplete.json').write_text(json.dumps(failed, indent=2) + '\n')
+          raise SystemExit(bool(failed))
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: discovery-promotions
+          path: ${{ runner.temp }}/promotions/
+          retention-days: 30
+          if-no-files-found: warn
