@@ -39,6 +39,11 @@ An upstream source Git tag, registry image, APT package and native qualification
 are separate observations. Umbrella's registry and distribution artifacts were
 available at inventory time even though the queried Git source tag was not.
 Reports retain actual native version/build and immutable image identities.
+Some older official images omit Ceph COPYING although RPM metadata names it.
+The assembler can restore only the vendored upstream text pinned to the exact
+observed Ceph build commit and SHA256; existing license files are preserved.
+Every affected role records the addition in `license-supplement.json`. No Ceph
+executable is patched and the assembly remains offline.
 
 ## Qualification and publication
 
