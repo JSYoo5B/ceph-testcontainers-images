@@ -36,8 +36,14 @@ class PatchReleasesTest(unittest.TestCase):
             self.assertEqual(args["CEPH_SUITE"], suite)
         for variant in ("debian", "ubuntu"):
             args = patches.build_args("21.2.0", variant)
+            version = args["CEPH_PACKAGE_VERSION"]
             self.assertEqual(args["CEPH_MGR_PACKAGES"],
-                             "ceph-mgr-mirroring=" + args["CEPH_PACKAGE_VERSION"])
+                             "ceph-mgr-mirroring=" + version + " ceph-mgr-snap-schedule=" + version)
+            # Every pinned split MGR package has its pinned archive metadata.
+            metadata = patches.release("21.2.0")[variant]["metadata"]["additional_packages"]
+            for extra in args["CEPH_MGR_PACKAGES"].split():
+                package, _, pinned = extra.partition("=")
+                self.assertEqual(metadata[package]["version"], pinned)
 
     def test_selection_is_bounded_and_duplicate_free(self):
         self.assertEqual(patches.selected("all"), list(patches.PATCHES))
