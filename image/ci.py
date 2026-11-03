@@ -4,8 +4,14 @@ The cohort must be available in the release catalogue, and the host must run
 its source executables: a cohort that needs a newer x86-64 level than the CPU
 offers is refused as environment_ineligible (exit 3) before any build,
 distinct from a build or check failure. preflight.json records the decision.
+
+The build and the image requirement (quick) check are the gate: a failure in
+either fails the command. The full scope then runs the functional scenarios as
+an auxiliary indicator. Their outcome is written to functional-summary.json and
+never fails the command.
 """
 import argparse
+import hashlib
 import json
 from pathlib import Path
 import subprocess
@@ -41,18 +47,62 @@ def preflight(release, variant, architecture, probe=loader_levels):
 
 
 def commands(release, variant, architecture, scope, output):
+    """The gate commands, which must succeed, and the functional commands by
+    name, which are only recorded."""
     build = ['make', 'role-images', 'VARIANT='+variant, 'CEPH_RELEASE='+release,
              'PLATFORM=linux/'+architecture, 'ROLE_OUTPUT='+str(output/'build')]
-    result = [build]
-    if scope == 'full':
-        tags = {role: f'ceph-testcontainers:{variant}-{release}-{role}' for role in releases.ROLES}
-        full = [sys.executable, 'image/check.py', '--full', '--output-dir', str(output/'full')]
-        for role, reference in tags.items():
-            full += ['--image', role+'='+reference]
-        result += [full, [sys.executable, 'image/check.py', '--full', '--scenario', 'rgw-multisite',
-                         '--image', 'essential='+tags['essential'], '--image', 'rgw='+tags['rgw'],
-                         '--output-dir', str(output/'rgw-only')]]
-    return result
+    if scope != 'full':
+        return [build], {}
+    tags = {role: f'ceph-testcontainers:{variant}-{release}-{role}' for role in releases.ROLES}
+    images = [item for role, reference in tags.items() for item in ('--image', role+'='+reference)]
+    quick = [sys.executable, 'image/check.py', '--platform', 'linux/'+architecture,
+             '--output-dir', str(output/'quick')] + images
+    functional = {
+        'full': [sys.executable, 'image/check.py', '--full', '--output-dir', str(output/'full')] + images,
+        'rgw-only': [sys.executable, 'image/check.py', '--full', '--scenario', 'rgw-multisite',
+                     '--image', 'essential='+tags['essential'], '--image', 'rgw='+tags['rgw'],
+                     '--output-dir', str(output/'rgw-only')]}
+    return [build, quick], functional
+
+
+def functional_run(name, command, returncode, output):
+    """One functional run as recorded: its exit status and, when its report
+    exists, the report's digest and per-topology and per-scenario statuses."""
+    record = {'command': command, 'exit_status': returncode, 'report': name+'/check-report.json'}
+    path = output/name/'check-report.json'
+    try:
+        data = path.read_bytes()
+        report = json.loads(data)
+        record.update(report_sha256=hashlib.sha256(data).hexdigest(), status=report.get('status'),
+                      level=report.get('level'), scenarios=report.get('scenarios'), topologies={
+                          topology: {'status': result.get('status'), 'images': result.get('images'),
+                                     'scenarios': {scenario: value.get('status')
+                                                   for scenario, value in result.get('scenarios', {}).items()}}
+                          for topology, result in report.get('functional', {}).items()})
+        if report.get('error'):
+            record['error'] = report['error']
+    except (OSError, ValueError, AttributeError, TypeError) as error:
+        record.update(status='no_report', error=str(error))
+    record['outcome'] = 'passed' if returncode == 0 and record.get('status') == 'passed' else 'failed'
+    return record
+
+
+def run_functional(functional, output, execute):
+    runs = {}
+    for name, command in functional.items():
+        try:
+            returncode = execute(command, check=False).returncode
+        except OSError as error:
+            print('Functional run ' + name + ' could not start: ' + str(error), file=sys.stderr)
+            returncode = None
+        runs[name] = functional_run(name, command, returncode, output)
+    failed = [name for name, run in runs.items() if run['outcome'] != 'passed']
+    summary = {'schema': 1, 'status': 'failed' if failed else 'passed', 'gating': False, 'runs': runs}
+    (output/'functional-summary.json').write_text(json.dumps(summary, indent=2, sort_keys=True) + '\n')
+    if failed:
+        # An annotation in GitHub Actions; the result does not block publication.
+        print('::warning::Auxiliary functional scenarios failed (not a publication gate): ' + ', '.join(failed))
+    return summary
 
 
 def main(argv=None, probe=loader_levels, execute=subprocess.run):
@@ -79,8 +129,11 @@ def main(argv=None, probe=loader_levels, execute=subprocess.run):
         return 2
     record['status'] = 'passed'
     (args.output/'preflight.json').write_text(json.dumps(record, indent=2) + '\n')
-    for command in commands(args.release, args.variant, args.architecture, args.scope, args.output):
+    gate, functional = commands(args.release, args.variant, args.architecture, args.scope, args.output)
+    for command in gate:
         execute(command, check=True)
+    if functional:
+        run_functional(functional, args.output, execute)
     return 0
 
 
