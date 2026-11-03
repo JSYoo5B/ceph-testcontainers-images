@@ -142,23 +142,29 @@ class EntrypointAliasTests(unittest.TestCase):
                              role == 'essential')
 
 
-class MirroringPackageRootsTests(unittest.TestCase):
-    def test_split_installed_module_is_selected_only_for_essential(self):
+class SplitMGRPackageRootsTests(unittest.TestCase):
+    def test_split_installed_modules_are_selected_only_for_essential(self):
         with mock.patch.dict(os.environ, {'CEPH_MGR_PACKAGES': ''}):
             for kind in ('deb', 'rpm'):
-                with self.subTest(kind=kind):
-                    absent = backend.roots(kind, {})
-                    self.assertNotIn('ceph-mgr-mirroring', absent['essential'])
-                    present = backend.roots(kind, {'ceph-mgr-mirroring': {}})
-                    self.assertIn('ceph-mgr-mirroring', present['essential'])
-                    for role in contract.ROLES:
-                        if role != 'essential':
-                            self.assertNotIn('ceph-mgr-mirroring', present[role])
+                for package in backend.SPLIT_MGR_PACKAGES:
+                    with self.subTest(kind=kind, package=package):
+                        absent = backend.roots(kind, {})
+                        self.assertNotIn(package, absent['essential'])
+                        present = backend.roots(kind, {package: {}})
+                        self.assertIn(package, present['essential'])
+                        for role in contract.ROLES:
+                            if role != 'essential':
+                                self.assertNotIn(package, present[role])
+
+    def test_split_packages_cover_the_required_moved_modules(self):
+        self.assertEqual(backend.SPLIT_MGR_PACKAGES, ('ceph-mgr-mirroring', 'ceph-mgr-snap-schedule'))
 
     def test_exact_apt_pins_become_installed_names_without_duplicate_roots(self):
-        with mock.patch.dict(os.environ, {'CEPH_MGR_PACKAGES': 'ceph-mgr-mirroring=21.2.0-1bookworm'}):
-            roots = backend.roots('deb', {'ceph-mgr-mirroring': {}})
-            self.assertEqual(roots['essential'].count('ceph-mgr-mirroring'), 1)
+        pins = 'ceph-mgr-mirroring=21.2.0-1bookworm ceph-mgr-snap-schedule=21.2.0-1bookworm'
+        with mock.patch.dict(os.environ, {'CEPH_MGR_PACKAGES': pins}):
+            roots = backend.roots('deb', {'ceph-mgr-mirroring': {}, 'ceph-mgr-snap-schedule': {}})
+            for package in backend.SPLIT_MGR_PACKAGES:
+                self.assertEqual(roots['essential'].count(package), 1)
             self.assertFalse(any('=' in name for name in roots['essential']))
         for invalid in ('ceph-mgr-mirroring=', '--option', 'ceph-mgr-mirroring=bad;command'):
             with self.subTest(invalid=invalid), mock.patch.dict(os.environ, {'CEPH_MGR_PACKAGES': invalid}):
