@@ -9,4 +9,6 @@ shared layers. `CEPH_RELEASE` selects any catalogued release
 ([Releases](RELEASES.md)); the official variant extracts that release's pinned
 native child for `PLATFORM`. Debian, Ubuntu and experimental Alpine use the same assembler
 with their package backend. `make role-images-full` adds complete functional
-checks. Images contain runtime tools; consumers supply bootstrap and lifecycle.
+checks. Publication is gated by the image requirement (quick) check; the
+functional scenarios are recorded as auxiliary evidence
+([Releases](RELEASES.md#building-checking-and-publishing)). Images contain runtime tools; consumers supply bootstrap and lifecycle.

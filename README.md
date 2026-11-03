@@ -165,20 +165,29 @@ Reviewers can request additional image checks with a PR comment:
 ```
 
 Quick selects official/amd64 of the default release. Full selects every
-available variant/architecture cohort of the requested releases. Only an
+available variant/architecture cohort of the requested releases and also runs
+the functional scenarios, whose outcome is recorded in the uploaded
+`functional-summary.json` (and a warning annotation) rather than failing the
+job. Only an
 owner, member or collaborator may run a command on an open same-repository
 PR. The head SHA is frozen before checkout; native jobs have a read-only token
 and cannot publish. Results appear as a commit status with the run link.
 
 The manual [images workflow](.github/workflows/images.yml) takes `releases`
-(`all` or comma-separated catalogued versions, default `20.2.4`) and runs the
-complete split/aggregate and RGW-without-client proofs for every available
-cohort before optional publication. Each release is promoted on its own and
-requires all of its available tested native cohorts; failed or skipped checks
-block that release, not the others. Publication and registry health remain
-separate from downstream consumer validation.
+(`all` or comma-separated catalogued versions, default `20.2.4`) and builds
+every available cohort. The image requirement (quick) check of every role on
+the cohort's platform gates publication. The functional scenarios
+(split/aggregate topologies and RGW multisite without a client image) also run
+for every cohort, but only as auxiliary evidence: their outcome is recorded in
+`functional-summary.json`, in the staged candidate and in the promotion
+receipt, and a failing or incomplete functional result does not block staging
+or promotion. A published version later found broken is rebuilt and replaced.
+Each release is promoted on its own and requires all of its available native
+cohorts to pass the requirement check; a failed cohort blocks that release, not
+the others. Publication and registry health remain separate from downstream
+consumer validation.
 
-The current qualified registry indexes are recorded in
+The current published registry indexes are recorded in
 [the published digest map](.github/ceph-role-images.json). Consumers and
 extension checks can use these immutable references without rebuilding or
 republishing an image for a name change. The weekly
@@ -196,7 +205,7 @@ its publication matrix. See [Alpine](#experimental-alpine-stable-squid).
 
 ## Development
 
-`make check` runs the host unit tests of the checkers, the publisher, the functional harness and the role extraction. The release jobs depend only on `make base-check`; the extension jobs run `make extension-test`, so that neither blocks the other. [The manual images workflow](.github/workflows/images.yml) checks official-derived, Debian and Ubuntu dependency roles on native AMD64 and ARM64. Full publication checks cover split roles and `all` independently.
+`make check` runs the host unit tests of the checkers, the publisher, the functional harness and the role extraction. The release jobs depend only on `make base-check`; the extension jobs run `make extension-test`, so that neither blocks the other. [The manual images workflow](.github/workflows/images.yml) checks official-derived, Debian and Ubuntu dependency roles on native AMD64 and ARM64. The requirement check gates publication; the functional scenarios, which cover split roles and `all` independently, are recorded as auxiliary evidence.
 
 ## License
 

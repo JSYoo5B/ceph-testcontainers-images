@@ -108,5 +108,10 @@ and loading. Functional checks exercise real cluster operations. Missing
 requirements fail validation; file presence or a successful `--version`
 does not establish functional compatibility.
 
+Publication is gated by the quick check alone. The functional scenarios run in
+the publication workflow as auxiliary evidence: their outcome is recorded with
+each published cohort and does not block publication (see
+[Releases](RELEASES.md#building-checking-and-publishing)).
+
 See [Test Scenarios](TEST_SCENARIOS.md) for checker commands, scenario steps,
 pass criteria, validation scope and result interpretation.

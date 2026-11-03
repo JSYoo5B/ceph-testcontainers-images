@@ -107,10 +107,12 @@ reported as `environment_ineligible` (exit status 3, recorded in
 
 ## Known release defects
 
-In 19.2.6, `radosgw-admin` signs `realm pull` requests that the same release's
-RGW rejects (`x-amz-content-sha256` outside `SignedHeaders`), so RGW multisite
-cannot start. The full check's `rgw-multisite` scenario fails for 19.2.6, and
-the publication gate does not publish its cohorts.
+The 19.2.6 release has a known RGW multisite defect: its `radosgw-admin` signs
+`realm pull` requests that the same release's RGW rejects
+(`x-amz-content-sha256` outside `SignedHeaders`), so RGW multisite cannot
+start. The `rgw-multisite` functional scenario is therefore expected to fail for
+19.2.6. That result is recorded as auxiliary evidence and does not block the
+publication of its cohorts.
 
 ## Building, checking and publishing
 
@@ -124,22 +126,33 @@ requested checks.
 
 The manual [images workflow](../.github/workflows/images.yml) takes `releases`
 (`all` or comma-separated catalogued versions, default `20.2.4`) and
-`publish`. It plans the native matrix of the available cohorts, builds each one
-and runs the full check, including the split/aggregate topologies and RGW
-multisite without a client image. With `publish`, each cohort stages its
-exactly tested images. The promote job then promotes and health-checks every
-selected release on its own:
+`publish`. It plans the native matrix of the available cohorts and runs
+`image/ci.py --scope full` for each one. The build and the image requirement
+(quick) check of every role on the cohort's platform (`quick/check-report.json`)
+are the publication gate. The functional scenarios then run as an auxiliary
+indicator: the split/aggregate topologies (`full/`) and RGW multisite without a
+client image (`rgw-only/`). Their exit status, report digests and per-topology
+and per-scenario statuses are written to `functional-summary.json`. A failing
+or incomplete functional result does not fail the job and never blocks staging
+or promotion; a published version later found broken is rebuilt and replaced.
+With `publish`, each cohort stages the images that passed the requirement
+check and records the functional outcome in its candidate. The promote job
+then promotes and health-checks every selected release on its own, and its
+receipt carries each cohort's functional outcome:
 
-- a release is promoted only when every available cohort passed in the same
-  run and revision, and a cohort the catalogue marks unavailable is neither
-  required nor accepted;
+- a release is promoted only when every available cohort passed the
+  requirement check and was staged in the same run and revision, and a cohort
+  the catalogue marks unavailable is neither required nor accepted;
 - a release with a failed cohort stays unpublished without blocking the
   promotion of the others, and the job fails when any selected release is
   incomplete.
 
 Reviewers can run the same checks on a pull request with
 `/ci run image-quick [on <release>|all]` (official `amd64`) or
-`/ci run image-full [on <release>|all]` (every available cohort).
+`/ci run image-full [on <release>|all]` (every available cohort). A full
+check's job result likewise reflects the build and the requirement check; the
+functional outcome is in the uploaded `functional-summary.json` and a warning
+annotation.
 
 The index digests of published releases are recorded in
 [the digest inventory](../.github/ceph-role-images.json). The extension checks
