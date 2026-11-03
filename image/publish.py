@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
-"""Publish exact checked identities. Production requires full qualification;
-discovery has a separate runtime-contract-only namespace and input inventory."""
+"""Publish exact checked identities.
+
+The image requirement (quick) check gates publication. The functional
+scenarios are auxiliary: their outcome is recorded in the candidate and the
+promotion receipt, and never blocks staging or promotion."""
 import argparse
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
@@ -18,8 +21,6 @@ REGISTRY = "ghcr.io/jsyoo5b/ceph-testcontainers-images"
 VARIANTS = ("official", "debian", "ubuntu")
 ARCHITECTURES = ("amd64", "arm64")
 CONTRACT = "roles"
-DISCOVERY = "discovery"
-DISCOVERY_QUALIFICATION = "runtime-contract-only"
 
 def active_roles():
     return check.ROLES
@@ -64,26 +65,6 @@ def release_tag(release, variant, role, architecture=None):
         "-linux-" + architecture if architecture else "")
 
 
-def discovery_tag(release, variant, role, architecture=None):
-    return REGISTRY + ":discovery-" + variant + "-" + release + "-" + role + (
-        "-linux-" + architecture if architecture else "")
-
-
-def discovery_release(value):
-    """Use the committed source/eligibility inventory, not a release guess."""
-    import patch_releases
-    try:
-        patch_releases.release(value)
-    except (KeyError, ValueError) as error:
-        raise argparse.ArgumentTypeError(str(error)) from error
-    return value
-
-
-def discovery_cohorts(release):
-    import patch_releases
-    return set(patch_releases.expected_cohorts(release))
-
-
 def previous_manifest(tag):
     """The manifest a release tag points to, or None before its first publication."""
     try:
@@ -95,65 +76,46 @@ def previous_manifest(tag):
 
 
 def validate_report(report, architecture, release):
+    """The publication gate: a passing image requirement (quick) check of every
+    contract role on the requested platform and release, by the current checker."""
     require(report.get("contract") == CONTRACT, "Image contract differs from publication namespace")
-    require(report.get("status") == "passed" and report.get("level") == "full",
-            "Publishing requires a passing full check")
-    require(report.get("preflight") == "passed" and report.get("scenarios") == "passed",
-            "Quick and functional checks must both pass")
+    require(report.get("status") == "passed" and report.get("level") == "quick",
+            "Publishing requires a passing image requirement (quick) check")
+    require(report.get("preflight") == "passed", "The image requirement check must pass")
     require(set(report.get("images", {})) == set(active_roles()), "All contract images must be checked")
-    require(set(report.get("functional", {})) == {"mixed", "all"}, "Check mixed roles and all separately")
     for image in report["images"].values():
         require(image.get("status") == "passed" and image.get("platform") == "linux/" + architecture,
                 "Every image must pass on the requested platform")
         require(image.get("cleanup", {}).get("status") == "passed", "Quick cleanup must pass")
         require(image.get("versions") and all(v["release"] == release for v in image["versions"].values()),
                 "Every image must use the published Ceph release " + release)
-    for topology, result in report["functional"].items():
-        require(result.get("status") == "passed", "Functional topology failed: " + topology)
-        scenarios = result.get("scenarios", {})
-        require(set(scenarios) == set(check.suite.SCENARIOS) | {"cleanup"}, "Every scenario must be recorded")
-        require(all(s.get("status") == "passed" for s in scenarios.values()), "Failures and skips cannot publish")
-        require(not scenarios["cleanup"].get("leftovers") and not scenarios["cleanup"].get("errors"),
-                "Functional cleanup must leave no resources")
-        expected = {role: report["images"]["all" if topology == "all" else role]["image_id"]
-                    for role in active_roles()[:-1]}
-        require(result.get("images") == expected, "Functional checks must use the checked immutable image IDs")
     require(report.get("contract_sha256") == hashlib.sha256((check.HERE / "check-runtime.sh").read_bytes()).hexdigest()
-            and report.get("functional_sha256") == check.functional_sha256()
             and report.get("checker_sha256") == hashlib.sha256(Path(check.__file__).read_bytes()).hexdigest(),
-            "Check report must come from the current checker and scenarios")
+            "Check report must come from the current checker and image contract")
 
 
-def validate_discovery_report(report, architecture, release):
-    """Qualify image/tool contracts without claiming native interoperability."""
-    require(report.get("schema") == 4 and report.get("contract") == CONTRACT,
-            "Discovery needs the current role check report schema")
-    require(report.get("status") == "passed" and report.get("level") == "quick"
-            and report.get("preflight") == "passed", "Discovery needs a passing quick contract check")
-    require(report.get("scenarios") == "not_requested" and report.get("functional") == {}
-            and report.get("requested_scenarios") == [], "Discovery must not misstate functional qualification")
-    require(set(report.get("images", {})) == set(active_roles()), "All discovery contract images must be checked")
-    builds = set()
-    for image in report["images"].values():
-        require(image.get("status") == "passed" and image.get("platform") == "linux/" + architecture
-                and DIGEST.fullmatch(str(image.get("image_id", ""))) is not None,
-                "Every discovery image must pass with an immutable identity on the requested platform")
-        require(image.get("cleanup", {}).get("status") == "passed", "Discovery quick cleanup must pass")
-        checks = image.get("checks")
-        require(isinstance(checks, list) and checks and all(isinstance(item, dict)
-                and item.get("status") == "passed" for item in checks), "Discovery role checks must all pass")
-        versions = image.get("versions")
-        require(isinstance(versions, dict) and versions, "Discovery requires observed native version/build IDs")
-        for version in versions.values():
-            require(isinstance(version, dict) and version.get("release") == release
-                    and re.fullmatch(r"[0-9a-f]{40}", str(version.get("commit", ""))) is not None,
-                    "Discovery version/build differs from the selected patch or is unavailable")
-            builds.add((version["release"], version["commit"]))
-    require(len(builds) == 1, "Discovery roles must use the same Ceph build")
-    require(report.get("contract_sha256") == hashlib.sha256((check.HERE / "check-runtime.sh").read_bytes()).hexdigest()
-            and report.get("functional_sha256") == check.functional_sha256()
-            and report.get("checker_sha256") == hashlib.sha256(Path(check.__file__).read_bytes()).hexdigest(),
-            "Discovery report must come from the current checker and scenarios")
+def functional_outcome(path, images):
+    """The auxiliary functional outcome for a candidate. It is informational:
+    a missing, unreadable, failing or malformed summary is recorded as such and
+    never raises."""
+    if path is None:
+        return {"status": "not_recorded"}
+    try:
+        data = Path(path).read_bytes()
+        summary = json.loads(data)
+        runs = summary.get("runs", {})
+        outcome = {"status": summary.get("status") if summary.get("status") in ("passed", "failed") else "unknown",
+                   "summary_sha256": hashlib.sha256(data).hexdigest(), "runs": runs}
+        checked = {role: image["image_id"] for role, image in images.items()}
+        # Whether the functional topologies ran the images that passed the gate;
+        # None when no run recorded its images.
+        matches = [identity == checked.get("all" if topology == "all" else role)
+                   for run in runs.values() for topology, result in (run.get("topologies") or {}).items()
+                   for role, identity in (result.get("images") or {}).items()]
+        outcome["images_match"] = all(matches) if matches else None
+        return outcome
+    except Exception as error:  # noqa: BLE001 - the outcome must never block publication
+        return {"status": "unreadable", "error": type(error).__name__ + ": " + str(error)}
 
 
 def verify_image(entry):
@@ -174,20 +136,11 @@ def verify_image(entry):
 
 
 def stage(args):
-    stage_checked(args, validate_report)
-
-
-def stage_discovery(args):
-    discovery_release(args.release)
-    require((args.variant, args.architecture) in discovery_cohorts(args.release),
-            "Discovery cohort is not eligible in the committed input inventory")
-    stage_checked(args, validate_discovery_report, DISCOVERY)
-
-
-def stage_checked(args, validate, channel=None):
+    require((args.variant, args.architecture) in releases.cohorts(args.release),
+            "The catalogue marks this cohort unavailable")
     report_bytes = args.report.read_bytes()
     report = json.loads(report_bytes)
-    validate(report, args.architecture, args.release)
+    validate_report(report, args.architecture, args.release)
     require(re.fullmatch(r"[0-9a-f]{40}", args.revision) is not None, "Revision must be a full commit SHA")
     require(re.fullmatch(r"[0-9]+-[0-9]+", args.run_id) is not None, "Run identity must include run and attempt")
     prepared = {}
@@ -203,16 +156,14 @@ def stage_checked(args, validate, channel=None):
         prepared[role] = {"role": role, "architecture": args.architecture,
                           "image_id": checked["image_id"], "config_digest": config_digest,
                           "rootfs_diff_ids": local["RootFS"]["Layers"]}
-        if channel:
-            prepared[role]["native_versions"] = checked["versions"]
     result = {"schema": 1, "release": args.release, "variant": args.variant, "architecture": args.architecture,
               "revision": args.revision, "run_id": args.run_id, "status": "uploading",
-              "report_sha256": hashlib.sha256(report_bytes).hexdigest(), "contract": CONTRACT, "images": {}}
-    if channel:
-        result.update(channel=channel, qualification=DISCOVERY_QUALIFICATION)
+              "report_sha256": hashlib.sha256(report_bytes).hexdigest(), "gate": "quick", "contract": CONTRACT,
+              "functional": functional_outcome(getattr(args, "functional_summary", None), report["images"]),
+              "images": {}}
     save(args.output, result)
     for role, entry in prepared.items():
-        tag = REGISTRY + (":ci-discovery-" if channel else ":ci-") + args.run_id + "-" + args.variant + "-" + args.release + "-" + role + "-linux-" + args.architecture
+        tag = REGISTRY + ":ci-" + args.run_id + "-" + args.variant + "-" + args.release + "-" + role + "-linux-" + args.architecture
         run(["docker", "tag", entry["image_id"], tag])
         (args.output.parent / ("push-" + role + ".log")).write_text(run(["docker", "push", tag]))
         entry.update(digest=manifest(tag)["digest"], candidate_tag=tag)
@@ -225,12 +176,11 @@ def stage_checked(args, validate, channel=None):
     save(args.output, result)
 
 
-def collect_candidates(directory, revision, run_id, release, channel=None):
+def collect_candidates(directory, revision, run_id, release):
+    """One passing candidate for every available cohort of the release; a
+    cohort that the catalogue marks unavailable has none and is not required."""
     result = {}
-    expected = (discovery_cohorts(release) if channel
-                else {(v, a) for v in VARIANTS for a in ARCHITECTURES})
-    require(expected and expected <= {(v, a) for v in VARIANTS for a in ARCHITECTURES},
-            "The committed discovery inventory has no valid eligible cohorts")
+    expected = releases.cohorts(release)
     for path in sorted(directory.rglob("candidate.json")):
         candidate = json.loads(path.read_text())
         key = (candidate.get("variant"), candidate.get("architecture"))
@@ -238,85 +188,46 @@ def collect_candidates(directory, revision, run_id, release, channel=None):
         require(candidate.get("status") == "passed" and candidate.get("revision") == revision
                 and candidate.get("run_id") == run_id, "Candidates must pass in the same CI run and revision")
         require(candidate.get("contract") == CONTRACT, "Candidate contract differs")
-        if channel:
-            require(candidate.get("schema") == 1 and candidate.get("channel") == channel
-                    and candidate.get("qualification") == DISCOVERY_QUALIFICATION,
-                    "Discovery candidate channel/qualification differs")
-        else:
-            require(candidate.get("channel") in (None, "production"),
-                    "A discovery candidate cannot enter production promotion")
         require(candidate.get("release") == release, "Candidates must be built for release " + release)
-        if channel:
-            validate_discovery_cohort(path, candidate)
         require(set(candidate.get("images", {})) == set(active_roles()), "Incomplete candidate roles")
-        builds = set()
         for role, entry in candidate["images"].items():
             require(entry.get("role") == role and entry.get("architecture") == key[1], "Candidate role/platform mismatch")
             require(all(isinstance(entry.get(field), str) and DIGEST.fullmatch(entry[field])
                         for field in ("digest", "config_digest", "image_id")), "Invalid candidate identity")
-            if channel:
-                versions = entry.get("native_versions")
-                require(isinstance(versions, dict) and versions, "Discovery candidate has no native build evidence")
-                for version in versions.values():
-                    require(isinstance(version, dict) and version.get("release") == release
-                            and re.fullmatch(r"[0-9a-f]{40}", str(version.get("commit", ""))) is not None,
-                            "Discovery candidate build evidence differs")
-                    builds.add((version["release"], version["commit"]))
-        if channel:
-            require(len(builds) == 1, "Discovery candidate mixes Ceph builds")
         result[key] = candidate
-    require(set(result) == expected, "Every committed eligible candidate platform must pass" if channel
-            else "All six candidate platforms must pass")
+    require(set(result) == expected, "Every available catalogued cohort must pass, and no other")
     return result
 
 
-def validate_discovery_cohort(candidate_path, candidate):
-    """A successful upload is insufficient when later owned cleanup failed."""
-    try:
-        report = json.loads(candidate_path.with_name("report.json").read_text())
-    except (OSError, ValueError) as error:
-        raise PublishError("Final discovery cohort report is missing or unreadable") from error
-    require(isinstance(report, dict) and report.get("status") == "passed"
-            and report.get("publication") == "passed", "Final discovery cohort did not pass")
-    require(all(report.get(field) == candidate.get(field)
-                for field in ("release", "variant", "architecture", "revision", "run_id")),
-            "Final discovery cohort report belongs to a different candidate")
-    errors = report.get("cleanup_errors", [])
-    require(isinstance(errors, list) and not errors and report.get("image_cleanup") == "passed",
-            "Final discovery cohort cleanup did not pass")
+def functional_record(candidate):
+    value = candidate.get("functional")
+    return value if isinstance(value, dict) else {"status": "not_recorded"}
 
 
 def promote(args):
     candidates = collect_candidates(args.candidates, args.revision, args.run_id, args.release)
-    promote_checked(args, candidates, release_tag)
-
-
-def promote_discovery(args):
-    discovery_release(args.release)
-    candidates = collect_candidates(args.candidates, args.revision, args.run_id, args.release, DISCOVERY)
-    promote_checked(args, candidates, discovery_tag, DISCOVERY)
-
-
-def promote_checked(args, candidates, tag_for, channel=None):
     entries = [entry for candidate in candidates.values() for entry in candidate["images"].values()]
     with ThreadPoolExecutor(max_workers=6) as pool:
         list(pool.map(verify_image, entries))
     variants = [v for v in VARIANTS if any(variant == v for variant, _ in candidates)]
     architectures = {v: [a for a in ARCHITECTURES if (v, a) in candidates] for v in variants}
-    tags = [tag_for(args.release, v, r, a) for v in variants for r in active_roles()
+    tags = [release_tag(args.release, v, r, a) for v in variants for r in active_roles()
             for a in (*architectures[v], None)]
     with ThreadPoolExecutor(max_workers=6) as pool:
         previous = dict(zip(tags, pool.map(previous_manifest, tags)))
+    # The auxiliary functional outcome of each cohort, carried forward as recorded.
+    functional = {v: {a: functional_record(candidates[(v, a)]) for a in architectures[v]} for v in variants}
+    for variant in variants:
+        for architecture in architectures[variant]:
+            print("Functional (auxiliary) " + variant + "/" + architecture + ": "
+                  + str(functional[variant][architecture].get("status")), flush=True)
     result = {"status": "promoting", "release": args.release, "revision": args.revision, "run_id": args.run_id,
-              "previous": previous, "platforms": {}, "indexes": {}}
-    if channel:
-        result.update(channel=channel, qualification=DISCOVERY_QUALIFICATION,
-                      cohorts=[{"variant": v, "architecture": a} for v, a in sorted(candidates)])
+              "previous": previous, "functional": functional, "platforms": {}, "indexes": {}}
     save(args.output, result)
     digests = {v: {a: {} for a in architectures[v]} for v in variants}
     for (variant, architecture), candidate in candidates.items():
         for role, entry in candidate["images"].items():
-            tag = tag_for(args.release, variant, role, architecture)
+            tag = release_tag(args.release, variant, role, architecture)
             run(["docker", "buildx", "imagetools", "create", "--prefer-index=false", "--tag", tag,
                  REGISTRY + "@" + entry["digest"]])
             require(manifest(tag)["digest"] == entry["digest"], "Platform tag differs from tested candidate")
@@ -325,7 +236,7 @@ def promote_checked(args, candidates, tag_for, channel=None):
             save(args.output, result)
     for variant in variants:
         for role in active_roles():
-            tag = tag_for(args.release, variant, role)
+            tag = release_tag(args.release, variant, role)
             expected = {("linux", a): digests[variant][a][role] for a in architectures[variant]}
             run(["docker", "buildx", "imagetools", "create", "--tag", tag] +
                 [REGISTRY + "@" + digest for digest in expected.values()])
@@ -358,13 +269,13 @@ def extension_tag(extension, architecture=None):
 
 def extension_targets(extension):
     """The targets every published helper must pass. The netem helper: the
-    official image and the published essential role image of every release.
-    The capture helper: the official image of every release, which is what its
-    CI job checks."""
+    official image and the published essential role image of every published
+    release. The capture helper: the official image of every published release,
+    which is what its CI job checks."""
     if extension == "capture":
-        return {value["official"] for value in releases.RELEASES.values()}
-    return {reference for release, value in releases.RELEASES.items()
-            for reference in (value["official"], releases.published_role(release, "official", "essential"))}
+        return {releases.official(release) for release in releases.published()}
+    return {reference for release in releases.published()
+            for reference in (releases.official(release), releases.published_role(release, "official", "essential"))}
 
 
 def validate_extension_report(report, extension, architecture):
@@ -589,48 +500,39 @@ def promote_extension(args):
             output.write("images=" + json.dumps(digests, separators=(",", ":")) + "\n")
 
 
+def published_architectures(release):
+    """The platforms each role index of a release lists: its available cohorts."""
+    expected = releases.cohorts(release)
+    return {variant: [a for a in ARCHITECTURES if (variant, a) in expected]
+            for variant in VARIANTS if any(v == variant for v, _ in expected)}
+
+
 def health(args):
-    """Check both native platforms of the selected published role indexes."""
+    """Check the native platforms of the selected published role indexes."""
     promotion = getattr(args, 'promotion', None)
     if promotion:
         receipt = json.loads(promotion.read_text())
         require(receipt.get('status') == 'passed', 'Promotion must have completed')
-        tags = list(receipt['indexes'])
+        release = receipt.get('release')
+        require(release in releases.RELEASES, 'Promotion names an uncatalogued release')
+        platforms = published_architectures(release)
+        tags = {release_tag(release, v, r): platforms[v] for v in platforms for r in active_roles()}
+        require(set(receipt.get('indexes', {})) == set(tags), 'Promotion indexes differ from the catalogued cohorts')
+        images = receipt.get('images', {})
+        require(isinstance(images, dict) and set(images) == set(platforms)
+                and all(isinstance(images[v], dict) and set(images[v]) == set(platforms[v]) for v in platforms),
+                'Promotion images differ from the catalogued cohorts')
+        require(all(isinstance(roles, dict) and set(roles) == set(active_roles())
+                    and all(isinstance(d, str) and DIGEST.fullmatch(d) for d in roles.values())
+                    for v in platforms for roles in images[v].values()), 'Promotion image digests are incomplete')
+        identities = {release_tag(release, v, r): {('linux', a): images[v][a][r] for a in platforms[v]}
+                      for v in platforms for r in active_roles()}
+        check_tags(list(tags), tags, identities)
     else:
-        tags = [releases.published_role(release, variant, role)
-                for release in args.releases for variant in VARIANTS for role in active_roles()]
-    check_tags(tags)
-
-
-def discovery_health(args):
-    """Check only the platforms explicitly eligible in the committed survey."""
-    receipt = json.loads(args.promotion.read_text())
-    require(receipt.get("status") == "passed" and receipt.get("channel") == DISCOVERY
-            and receipt.get("qualification") == DISCOVERY_QUALIFICATION,
-            "Discovery promotion must have completed with its distinct qualification")
-    release = discovery_release(receipt.get("release"))
-    expected = discovery_cohorts(release)
-    cohorts = receipt.get("cohorts")
-    require(isinstance(cohorts, list) and len(cohorts) == len(expected)
-            and {(row.get("variant"), row.get("architecture")) for row in cohorts
-                 if isinstance(row, dict)} == expected, "Discovery promotion eligibility differs from the committed inventory")
-    tags = {discovery_tag(release, v, r): [a for a in ARCHITECTURES if (v, a) in expected]
-            for v in VARIANTS if any(variant == v for variant, _ in expected) for r in active_roles()}
-    require(set(receipt.get("indexes", {})) == set(tags), "Discovery promotion indexes are incomplete or foreign")
-    images = receipt.get("images", {})
-    require(set(images) == {v for v, _ in expected}, "Discovery promotion image variants differ")
-    identities = {}
-    for variant in images:
-        arches = {a for v, a in expected if v == variant}
-        require(set(images[variant]) == arches, "Discovery promotion image architectures differ")
-        for architecture, roles in images[variant].items():
-            require(set(roles) == set(active_roles())
-                    and all(isinstance(value, str) and DIGEST.fullmatch(value) for value in roles.values()),
-                    "Discovery promotion image digests are incomplete")
-        for role in active_roles():
-            identities[discovery_tag(release, variant, role)] = {
-                ("linux", a): images[variant][a][role] for a in arches}
-    check_tags(list(tags), tags, identities)
+        tags = {releases.published_role(release, v, r): architectures
+                for release in args.releases for v, architectures in published_architectures(release).items()
+                for r in active_roles()}
+        check_tags(list(tags), tags)
 
 
 def extension_health(args):
@@ -676,23 +578,13 @@ def main():
     upload.add_argument("--report", type=Path, required=True)
     upload.add_argument("--variant", choices=VARIANTS, required=True)
     upload.add_argument("--architecture", choices=ARCHITECTURES, required=True)
+    upload.add_argument("--functional-summary", type=Path,
+                        help="Auxiliary functional-summary.json from image/ci.py; recorded, never a gate")
     promote_parser = commands.add_parser("promote")
     promote_parser.add_argument("--candidates", type=Path, required=True)
     promote_parser.add_argument("--github-output", type=Path)
     for command in (upload, promote_parser):
         command.add_argument("--release", choices=tuple(releases.RELEASES), default=releases.DEFAULT)
-        command.add_argument("--revision", required=True)
-        command.add_argument("--run-id", required=True)
-        command.add_argument("--output", type=Path, required=True)
-    discovery_upload = commands.add_parser("stage-discovery", help="Upload quick-contract discovery images only")
-    discovery_upload.add_argument("--report", type=Path, required=True)
-    discovery_upload.add_argument("--variant", choices=VARIANTS, required=True)
-    discovery_upload.add_argument("--architecture", choices=ARCHITECTURES, required=True)
-    discovery_promote = commands.add_parser("promote-discovery", help="Promote discovery images from all committed eligible native cohorts")
-    discovery_promote.add_argument("--candidates", type=Path, required=True)
-    discovery_promote.add_argument("--github-output", type=Path)
-    for command in (discovery_upload, discovery_promote):
-        command.add_argument("--release", type=discovery_release, required=True)
         command.add_argument("--revision", required=True)
         command.add_argument("--run-id", required=True)
         command.add_argument("--output", type=Path, required=True)
@@ -711,8 +603,6 @@ def main():
     health_parser = commands.add_parser("health", help="Check that every published platform image still exists")
     health_parser.add_argument("--promotion", type=Path, help="Check the tags of this completed promotion")
     health_parser.add_argument("--release", dest="releases", action="append", choices=tuple(releases.RELEASES))
-    discovery_health_parser = commands.add_parser("health-discovery", help="Check published discovery indexes against committed eligibility")
-    discovery_health_parser.add_argument("--promotion", type=Path, required=True)
     commands.add_parser("extension-health", help="Check that every published helper platform image still exists")
     reference = commands.add_parser("published-reference", help="Print one platform of a promoted helper by digest")
     reference.add_argument("--extension", required=True)
@@ -722,11 +612,8 @@ def main():
     artifacts.add_argument("--directory", type=Path, required=True)
     args = parser.parse_args()
     if args.command == "health":
-        args.releases = args.releases or list(releases.RELEASES)
+        args.releases = args.releases or releases.published()
         health(args)
-        return
-    if args.command == "health-discovery":
-        discovery_health(args)
         return
     if args.command == "extension-health":
         extension_health(args)
@@ -737,8 +624,7 @@ def main():
     if args.command == "check-artifacts":
         check_artifacts(args)
         return
-    {"stage": stage, "promote": promote, "stage-discovery": stage_discovery,
-     "promote-discovery": promote_discovery, "stage-extension": stage_extension,
+    {"stage": stage, "promote": promote, "stage-extension": stage_extension,
      "promote-extension": promote_extension}[args.command](args)
 
 

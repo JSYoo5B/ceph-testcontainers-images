@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "purpose": "Discovery image inputs; does not expand production-supported releases.",
+  "purpose": "Pinned inputs of every Ceph release this repository builds, checks and publishes; see docs/RELEASES.md.",
   "releases": {
     "19.2.0": {
       "codename": "squid",
@@ -859,6 +859,9 @@
         "children": {
           "amd64": "sha256:403c079a3f1efa7b58895750e9dd18c6da4701e60b746b084385c8cc545877b6",
           "arm64": "sha256:fa8bece1f37c1faa1968107e33e1bbb6ecd776026b3f6fa55796715d1fab1c18"
+        },
+        "cpu_baseline": {
+          "amd64": "x86-64-v3"
         }
       },
       "debian": {

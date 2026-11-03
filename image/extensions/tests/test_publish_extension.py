@@ -54,7 +54,7 @@ class ExtensionPublicationTests(unittest.TestCase):
         value = copy.deepcopy(good); value["image"]["labels"] = {}; bad.append(value)
         value = copy.deepcopy(good); value["kernel"]["status"] = "failed"; bad.append(value)
         value = copy.deepcopy(good); value["kernel"]["cleanup"]["status"] = "failed"; bad.append(value)
-        value = copy.deepcopy(good); del value["targets"][publish.releases.RELEASES["19.2.5"]["official"]]; bad.append(value)
+        value = copy.deepcopy(good); del value["targets"][publish.releases.official("19.2.5")]; bad.append(value)
         value = copy.deepcopy(good); del value["targets"][publish.releases.published_role("20.2.4", "official", "essential")]; bad.append(value)
         value = copy.deepcopy(good)
         next(iter(value["targets"].values()))["cleanup"]["leftovers"] = ["ceph-extension-check-x"]; bad.append(value)
@@ -312,10 +312,10 @@ class ExtensionPublicationTests(unittest.TestCase):
 sys.path.insert(0, sys.argv[1])
 from types import SimpleNamespace
 import publish
-indexes = {publish.releases.published_role(r,v,k) for r in publish.releases.RELEASES for v in publish.VARIANTS for k in publish.active_roles()}
+indexes = {publish.releases.published_role(r,v,k) for r in publish.releases.published() for v in publish.VARIANTS for k in publish.active_roles()}
 publish.raw_manifest = lambda reference: {"config": {}} if reference not in indexes else {"manifests": [
     {"platform": {"os": "linux", "architecture": a}, "digest": "sha256:" + "1" * 64} for a in ("amd64", "arm64")]}
-publish.health(SimpleNamespace(releases=list(publish.releases.RELEASES)))
+publish.health(SimpleNamespace(releases=publish.releases.published()))
 print("extension_check" in sys.modules)
 """
         loaded = subprocess.run([sys.executable, "-c", script, str(Path(publish.__file__).parent)],

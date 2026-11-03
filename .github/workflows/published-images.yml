@@ -9,7 +9,7 @@ on:
   workflow_dispatch:
     inputs:
       images:
-        description: 'JSON digest map: release -> variant -> architecture -> role -> sha256 digest'
+        description: 'JSON digest map: release -> variant -> architecture -> role -> sha256 digest, for the available catalogued cohorts'
         required: true
         type: string
 
@@ -31,36 +31,22 @@ jobs:
     needs: unit
     runs-on: ubuntu-24.04
     outputs:
-      list: ${{ steps.list.outputs.list }}
+      matrix: ${{ steps.plan.outputs.matrix }}
     steps:
       - uses: actions/checkout@v4
-      - id: list
+      - name: Plan the available native cohorts of the given releases
+        id: plan
         env:
           PUBLISHED_IMAGES: ${{ inputs.images }}
         run: |
-          python3 - >> "$GITHUB_OUTPUT" <<'PY'
-          import json, os, sys
-          sys.path.insert(0, 'image')
-          import releases
-          images = json.loads(os.environ['PUBLISHED_IMAGES'])
-          if not images or not set(images) <= set(releases.RELEASES):
-              raise ValueError('Provide digests only for releases listed in image/releases.py')
-          print('list=' + json.dumps(sorted(images)))
-          PY
+          releases="$(python3 -c 'import json, os; images = json.loads(os.environ["PUBLISHED_IMAGES"]); assert images and isinstance(images, dict), "Provide a digest map"; print(",".join(sorted(images)))')"
+          python3 image/releases.py plan --releases "$releases" --github-output "$GITHUB_OUTPUT"
 
   published-images:
     needs: releases
     strategy:
       fail-fast: false
-      matrix:
-        release: ${{ fromJSON(needs.releases.outputs.list) }}
-        variant: [official, debian, ubuntu]
-        architecture: [amd64, arm64]
-        include:
-          - architecture: amd64
-            runner: ubuntu-24.04
-          - architecture: arm64
-            runner: ubuntu-24.04-arm
+      matrix: ${{ fromJSON(needs.releases.outputs.matrix) }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 90
     steps:
@@ -80,15 +66,17 @@ jobs:
           import subprocess
           import sys
 
+          sys.path.insert(0, 'image')
+          import releases
           images = json.loads(os.environ['PUBLISHED_IMAGES'])[os.environ['IMAGE_RELEASE']]
-          variants = {'official', 'debian', 'ubuntu'}
-          architectures = {'amd64', 'arm64'}
-          roles = ('essential', 'client', 'cephfs', 'rbd-aux', 'rgw', 'all')
-          if set(images) != variants:
-              raise ValueError('Provide all three image variants')
-          for variant in variants:
+          cohorts = releases.cohorts(os.environ['IMAGE_RELEASE'])
+          roles = releases.ROLES
+          if set(images) != {variant for variant, _ in cohorts}:
+              raise ValueError('Provide every catalogued image variant')
+          for variant in images:
+              architectures = {a for v, a in cohorts if v == variant}
               if set(images[variant]) != architectures:
-                  raise ValueError('Provide both architectures for every variant')
+                  raise ValueError('Provide exactly the available architectures of every variant')
               for architecture in architectures:
                   entries = images[variant][architecture]
                   if set(entries) != set(roles):

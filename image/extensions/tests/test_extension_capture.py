@@ -1142,7 +1142,7 @@ class CapturePublicationTests(unittest.TestCase):
     def test_publication_requires_every_capture_control_and_target(self):
         import publish
         good = self.report()
-        official = publish.releases.RELEASES["19.2.5"]["official"]
+        official = publish.releases.official("19.2.5")
 
         def change(edit):
             value = json.loads(json.dumps(good))

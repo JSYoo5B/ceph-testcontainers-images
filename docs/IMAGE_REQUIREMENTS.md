@@ -4,7 +4,7 @@
 
 The role images are the default runtime for Ceph testcontainers. The upstream
 official image remains a complete aggregate compatibility reference for every
-release in [image/releases.py](../image/releases.py). All baseline features
+release in [the release catalogue](RELEASES.md). All baseline features
 must work with that image unmodified.
 
 Opt-in extension features, which a caller selects explicitly, may use an additional extension image with tools that the official image does not ship. They never change these requirements; see [Extension Images](EXTENSIONS.md).
@@ -107,6 +107,15 @@ image. Quick checks verify required executable, library and class presence
 and loading. Functional checks exercise real cluster operations. Missing
 requirements fail validation; file presence or a successful `--version`
 does not establish functional compatibility.
+
+Publication is gated by the quick check alone. The requirements are the
+commands, daemons and libraries that ceph-testcontainers-go uses, so an image
+that lacks one cannot serve its role at all and is not published. Whether a
+provided command or daemon works without defects is a separate question: the
+official image can carry a release's own bugs. The functional scenarios answer
+part of it and run in the publication workflow as auxiliary evidence: their
+outcome is recorded with each published cohort and does not block publication
+(see [Releases](RELEASES.md#building-checking-and-publishing)).
 
 See [Test Scenarios](TEST_SCENARIOS.md) for checker commands, scenario steps,
 pass criteria, validation scope and result interpretation.
