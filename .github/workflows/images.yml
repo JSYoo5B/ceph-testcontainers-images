@@ -12,7 +12,9 @@ on:
 permissions:
   contents: read
 concurrency:
-  # Release publications use disjoint tags, so separate selections can qualify independently.
+  # Runs with the same selection queue; other selections build and check in
+  # parallel. Staged candidates use run-unique tags, so only promotion shares
+  # mutable tags, and the promote job serializes on its own.
   group: images-${{ github.event_name }}-${{ github.ref }}-${{ inputs.releases }}
   cancel-in-progress: false
 jobs:
@@ -71,6 +73,13 @@ jobs:
     # cohort stays unpublished without blocking the others, and the job fails.
     if: always() && github.event_name == 'workflow_dispatch' && inputs.publish && needs.unit.result == 'success'
     needs: [unit, build]
+    # Selections can overlap ("20.2.4" and "all" both rewrite 20.2.4's
+    # tags), so every promotion, on any branch, takes one lock: a run's tag
+    # writes, readback and health check never interleave with another's.
+    # A second waiting promotion replaces the first one, which is cancelled.
+    concurrency:
+      group: images-promotion
+      cancel-in-progress: false
     runs-on: ubuntu-24.04
     timeout-minutes: 180
     permissions:

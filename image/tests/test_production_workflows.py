@@ -40,6 +40,20 @@ class ProductionWorkflowTests(unittest.TestCase):
         self.assertIn('image/publish.py health --promotion',promote)
         self.assertIn('[ "${#incomplete[@]}" -eq 0 ]',promote)
 
+    def test_overlapping_selections_promote_under_one_lock(self):
+        workflow=(ROOT/'.github/workflows/images.yml').read_text()
+        promote=workflow[workflow.index('  promote:'):]
+        lock=promote[:promote.index('    steps:')]
+        # "20.2.4", "all" and reordered lists overlap, so the lock must not
+        # depend on the selection, the branch or the event.
+        self.assertIn('    concurrency:\n      group: images-promotion\n      cancel-in-progress: false\n',lock)
+        group=lock[lock.index('group:'):].splitlines()[0]
+        for scoped in ('inputs.', 'github.ref', 'github.event_name', '${{'):
+            self.assertNotIn(scoped,group)
+        # Staging writes only run-unique candidate tags, outside the lock.
+        stage=(ROOT/'image/publish.py').read_text()
+        self.assertIn('":ci-" + args.run_id', stage)
+
     def test_no_workflow_hard_codes_a_release_list_or_a_separate_channel(self):
         for path in sorted((ROOT/'.github/workflows').glob('*.yml')):
             text=path.read_text()
