@@ -65,7 +65,7 @@ jobs:
       - name: Check the contract, the kernel, a delay, the selectors, the rate and the packet faults in Ceph targets
         run: |
           targets=()
-          for release in $(python3 image/releases.py list); do
+          for release in $(python3 image/releases.py published); do
             for reference in "$(python3 image/releases.py official "$release")" \
                 "$(python3 image/releases.py role "$release" official essential)"; do
               docker pull --platform "linux/${{ matrix.architecture }}" "$reference"
@@ -103,8 +103,8 @@ jobs:
 
   capture-extension:
     # The packet-capture helper is built, checked quickly and functionally in
-    # the namespace of each release's official image, and published only by a
-    # manual run with publish on the default branch.
+    # the namespace of each published release's official image, and published
+    # only by a manual run with publish on the default branch.
     permissions:
       contents: read
       packages: write
@@ -140,7 +140,7 @@ jobs:
       - name: Check the capture contract and capture in Ceph targets' namespaces
         run: |
           targets=()
-          for release in $(python3 image/releases.py list); do
+          for release in $(python3 image/releases.py published); do
             reference="$(python3 image/releases.py official "$release")"
             docker pull --platform "linux/${{ matrix.architecture }}" "$reference"
             targets+=(--target "$reference")

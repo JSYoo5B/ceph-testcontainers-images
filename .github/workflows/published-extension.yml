@@ -3,9 +3,10 @@ name: published extension
 # Checks a published extension helper by digest, as consumers pull it
 # (docs/EXTENSIONS.md). The netem helper: the contract, the kernel feature, a
 # delay, every selector profile, the bandwidth profile and the packet-fault
-# profile inside a container of every release's official and OSD role image.
-# The capture helper: the contract and every capture and negative control in
-# the namespace of a container of every release's official image.
+# profile inside a container of every published release's official and OSD
+# role image. The capture helper: the contract and every capture and negative
+# control in the namespace of a container of every published release's
+# official image.
 on:
   workflow_call:
     inputs:
@@ -62,7 +63,7 @@ jobs:
           platform="linux/$IMAGE_ARCHITECTURE"
           docker pull --platform "$platform" "$reference"
           targets=()
-          for release in $(python3 image/releases.py list); do
+          for release in $(python3 image/releases.py published); do
             for target in "$(python3 image/releases.py official "$release")" \
                 "$(python3 image/releases.py role "$release" official essential)"; do
               docker pull --platform "$platform" "$target"
@@ -116,7 +117,7 @@ jobs:
           platform="linux/$IMAGE_ARCHITECTURE"
           docker pull --platform "$platform" "$reference"
           targets=()
-          for release in $(python3 image/releases.py list); do
+          for release in $(python3 image/releases.py published); do
             target="$(python3 image/releases.py official "$release")"
             docker pull --platform "$platform" "$target"
             targets+=(--target "$target")

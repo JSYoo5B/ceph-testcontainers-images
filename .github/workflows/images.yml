@@ -2,44 +2,38 @@ name: images
 on:
   workflow_dispatch:
     inputs:
-      release:
-        type: choice
-        options: ['20.2.4', '19.2.5']
+      releases:
+        type: string
         default: '20.2.4'
+        description: 'all, or comma-separated releases from image/releases.json'
       publish:
         type: boolean
         default: false
 permissions:
   contents: read
 concurrency:
-  # Release publications use disjoint tags, so Squid and Tentacle can qualify independently.
-  group: images-${{ github.event_name }}-${{ github.ref }}-${{ inputs.release || 'matrix' }}
+  # Release publications use disjoint tags, so separate selections can qualify independently.
+  group: images-${{ github.event_name }}-${{ github.ref }}-${{ inputs.releases }}
   cancel-in-progress: false
 jobs:
   unit:
     runs-on: ubuntu-24.04
     outputs:
-      releases: ${{ steps.releases.outputs.value }}
+      releases: ${{ steps.plan.outputs.releases }}
+      matrix: ${{ steps.plan.outputs.matrix }}
     steps:
       - uses: actions/checkout@v4
       - run: make base-check
-      - id: releases
+      - name: Plan the available native cohorts of the selected releases
+        id: plan
         env:
-          RELEASE: ${{ inputs.release }}
-        run: python3 -c 'import json,os; print("value="+json.dumps([os.environ["RELEASE"]] if os.environ["RELEASE"] else ["20.2.4","19.2.5"]))' >> "$GITHUB_OUTPUT"
+          RELEASES: ${{ inputs.releases }}
+        run: python3 image/releases.py plan --releases "$RELEASES" --github-output "$GITHUB_OUTPUT"
   build:
     needs: unit
     strategy:
       fail-fast: false
-      matrix:
-        release: ${{ fromJSON(needs.unit.outputs.releases) }}
-        variant: [official, debian, ubuntu]
-        architecture: [amd64, arm64]
-        include:
-          - architecture: amd64
-            runner: ubuntu-24.04
-          - architecture: arm64
-            runner: ubuntu-24.04-arm
+      matrix: ${{ fromJSON(needs.unit.outputs.matrix) }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 90
     permissions:
@@ -73,9 +67,12 @@ jobs:
             ${{ runner.temp }}/candidate
           retention-days: 14
   promote:
-    if: github.event_name == 'workflow_dispatch' && inputs.publish
+    # Each selected release is promoted on its own: a release with a failed
+    # cohort stays unpublished without blocking the others, and the job fails.
+    if: always() && github.event_name == 'workflow_dispatch' && inputs.publish && needs.unit.result == 'success'
     needs: [unit, build]
     runs-on: ubuntu-24.04
+    timeout-minutes: 180
     permissions:
       contents: read
       packages: write
@@ -83,21 +80,43 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
-          pattern: images-${{ inputs.release }}-*
+          pattern: images-*
           path: candidates
       - uses: docker/login-action@v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - run: >-
-          python3 image/publish.py promote --release ${{ inputs.release }}
-          --candidates candidates --revision "$GITHUB_SHA" --run-id "$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
-          --output promotion.json
-      - run: python3 image/publish.py health --promotion promotion.json --release ${{ inputs.release }}
+      - name: Promote each complete release and check its registry indexes
+        env:
+          RELEASES: ${{ needs.unit.outputs.releases }}
+        run: |
+          output="$RUNNER_TEMP/promotions"
+          incomplete=()
+          for release in $(jq -r '.[]' <<<"$RELEASES"); do
+            mkdir -p "$output/$release/candidates"
+            for artifact in candidates/images-"$release"-*; do
+              if [ -d "$artifact" ]; then cp -R "$artifact" "$output/$release/candidates/"; fi
+            done
+            if python3 image/publish.py promote --release "$release" --candidates "$output/$release/candidates" \
+                --revision "$GITHUB_SHA" --run-id "$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" \
+                --output "$output/$release/promotion.json" > "$output/$release/promotion.log" 2>&1 &&
+              python3 image/publish.py health --promotion "$output/$release/promotion.json" \
+                >> "$output/$release/promotion.log" 2>&1; then
+              echo "Published and verified: $release"
+            else
+              incomplete+=("$release")
+              echo "::error::Publication incomplete: $release"
+              tail -n 20 "$output/$release/promotion.log"
+            fi
+            rm -rf "$output/$release/candidates"
+          done
+          printf '%s\n' "${incomplete[@]}" > "$output/incomplete.txt"
+          [ "${#incomplete[@]}" -eq 0 ]
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: images-promotion
-          path: promotion.json
+          name: promotions
+          path: ${{ runner.temp }}/promotions/
           retention-days: 30
+          if-no-files-found: warn

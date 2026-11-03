@@ -1,7 +1,8 @@
 name: published image health
 
-# A release tag lists two platform images. Deleting a platform tag or an
-# untagged platform version leaves a release tag that still resolves but can
+# A release tag lists the platform images of its available catalogued cohorts
+# (two, unless the catalogue marks one unavailable). Deleting a platform tag or
+# an untagged platform version leaves a release tag that still resolves but can
 # no longer be pulled, which consumers only notice when their CI fails.
 on:
   schedule:
@@ -23,7 +24,7 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - name: Every pinned role index still resolves to both platform images
+      - name: Every pinned role index still resolves to its catalogued platform images
         run: python3 image/publish.py health
       - name: Every extension helper tag still resolves to both platform images
         if: always()
