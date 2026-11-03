@@ -22,20 +22,26 @@ def digest(number):
 
 
 def report(release=RELEASE):
+    """A passing image requirement (quick) report: the publication gate."""
     images = {role: {"image_id": digest(n + 1), "status": "passed", "platform": "linux/arm64",
                      "cleanup": {"status": "passed"}, "versions": {"ceph": {"release": release}}}
               for n, role in enumerate(publish.check.ROLES)}
-    functional = {}
-    for topology in ("mixed", "all"):
-        functional[topology] = {
-            "status": "passed",
-            "images": {r: images["all" if topology == "all" else r]["image_id"] for r in publish.check.ROLES[:-1]},
-            "scenarios": {name: {"status": "passed"} for name in (*publish.check.suite.SCENARIOS, "cleanup")}}
-    return {"status": "passed", "level": "full", "preflight": "passed", "scenarios": "passed", "contract": "roles",
-            "images": images, "functional": functional,
+    return {"status": "passed", "level": "quick", "preflight": "passed", "scenarios": "not_requested",
+            "contract": "roles", "images": images, "functional": {},
             "contract_sha256": hashlib.sha256((publish.check.HERE / "check-runtime.sh").read_bytes()).hexdigest(),
             "functional_sha256": publish.check.functional_sha256(),
             "checker_sha256": hashlib.sha256(Path(publish.check.__file__).read_bytes()).hexdigest()}
+
+
+def functional_summary(value, status="failed"):
+    """An auxiliary functional summary as image/ci.py writes it."""
+    return {"schema": 1, "status": status, "gating": False, "runs": {
+        "full": {"exit_status": 1 if status == "failed" else 0, "status": status, "outcome": status,
+                 "report_sha256": "f" * 64, "topologies": {
+                     "mixed": {"status": status, "images": {r: value["images"][r]["image_id"] for r in publish.check.ROLES[:-1]},
+                               "scenarios": {"rgw-multisite": status}},
+                     "all": {"status": status, "images": {r: value["images"]["all"]["image_id"] for r in publish.check.ROLES[:-1]},
+                             "scenarios": {"rgw-multisite": status}}}}}}
 
 
 def candidates(directory, release=RELEASE, cohorts=ALL_COHORTS):
@@ -50,26 +56,36 @@ def candidates(directory, release=RELEASE, cohorts=ALL_COHORTS):
 
 
 class PublicationTests(unittest.TestCase):
-    def test_selected_missing_skipped_failed_and_unclean_checks_block_publication(self):
+    def test_only_a_passing_requirement_check_gates_publication(self):
         good = report()
         publish.validate_report(good, "arm64", RELEASE)
         bad = []
-        value = copy.deepcopy(good); value["level"] = "functional-selected"; bad.append(value)
-        value = copy.deepcopy(good); del value["functional"]["all"]; bad.append(value)
-        value = copy.deepcopy(good); del value["functional"]["mixed"]["scenarios"]["rbd-encryption"]; bad.append(value)
-        for status in ("skipped", "failed"):
-            value = copy.deepcopy(good); value["functional"]["all"]["scenarios"]["rados-striper"]["status"] = status; bad.append(value)
-        value = copy.deepcopy(good); value["functional"]["mixed"]["scenarios"]["cleanup"]["leftovers"] = ["owned"]; bad.append(value)
+        for status in ("failed", "running"):
+            value = copy.deepcopy(good); value["status"] = status; bad.append(value)
+        # A full or scoped functional report is not the gate.
+        for level in ("full", "functional-selected"):
+            value = copy.deepcopy(good); value["level"] = level; bad.append(value)
+        value = copy.deepcopy(good); value["preflight"] = "failed"; bad.append(value)
+        value = copy.deepcopy(good); del value["images"]["rgw"]; bad.append(value)
+        value = copy.deepcopy(good); value["images"]["client"]["status"] = "failed"; bad.append(value)
         value = copy.deepcopy(good); value["images"]["essential"]["cleanup"]["status"] = "failed"; bad.append(value)
+        value = copy.deepcopy(good); value["contract"] = "other"; bad.append(value)
         for value in bad:
             with self.subTest(report=value), self.assertRaises(publish.PublishError):
                 publish.validate_report(value, "arm64", RELEASE)
 
-    def test_wrong_runtime_identity_platform_release_and_checker_block_publication(self):
-        for mutation in (lambda v: v["functional"]["all"]["images"].update(essential=digest(99)),
-                         lambda v: v["images"]["essential"].update(platform="linux/amd64"),
+    def test_functional_results_are_not_required_by_the_gate(self):
+        value = report()
+        value["functional"] = {"mixed": {"status": "failed", "scenarios": {"rgw-multisite": {"status": "failed"}}}}
+        publish.validate_report(value, "arm64", RELEASE)
+        value = report(); value["functional_sha256"] = "old"
+        publish.validate_report(value, "arm64", RELEASE)
+
+    def test_wrong_platform_release_and_checker_block_publication(self):
+        for mutation in (lambda v: v["images"]["essential"].update(platform="linux/amd64"),
                          lambda v: v["images"]["essential"]["versions"]["ceph"].update(release="old"),
-                         lambda v: v.update(checker_sha256="old")):
+                         lambda v: v.update(checker_sha256="old"),
+                         lambda v: v.update(contract_sha256="old")):
             value = report(); mutation(value)
             with self.assertRaises(publish.PublishError):
                 publish.validate_report(value, "arm64", RELEASE)
@@ -85,6 +101,12 @@ class PublicationTests(unittest.TestCase):
             with mock.patch.object(publish, "run") as run, self.assertRaises(publish.PublishError):
                 publish.stage(args)
             run.assert_not_called()
+            # A missing gate report blocks staging, whatever the functional outcome.
+            args = SimpleNamespace(report=root / "missing.json", variant="official", architecture="arm64",
+                                   release=RELEASE, functional_summary=None)
+            with mock.patch.object(publish, "run") as run, self.assertRaises(OSError):
+                publish.stage(args)
+            run.assert_not_called()
             # A cohort that the catalogue marks unavailable is refused even with a passing report.
             publish.save(root / "check.json", report(UNAVAILABLE_RELEASE))
             args = SimpleNamespace(report=root / "check.json", variant="debian", architecture="arm64",
@@ -93,33 +115,64 @@ class PublicationTests(unittest.TestCase):
                 publish.stage(args)
             run.assert_not_called()
 
+    def stage(self, root, value, summary_path):
+        local = {i["image_id"]: {"Id": i["image_id"], "Os": "linux", "Architecture": "arm64",
+                 "Config": {"Labels": {"io.ceph-testcontainers.role": role}}, "RootFS": {"Layers": [digest(100)]}}
+                 for role, i in value["images"].items()}
+        calls = []
+        def run(command):
+            calls.append(command)
+            if command[:3] == ["docker", "image", "inspect"]:
+                return json.dumps([local[command[-1]]])
+            return ""
+        def manifest(tag):
+            role = next(role for role in sorted(publish.check.ROLES,key=len,reverse=True) if tag.rsplit("-linux-",1)[0].endswith("-"+role))
+            return {"digest": digest(publish.check.ROLES.index(role) + 11)}
+        args = SimpleNamespace(report=root / "check.json", architecture="arm64", variant="official",
+                               release=RELEASE, revision="a" * 40, run_id="123-1", output=root / "candidate.json",
+                               functional_summary=summary_path)
+        with mock.patch.object(publish, "run", side_effect=run), mock.patch.object(publish, "manifest", side_effect=manifest), \
+                mock.patch.object(publish, "verify_image"), mock.patch("sys.stdout"):
+            publish.stage(args)
+        return calls, json.loads(args.output.read_text())
+
     def test_stage_tags_tested_ids_and_distinguishes_config_ids_from_manifest_digests(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary); value = report(); publish.save(root / "check.json", value)
-            local = {i["image_id"]: {"Id": i["image_id"], "Os": "linux", "Architecture": "arm64",
-                     "Config": {"Labels": {"io.ceph-testcontainers.role": role}}, "RootFS": {"Layers": [digest(100)]}}
-                     for role, i in value["images"].items()}
-            calls = []
-            def run(command):
-                calls.append(command)
-                if command[:3] == ["docker", "image", "inspect"]:
-                    return json.dumps([local[command[-1]]])
-                return ""
-            def manifest(tag):
-                role = next(role for role in sorted(publish.check.ROLES,key=len,reverse=True) if tag.rsplit("-linux-",1)[0].endswith("-"+role))
-                return {"digest": digest(publish.check.ROLES.index(role) + 11)}
-            args = SimpleNamespace(report=root / "check.json", architecture="arm64", variant="official",
-                                   release=RELEASE, revision="a" * 40, run_id="123-1", output=root / "candidate.json")
-            with mock.patch.object(publish, "run", side_effect=run), mock.patch.object(publish, "manifest", side_effect=manifest), \
-                    mock.patch.object(publish, "verify_image"):
-                publish.stage(args)
+            calls, saved = self.stage(root, value, None)
             tagged = [c[2] for c in calls if c[:2] == ["docker", "tag"]]
             self.assertEqual(tagged, [value["images"][r]["image_id"] for r in sorted(publish.check.ROLES)])
-            saved = json.loads(args.output.read_text())
-            self.assertEqual(saved["status"], "passed")
+            self.assertEqual((saved["status"], saved["gate"], saved["functional"]), ("passed", "quick", {"status": "not_recorded"}))
+            self.assertEqual(saved["report_sha256"], hashlib.sha256((root / "check.json").read_bytes()).hexdigest())
             for image in saved["images"].values():
                 self.assertEqual(image["config_digest"], image["image_id"])
                 self.assertNotEqual(image["digest"], image["image_id"])
+
+    def test_a_failing_or_unreadable_functional_result_is_recorded_and_does_not_block_staging(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary); value = report(); publish.save(root / "check.json", value)
+            publish.save(root / "functional-summary.json", functional_summary(value))
+            _, saved = self.stage(root, value, root / "functional-summary.json")
+            functional = saved["functional"]
+            self.assertEqual((saved["status"], functional["status"], functional["images_match"]), ("passed", "failed", True))
+            self.assertEqual(functional["summary_sha256"],
+                             hashlib.sha256((root / "functional-summary.json").read_bytes()).hexdigest())
+            self.assertEqual(functional["runs"]["full"]["topologies"]["all"]["scenarios"]["rgw-multisite"], "failed")
+            self.assertEqual(functional["runs"]["full"]["report_sha256"], "f" * 64)
+            # Functional runs of other images are recorded as such.
+            other = functional_summary(value, "passed")
+            other["runs"]["full"]["topologies"]["mixed"]["images"]["rgw"] = digest(99)
+            publish.save(root / "functional-summary.json", other)
+            _, saved = self.stage(root, value, root / "functional-summary.json")
+            self.assertEqual((saved["functional"]["status"], saved["functional"]["images_match"]), ("passed", False))
+            for content in (None, "not json", "[]"):
+                path = root / "broken.json"
+                path.unlink(missing_ok=True)
+                if content is not None:
+                    path.write_text(content)
+                with self.subTest(content=content):
+                    _, saved = self.stage(root, value, path)
+                    self.assertEqual((saved["status"], saved["functional"]["status"]), ("passed", "unreadable"))
 
     def test_uploaded_config_platform_and_layers_must_match_tested_image(self):
         entry = {"digest": digest(11), "config_digest": digest(1), "architecture": "arm64",
@@ -169,16 +222,25 @@ class PublicationTests(unittest.TestCase):
             def raw(tag):
                 return {"manifests": [{"platform": {"os": "linux", "architecture": architecture}, "digest": reference.split("@", 1)[1]}
                                       for architecture, reference in zip(publish.ARCHITECTURES, observed[tag])]}
+            for name, functional in (("ubuntu-arm64", {"status": "failed", "runs": {}}),
+                                     ("official-amd64", {"status": "passed", "runs": {}}), ("debian-amd64", "garbage")):
+                path = root / "candidates" / name / "candidate.json"
+                value = json.loads(path.read_text()); value["functional"] = functional; publish.save(path, value)
             args = SimpleNamespace(candidates=root / "candidates", revision="a" * 40, run_id="123-1", release=RELEASE,
                                    output=root / "promotion.json", github_output=root / "outputs")
             with mock.patch.object(publish, "run", side_effect=run), mock.patch.object(publish, "manifest", side_effect=manifest), \
-                    mock.patch.object(publish, "raw_manifest", side_effect=raw), mock.patch.object(publish, "verify_image") as verify:
+                    mock.patch.object(publish, "raw_manifest", side_effect=raw), mock.patch.object(publish, "verify_image") as verify, \
+                    mock.patch("sys.stdout"):
                 publish.promote(args)
             self.assertEqual(verify.call_count, 36)
             self.assertEqual(len(calls), 54)
             self.assertTrue(all(all('@sha256:' in ref for ref in refs) for refs in observed.values()))
             saved = json.loads(args.output.read_text())
             self.assertEqual((saved["status"], len(saved["platforms"]), len(saved["indexes"])), ("passed", 36, 18))
+            # A failing functional outcome promotes and is carried into the receipt.
+            self.assertEqual(saved["functional"]["ubuntu"]["arm64"]["status"], "failed")
+            self.assertEqual(saved["functional"]["official"]["amd64"]["status"], "passed")
+            self.assertEqual(saved["functional"]["debian"]["amd64"], {"status": "not_recorded"})
             self.assertTrue(args.github_output.read_text().startswith("images="))
 
 

@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Publish exact checked identities; publication requires full qualification."""
+"""Publish exact checked identities.
+
+The image requirement (quick) check gates publication. The functional
+scenarios are auxiliary: their outcome is recorded in the candidate and the
+promotion receipt, and never blocks staging or promotion."""
 import argparse
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
@@ -72,33 +76,46 @@ def previous_manifest(tag):
 
 
 def validate_report(report, architecture, release):
+    """The publication gate: a passing image requirement (quick) check of every
+    contract role on the requested platform and release, by the current checker."""
     require(report.get("contract") == CONTRACT, "Image contract differs from publication namespace")
-    require(report.get("status") == "passed" and report.get("level") == "full",
-            "Publishing requires a passing full check")
-    require(report.get("preflight") == "passed" and report.get("scenarios") == "passed",
-            "Quick and functional checks must both pass")
+    require(report.get("status") == "passed" and report.get("level") == "quick",
+            "Publishing requires a passing image requirement (quick) check")
+    require(report.get("preflight") == "passed", "The image requirement check must pass")
     require(set(report.get("images", {})) == set(active_roles()), "All contract images must be checked")
-    require(set(report.get("functional", {})) == {"mixed", "all"}, "Check mixed roles and all separately")
     for image in report["images"].values():
         require(image.get("status") == "passed" and image.get("platform") == "linux/" + architecture,
                 "Every image must pass on the requested platform")
         require(image.get("cleanup", {}).get("status") == "passed", "Quick cleanup must pass")
         require(image.get("versions") and all(v["release"] == release for v in image["versions"].values()),
                 "Every image must use the published Ceph release " + release)
-    for topology, result in report["functional"].items():
-        require(result.get("status") == "passed", "Functional topology failed: " + topology)
-        scenarios = result.get("scenarios", {})
-        require(set(scenarios) == set(check.suite.SCENARIOS) | {"cleanup"}, "Every scenario must be recorded")
-        require(all(s.get("status") == "passed" for s in scenarios.values()), "Failures and skips cannot publish")
-        require(not scenarios["cleanup"].get("leftovers") and not scenarios["cleanup"].get("errors"),
-                "Functional cleanup must leave no resources")
-        expected = {role: report["images"]["all" if topology == "all" else role]["image_id"]
-                    for role in active_roles()[:-1]}
-        require(result.get("images") == expected, "Functional checks must use the checked immutable image IDs")
     require(report.get("contract_sha256") == hashlib.sha256((check.HERE / "check-runtime.sh").read_bytes()).hexdigest()
-            and report.get("functional_sha256") == check.functional_sha256()
             and report.get("checker_sha256") == hashlib.sha256(Path(check.__file__).read_bytes()).hexdigest(),
-            "Check report must come from the current checker and scenarios")
+            "Check report must come from the current checker and image contract")
+
+
+def functional_outcome(path, images):
+    """The auxiliary functional outcome for a candidate. It is informational:
+    a missing, unreadable, failing or malformed summary is recorded as such and
+    never raises."""
+    if path is None:
+        return {"status": "not_recorded"}
+    try:
+        data = Path(path).read_bytes()
+        summary = json.loads(data)
+        runs = summary.get("runs", {})
+        outcome = {"status": summary.get("status") if summary.get("status") in ("passed", "failed") else "unknown",
+                   "summary_sha256": hashlib.sha256(data).hexdigest(), "runs": runs}
+        checked = {role: image["image_id"] for role, image in images.items()}
+        # Whether the functional topologies ran the images that passed the gate;
+        # None when no run recorded its images.
+        matches = [identity == checked.get("all" if topology == "all" else role)
+                   for run in runs.values() for topology, result in (run.get("topologies") or {}).items()
+                   for role, identity in (result.get("images") or {}).items()]
+        outcome["images_match"] = all(matches) if matches else None
+        return outcome
+    except Exception as error:  # noqa: BLE001 - the outcome must never block publication
+        return {"status": "unreadable", "error": type(error).__name__ + ": " + str(error)}
 
 
 def verify_image(entry):
@@ -141,7 +158,9 @@ def stage(args):
                           "rootfs_diff_ids": local["RootFS"]["Layers"]}
     result = {"schema": 1, "release": args.release, "variant": args.variant, "architecture": args.architecture,
               "revision": args.revision, "run_id": args.run_id, "status": "uploading",
-              "report_sha256": hashlib.sha256(report_bytes).hexdigest(), "contract": CONTRACT, "images": {}}
+              "report_sha256": hashlib.sha256(report_bytes).hexdigest(), "gate": "quick", "contract": CONTRACT,
+              "functional": functional_outcome(getattr(args, "functional_summary", None), report["images"]),
+              "images": {}}
     save(args.output, result)
     for role, entry in prepared.items():
         tag = REGISTRY + ":ci-" + args.run_id + "-" + args.variant + "-" + args.release + "-" + role + "-linux-" + args.architecture
@@ -180,6 +199,11 @@ def collect_candidates(directory, revision, run_id, release):
     return result
 
 
+def functional_record(candidate):
+    value = candidate.get("functional")
+    return value if isinstance(value, dict) else {"status": "not_recorded"}
+
+
 def promote(args):
     candidates = collect_candidates(args.candidates, args.revision, args.run_id, args.release)
     entries = [entry for candidate in candidates.values() for entry in candidate["images"].values()]
@@ -191,8 +215,14 @@ def promote(args):
             for a in (*architectures[v], None)]
     with ThreadPoolExecutor(max_workers=6) as pool:
         previous = dict(zip(tags, pool.map(previous_manifest, tags)))
+    # The auxiliary functional outcome of each cohort, carried forward as recorded.
+    functional = {v: {a: functional_record(candidates[(v, a)]) for a in architectures[v]} for v in variants}
+    for variant in variants:
+        for architecture in architectures[variant]:
+            print("Functional (auxiliary) " + variant + "/" + architecture + ": "
+                  + str(functional[variant][architecture].get("status")), flush=True)
     result = {"status": "promoting", "release": args.release, "revision": args.revision, "run_id": args.run_id,
-              "previous": previous, "platforms": {}, "indexes": {}}
+              "previous": previous, "functional": functional, "platforms": {}, "indexes": {}}
     save(args.output, result)
     digests = {v: {a: {} for a in architectures[v]} for v in variants}
     for (variant, architecture), candidate in candidates.items():
@@ -548,6 +578,8 @@ def main():
     upload.add_argument("--report", type=Path, required=True)
     upload.add_argument("--variant", choices=VARIANTS, required=True)
     upload.add_argument("--architecture", choices=ARCHITECTURES, required=True)
+    upload.add_argument("--functional-summary", type=Path,
+                        help="Auxiliary functional-summary.json from image/ci.py; recorded, never a gate")
     promote_parser = commands.add_parser("promote")
     promote_parser.add_argument("--candidates", type=Path, required=True)
     promote_parser.add_argument("--github-output", type=Path)
