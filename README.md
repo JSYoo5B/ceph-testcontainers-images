@@ -10,10 +10,16 @@ The upstream official image remains an unmodified compatibility reference.
 
 This repository builds, checks and publishes images for every Ceph release in [the release catalogue](image/releases.json): Squid 19.2.0 to 19.2.7, Tentacle 20.2.0 to 20.2.4 (20.2.4 is the default) and Umbrella 21.2.0. The catalogue pins every release-specific input: the official image index and its native children, the distribution base image digests, the download.ceph.com suite, the exact package versions and the APT metadata behind them. It also lists the few variant/architecture cohorts that have no usable input, with the reason. [Releases](docs/RELEASES.md) describes the inputs, the unavailable cohorts and the known release defects.
 
-Two needs can call for a different image:
+The official images on quay.io work for every feature, so role images are not
+required. They exist because the official image is over 2 GB, and a test that
+uses only part of Ceph pulls all of it into every container. Two needs can
+call for a different image:
 
 - Size: the official image ships components that tests never use, and every container pulls all of them.
 - Custom builds: tests may need to run against a patched or internally built Ceph instead of the official release.
+
+Extension images are different: a fault-injection feature that needs one
+(see [Extension images](#extension-images)) cannot run without it.
 
 With size in mind, the requirements are split by dependency: `essential`, `client`, `cephfs`, `rbd-aux` and `rgw`, so each container pulls only what it runs. An image that holds every component (`all`) is also allowed, and it can still be much lighter than the official image as long as it meets the requirements.
 
