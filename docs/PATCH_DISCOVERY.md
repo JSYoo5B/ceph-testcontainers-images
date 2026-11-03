@@ -27,11 +27,15 @@ including owned cleanup. This selected functional evidence is recorded in
 the digest inventory; it does not qualify every scenario or every patch.
 
 Umbrella 21.2.0 remains **unpublished**. Preparation handles its OSD alternatives
-and split mirroring package. A subsequent official AMD64 probe passed all six
-builds and smoke checks, but essential/all quick checks still failed because
-the required MGR `snap_schedule` module was absent. Further Umbrella adaptation
-and the remaining native qualification were deferred; available upstream
-images/packages are not a passing role-image result.
+and the MGR modules it split out of `ceph-mgr-modules-core`: of the four
+required modules, `volumes` and `rbd_support` stay in modules-core,
+`mirroring` is in `ceph-mgr-mirroring` and `snap_schedule` in
+`ceph-mgr-snap-schedule`, in the official RPM image and in the Bookworm and
+Noble repositories alike. An official AMD64 probe before `snap_schedule`'s
+package was selected passed all six builds and smoke checks, and essential/all
+quick checks failed only on that missing module. The six cohorts still need
+native qualification; available upstream images/packages are not a passing
+role-image result.
 
 ## Inputs and eligibility
 
@@ -71,8 +75,9 @@ Umbrella separates common OSD files from the classic implementation. Extraction
 preserves the installed `ceph-osd` alternatives link chain and its
 `ceph-osd-classic` target in the essential role, keeping the public entrypoint.
 Distribution inputs explicitly install the matching-version
-`ceph-mgr-mirroring` package; its split module is selected into essential
-alongside the core manager modules.
+`ceph-mgr-mirroring` and `ceph-mgr-snap-schedule` packages, and each installed
+split module package is selected into essential alongside the core manager
+modules, for the official RPM input too.
 
 An upstream source Git tag, registry image, APT package and native qualification
 are separate observations. Umbrella's registry and distribution artifacts were

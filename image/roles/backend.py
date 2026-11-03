@@ -83,6 +83,12 @@ def load(kind, analyze):
             return set(re.findall(r'^P:(.+)$',(root/'lib/apk/db/installed').read_text(),re.M))
     return inventory, closure, ('ca-certificates','coreutils','procps')
 
+
+# The packages of required MGR modules that Umbrella moved out of
+# ceph-mgr-modules-core: mirroring and snap_schedule. volumes and rbd_support
+# stay in modules-core.
+SPLIT_MGR_PACKAGES = ('ceph-mgr-mirroring', 'ceph-mgr-snap-schedule')
+
 def roots(kind, inventory=None):
     if kind == 'apk':
         return {
@@ -109,10 +115,12 @@ def roots(kind, inventory=None):
         if any(not re.fullmatch(r'[a-z0-9][a-z0-9+.-]*(?:=[A-Za-z0-9][A-Za-z0-9+.:~_-]*)?', p) for p in extra):
             raise RuntimeError('Invalid extra MGR package name/version pin')
         result['essential'] += tuple(p.partition('=')[0] for p in extra)
-    # Umbrella split the required mirroring module out of modules-core.
-    # Select its own installed package instead of weakening the module check;
-    # older sources keep their original closure and an absent module still fails.
-    if inventory is not None and 'ceph-mgr-mirroring' in inventory:
-        if 'ceph-mgr-mirroring' not in result['essential']:
-            result['essential'] += ('ceph-mgr-mirroring',)
+    # Umbrella split the required mirroring and snap_schedule modules out of
+    # modules-core. Select each one's own installed package instead of
+    # weakening the module check; older sources keep their original closure
+    # and an absent module still fails.
+    if inventory is not None:
+        for package in SPLIT_MGR_PACKAGES:
+            if package in inventory and package not in result['essential']:
+                result['essential'] += (package,)
     return result

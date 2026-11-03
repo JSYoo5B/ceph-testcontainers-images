@@ -866,7 +866,7 @@
         "base_name": "debian:bookworm-slim",
         "suite": "bookworm",
         "package": "21.2.0-1bookworm",
-        "mgr_packages": "ceph-mgr-mirroring=21.2.0-1bookworm",
+        "mgr_packages": "ceph-mgr-mirroring=21.2.0-1bookworm ceph-mgr-snap-schedule=21.2.0-1bookworm",
         "architectures": [
           "amd64",
           "arm64"
@@ -891,6 +891,13 @@
               "filename": "pool/main/c/ceph/ceph-mgr-mirroring_21.2.0-1bookworm_all.deb",
               "size": 33996,
               "sha256": "8d13770158a11ee2c56144de0188d5309629b30d6e7ac9cf9a5f7f7736208e00"
+            },
+            "ceph-mgr-snap-schedule": {
+              "version": "21.2.0-1bookworm",
+              "architecture": "all",
+              "filename": "pool/main/c/ceph/ceph-mgr-snap-schedule_21.2.0-1bookworm_all.deb",
+              "size": 22732,
+              "sha256": "7142b6733c84206e86351fc3a51df511cc532e62003102fa2aa8eb754c0715c6"
             }
           }
         }
@@ -900,7 +907,7 @@
         "base_name": "ubuntu:24.04",
         "suite": "noble",
         "package": "21.2.0-1noble",
-        "mgr_packages": "ceph-mgr-mirroring=21.2.0-1noble",
+        "mgr_packages": "ceph-mgr-mirroring=21.2.0-1noble ceph-mgr-snap-schedule=21.2.0-1noble",
         "architectures": [
           "amd64",
           "arm64"
@@ -925,6 +932,13 @@
               "filename": "pool/main/c/ceph/ceph-mgr-mirroring_21.2.0-1noble_all.deb",
               "size": 34630,
               "sha256": "b9f662c89e4fac28a035cb61d26bcd2753ca53024262f88c81292b9daabc9d35"
+            },
+            "ceph-mgr-snap-schedule": {
+              "version": "21.2.0-1noble",
+              "architecture": "all",
+              "filename": "pool/main/c/ceph/ceph-mgr-snap-schedule_21.2.0-1noble_all.deb",
+              "size": 23128,
+              "sha256": "cc4f3615aeeb9a929113a58b4e4a17749a11c618339775a8ad0e993404692034"
             }
           }
         }
