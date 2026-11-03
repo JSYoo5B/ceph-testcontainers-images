@@ -70,11 +70,12 @@ package inventory and documented Alpine modifications remain in the outputs.
 Identical membership-group tar layers are reused, including in all. Source
 runtime CEPH_ARGS and architecture-specific tcmalloc settings are retained.
 
-The roles workflow builds all supported release/variant/platform cells.
-Manual full runs validate split roles and all separately before optional
-publication. Publisher stage/promote/health use the default role contract;
-tags are `<variant>-<release>-<role>`.
-The six-platform completeness and exact tested-image gates remain in force.
+The images workflow builds every available catalogued release/variant/platform
+cohort that it is asked for ([Releases](RELEASES.md)). Manual full runs
+validate split roles and all separately before optional publication. Publisher
+stage/promote/health use the default role contract; tags are
+`<variant>-<release>-<role>`. Promotion requires every available cohort of a
+release and publishes only exactly tested images.
 
 ## Requirements and validation
 

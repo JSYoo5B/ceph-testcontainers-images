@@ -8,14 +8,7 @@ Ceph testcontainers modules use the pruned role runtime by default. Published
 role indexes are pinned in [.github/ceph-role-images.json](.github/ceph-role-images.json).
 The upstream official image remains an unmodified compatibility reference.
 
-This repository checks and publishes images for each Ceph release listed in [image/releases.py](image/releases.py):
-
-| Release | Official image | Debian | Ubuntu |
-| --- | --- | --- | --- |
-| 20.2.4 (Tentacle, default) | `quay.io/ceph/ceph:v20.2.4` | bookworm | 24.04 (noble) |
-| 19.2.5 (Squid) | `quay.io/ceph/ceph:v19.2.5` | bookworm | 22.04 (jammy) |
-
-That file pins every release-specific input: the official image digest, the distribution base image digests, the download.ceph.com suite and the exact package version. download.ceph.com has no Noble build of Squid, so its Ubuntu images use Jammy. Squid's MGR `volumes` module imports `distutils.util`, which Bookworm and Jammy ship as `python3-distutils`; the Squid essential and `all` images retain it. Squid 19.2.6 is not listed: its `radosgw-admin` signs `realm pull` requests that the same release's RGW rejects, so RGW multisite cannot start.
+This repository builds, checks and publishes images for every Ceph release in [the release catalogue](image/releases.json): Squid 19.2.0 to 19.2.7, Tentacle 20.2.0 to 20.2.4 (20.2.4 is the default) and Umbrella 21.2.0. The catalogue pins every release-specific input: the official image index and its native children, the distribution base image digests, the download.ceph.com suite, the exact package versions and the APT metadata behind them. It also lists the few variant/architecture cohorts that have no usable input, with the reason. [Releases](docs/RELEASES.md) describes the inputs, the unavailable cohorts and the known release defects.
 
 Two needs can call for a different image:
 
@@ -34,6 +27,7 @@ Cluster setup always belongs to the testcontainers module, which supplies config
 docs/IMAGE_REQUIREMENTS.md   Runtime requirements by role
 docs/TEST_SCENARIOS.md       Checker usage and test pass criteria
 docs/ROLE_IMAGES.md          Role images extracted from the official image
+docs/RELEASES.md             Catalogued releases, their inputs and publication
 docs/EXTENSIONS.md           Opt-in extension images and their contracts
 image/check.py               Checker for any local image
 image/check-runtime.sh       Quick check probe, run inside each image
@@ -41,7 +35,9 @@ image/extension_check.py     Checker for opt-in extension images
 image/capture_experiment*.py Unwired capture file-size-limit experiment supervisor
 image/extensions/            Extension images and their probes
 image/publish.py             Publish CI-tested images and promote release tags
-image/releases.py            Checked releases and their pinned inputs
+image/releases.json          Catalogued releases and their pinned inputs
+image/releases.py            Catalogue loader and release commands
+image/ci.py                  Build and check one native release cohort
 image/functional/            Functional scenarios used by the full check
 image/roles/                 Role image extraction from the official image
 image/debian/, image/ubuntu/  Role images from distribution packages
@@ -102,8 +98,8 @@ The output is `ceph-testcontainers:official-<release>-<role>` for the five roles
 `v3.24/main` and `v3.24/community` repositories. The base digest and Ceph APK
 version **19.2.4-r1** are pinned in its Dockerfile. No edge or testing repository
 is used. This is a separate **19.2.4** experiment: it is not part of
-`image/releases.py`, the publication workflow or the published **19.2.5** tags.
-`CEPH_RELEASE` continues to select the existing published image variants.
+the release catalogue or the publication workflow. `CEPH_RELEASE` selects a
+catalogued release for the other variants.
 
 ```sh
 make alpine-images PLATFORM=linux/amd64
@@ -150,15 +146,13 @@ The netem helper is published as `ghcr.io/jsyoo5b/ceph-testcontainers-images:ext
 
 ## Published images
 
-Historical patch-comparison images, including Umbrella, use the separate
-[`discovery-*` publication channel](docs/PATCH_DISCOVERY.md). Its quick native
-role-contract qualification is distinct from production full interoperability.
-
-Production images use
+Images of every catalogued release use
 `ghcr.io/jsyoo5b/ceph-testcontainers-images:<variant>-<release>-<role>`
-for `linux/amd64` and `linux/arm64`. Roles are `essential`, `client`,
-`cephfs`, `rbd-aux`, `rgw` and the aggregate `all`. Select only the roles
-required by the feature, as documented in [Dependency roles](docs/ROLES.md).
+for `linux/amd64` and `linux/arm64`, except the cohorts that
+[the catalogue](docs/RELEASES.md#unavailable-cohorts) marks unavailable.
+Roles are `essential`, `client`, `cephfs`, `rbd-aux`, `rgw` and the aggregate
+`all`. Select only the roles required by the feature, as documented in
+[Dependency roles](docs/ROLES.md).
 
 The [checker workflow](.github/workflows/test.yml) runs the host unit and
 extension checks. It does not build a Ceph release matrix on every PR or push.
@@ -170,16 +164,18 @@ Reviewers can request additional image checks with a PR comment:
 /ci run image-full on all
 ```
 
-Quick selects official/Tentacle/amd64 by default. Full selects all three
-variants and both native architectures for the requested releases. Only an
+Quick selects official/amd64 of the default release. Full selects every
+available variant/architecture cohort of the requested releases. Only an
 owner, member or collaborator may run a command on an open same-repository
 PR. The head SHA is frozen before checkout; native jobs have a read-only token
 and cannot publish. Results appear as a commit status with the run link.
 
-The manual [images workflow](.github/workflows/images.yml) selects one release
-and runs the complete split/aggregate and RGW-without-client proofs before
-optional publication. Promotion requires all six tested native cohorts;
-failed or skipped checks block it. Publication and registry health remain
+The manual [images workflow](.github/workflows/images.yml) takes `releases`
+(`all` or comma-separated catalogued versions, default `20.2.4`) and runs the
+complete split/aggregate and RGW-without-client proofs for every available
+cohort before optional publication. Each release is promoted on its own and
+requires all of its available tested native cohorts; failed or skipped checks
+block that release, not the others. Publication and registry health remain
 separate from downstream consumer validation.
 
 The current qualified registry indexes are recorded in
@@ -187,20 +183,20 @@ The current qualified registry indexes are recorded in
 extension checks can use these immutable references without rebuilding or
 republishing an image for a name change. The weekly
 [published image health workflow](.github/workflows/published-health.yml)
-checks both native children of every pinned role and the extension tags.
+checks the native children of every pinned role and the extension tags.
 
 | Variant | Source |
 | --- | --- |
 | `official` | Runtime extracted from the pinned official image |
 | `debian` | Debian bookworm-slim with pinned Ceph packages |
-| `ubuntu` | Ubuntu noble (Tentacle) or jammy (Squid) with pinned Ceph packages |
+| `ubuntu` | Ubuntu noble or jammy, per release, with pinned Ceph packages |
 
-The Alpine 19.2.4 experiment remains separate from the supported production
-release/variant publication matrix. See [Alpine](#experimental-alpine-stable-squid).
+The Alpine 19.2.4 experiment remains separate from the release catalogue and
+its publication matrix. See [Alpine](#experimental-alpine-stable-squid).
 
 ## Development
 
-`make check` runs the host unit tests of the checkers, the publisher, the functional harness and the role extraction. The release jobs depend only on `make base-check`; the extension jobs run `make extension-test`, so that neither blocks the other. [The manual production workflow](.github/workflows/images.yml) checks official-derived, Debian and Ubuntu dependency roles on native AMD64 and ARM64. Full publication checks cover split roles and `all` independently.
+`make check` runs the host unit tests of the checkers, the publisher, the functional harness and the role extraction. The release jobs depend only on `make base-check`; the extension jobs run `make extension-test`, so that neither blocks the other. [The manual images workflow](.github/workflows/images.yml) checks official-derived, Debian and Ubuntu dependency roles on native AMD64 and ARM64. Full publication checks cover split roles and `all` independently.
 
 ## License
 

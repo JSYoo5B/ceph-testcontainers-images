@@ -4,7 +4,7 @@
 
 The role images are the default runtime for Ceph testcontainers. The upstream
 official image remains a complete aggregate compatibility reference for every
-release in [image/releases.py](../image/releases.py). All baseline features
+release in [the release catalogue](RELEASES.md). All baseline features
 must work with that image unmodified.
 
 Opt-in extension features, which a caller selects explicitly, may use an additional extension image with tools that the official image does not ship. They never change these requirements; see [Extension Images](EXTENSIONS.md).
