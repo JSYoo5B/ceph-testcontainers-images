@@ -43,6 +43,10 @@ class ReleaseTests(unittest.TestCase):
         self.assertNotEqual(evidence["expected"]["size"], evidence["observed"]["size"])
         with self.assertRaises(KeyError):
             releases.official("21.2.0", "s390x")
+        # Only Umbrella's official amd64 child needs a newer x86-64 level.
+        self.assertEqual({(name, v, a) for name in releases.RELEASES for v, a in releases.cohorts(name)
+                          if releases.cpu_baseline(name, v, a)}, {("21.2.0", "official", "amd64")})
+        self.assertEqual(releases.cpu_baseline("21.2.0", "official", "amd64"), "x86-64-v3")
 
     def test_build_args_select_the_release_repository(self):
         args = releases.build_args("19.2.5", "ubuntu")
@@ -113,6 +117,9 @@ class ReleaseTests(unittest.TestCase):
             lambda e: e["ubuntu"].update(architectures=["amd64", "amd64"]),
             lambda e: e["ubuntu"].update(mgr_packages="ceph-mgr-mirroring"),
             lambda e: e["ubuntu"].update(mgr_packages="ceph-mgr-mirroring=21.2.0-1noble"),
+            lambda e: e["official"].update(cpu_baseline={"arm64": "x86-64-v3"}),
+            lambda e: e["official"].update(cpu_baseline={"amd64": "haswell"}),
+            lambda e: e["debian"].update(cpu_baseline=["x86-64-v3"]),
         )
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "releases.json"

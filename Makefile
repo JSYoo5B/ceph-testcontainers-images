@@ -1,6 +1,10 @@
 .PHONY: check base-check checker-test functional-test roles-test extension-test extension-images extension-selectors extension-check capture-image capture-check capture-functional-check clock-probe-image clock-probe-check blockio-image blockio-check image-check official-check role-images role-images-full debian-images ubuntu-images alpine-images
 CEPH_RELEASE ?= 20.2.4
 OFFICIAL_IMAGE ?= $(shell python3 image/releases.py official $(CEPH_RELEASE))
+# role-images extracts the catalogue's pinned native child of the official index.
+OFFICIAL_SOURCE ?= $(shell python3 image/releases.py official $(CEPH_RELEASE) $(notdir $(PLATFORM)))
+# An omitted Ceph COPYING is restored only for builds verified in this map.
+CEPH_LICENSE_ARGS = $(shell python3 -c 'import json, sys; sys.argv[1] in json.load(open("image/roles/ceph-licenses.json"))["releases"] and print("--restore-ceph-license", sys.argv[1])' $(CEPH_RELEASE))
 IMAGE_REPOSITORY ?= ceph-testcontainers
 PLATFORM ?= linux/amd64
 VARIANT ?= official
@@ -29,8 +33,9 @@ official-check:
 # dependency assembler below builds the published role images.
 role-images:
 	@case "$(VARIANT)" in official|debian|ubuntu|alpine) ;; *) exit 2 ;; esac
-	@set --; if [ "$(VARIANT)" = official ]; then \
-		source="$(OFFICIAL_IMAGE)"; backend=rpm; docker pull --platform "$(PLATFORM)" "$$source" || exit 1; \
+	@set --; license_args=""; if [ "$(VARIANT)" = official ]; then \
+		source="$(OFFICIAL_SOURCE)"; backend=rpm; docker pull --platform "$(PLATFORM)" "$$source" || exit 1; \
+		license_args="$(CEPH_LICENSE_ARGS)"; \
 	else \
 		backend=deb; \
 		if [ "$(VARIANT)" = alpine ]; then backend=apk; else \
@@ -40,7 +45,7 @@ role-images:
 		docker buildx build --load --platform "$(PLATFORM)" --provenance=false --target all "$$@" $$cache_args \
 			-t "$(ROLE_SOURCE)" image/$(VARIANT) || exit 1; source="$(ROLE_SOURCE)"; \
 	fi; \
-	python3 image/roles/build.py --package-backend $$backend --source-runtime-env \
+	python3 image/roles/build.py --package-backend $$backend --source-runtime-env $$license_args \
 		--source-image "$$source" --skip-pull --platform "$(PLATFORM)" --repository "$(IMAGE_REPOSITORY)" \
 		--tag "$(ROLE_TAG)" --check $(ROLE_CHECK) --output-dir "$(ROLE_OUTPUT)"
 

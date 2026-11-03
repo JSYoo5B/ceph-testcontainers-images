@@ -5,7 +5,8 @@ Every image input that depends on the Ceph release lives in releases.json: the
 official source index and its native children, and for each distribution its
 pinned base image, the download.ceph.com suite, the exact package versions and
 the APT metadata that establishes them. A variant/architecture cohort that has
-no usable input is listed as unavailable with its reason (docs/RELEASES.md).
+no usable input is listed as unavailable with its reason, and a cohort whose
+source executables need a newer x86-64 level names it (docs/RELEASES.md).
 """
 import argparse
 import json
@@ -58,6 +59,10 @@ def load(path=None):
                     package, separator, version = extra.partition("=")
                     if package.startswith("ceph-") and (not separator or version != value["package"]):
                         raise ValueError("Extra Ceph packages must pin the matching package version")
+            baseline = value.get("cpu_baseline", {})
+            if (not isinstance(baseline, dict) or not set(baseline) <= set(arches) & {"amd64"}
+                    or any(not re.fullmatch(r"x86-64-v[234]", str(level)) for level in baseline.values())):
+                raise ValueError("A CPU baseline names the x86-64 level of an available amd64 cohort")
             if set(value.get("unavailable", {})) != set(ARCHITECTURES) - set(arches):
                 raise ValueError("Every unavailable architecture needs an explicit reason")
     return data["releases"]
@@ -85,6 +90,11 @@ def official(name, architecture=None):
     if architecture not in value["architectures"]:
         raise KeyError("Release " + name + " has no official " + str(architecture) + " image")
     return value["source"].split("@", 1)[0] + "@" + value["children"][architecture]
+
+
+def cpu_baseline(name, variant, architecture):
+    """The x86-64 level a cohort's source executables require, or None."""
+    return release(name)[variant].get("cpu_baseline", {}).get(architecture)
 
 
 def cohorts(name):

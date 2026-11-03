@@ -63,3 +63,41 @@ class ImageCommandTests(unittest.TestCase):
         self.assertIn('rgw-multisite',full[2])
         self.assertFalse(any('client=' in item for item in full[2]))
         self.assertFalse(any('publish' in item for cmd in full for item in cmd))
+
+
+class CohortPreflightTests(unittest.TestCase):
+    def run_ci(self, release, variant, architecture, levels):
+        import json, tempfile
+        calls = []
+        def probe():
+            if isinstance(levels, Exception):
+                raise levels
+            return levels
+        with tempfile.TemporaryDirectory() as directory:
+            code = ci.main(['--release', release, '--variant', variant, '--architecture', architecture,
+                            '--scope', 'quick', '--output', directory],
+                           probe=probe, execute=lambda command, check: calls.append(command))
+            record = json.loads((Path(directory) / 'preflight.json').read_text())
+        return code, record, calls
+
+    def test_umbrella_official_amd64_needs_x86_64_v3_before_any_build(self):
+        v2 = '  x86-64-v2 (supported, searched)\n  x86-64-v3\n'
+        v3 = '  x86-64-v3 (supported, searched)\n  x86-64-v2 (supported, searched)\n'
+        for levels in (v2, OSError('no loader')):
+            with self.subTest(levels=levels):
+                code, record, calls = self.run_ci('21.2.0', 'official', 'amd64', levels)
+                self.assertEqual((code, record['status'], calls), (ci.INELIGIBLE, 'environment_ineligible', []))
+        code, record, calls = self.run_ci('21.2.0', 'official', 'amd64', v3)
+        self.assertEqual((code, record['status'], len(calls)), (0, 'passed', 1))
+        # Other cohorts never consult the CPU probe.
+        for release, variant, architecture in (('21.2.0', 'official', 'arm64'), ('21.2.0', 'debian', 'amd64'),
+                                               ('20.2.4', 'official', 'amd64')):
+            code, record, calls = self.run_ci(release, variant, architecture, OSError('not consulted'))
+            self.assertEqual((code, record['status'], len(calls)), (0, 'passed', 1))
+
+    def test_unavailable_cohorts_are_refused_before_any_build(self):
+        for release, variant in (('19.2.0', 'debian'), ('19.2.6', 'ubuntu')):
+            with self.subTest(release=release):
+                code, record, calls = self.run_ci(release, variant, 'arm64', '')
+                self.assertEqual((code, record['status'], calls), (2, 'unavailable', []))
+                self.assertIn('unavailable', record['reason'])
