@@ -12,15 +12,18 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import publish
 
 RELEASE = publish.releases.DEFAULT
+# The catalogue has no Debian arm64 input for this release.
+UNAVAILABLE_RELEASE = "19.2.0"
+ALL_COHORTS = {(v, a) for v in publish.VARIANTS for a in publish.ARCHITECTURES}
 
 
 def digest(number):
     return "sha256:" + ("%064x" % number)
 
 
-def report():
+def report(release=RELEASE):
     images = {role: {"image_id": digest(n + 1), "status": "passed", "platform": "linux/arm64",
-                     "cleanup": {"status": "passed"}, "versions": {"ceph": {"release": RELEASE}}}
+                     "cleanup": {"status": "passed"}, "versions": {"ceph": {"release": release}}}
               for n, role in enumerate(publish.check.ROLES)}
     functional = {}
     for topology in ("mixed", "all"):
@@ -35,16 +38,15 @@ def report():
             "checker_sha256": hashlib.sha256(Path(publish.check.__file__).read_bytes()).hexdigest()}
 
 
-def candidates(directory, release=RELEASE):
-    for variant in publish.VARIANTS:
-        for architecture in publish.ARCHITECTURES:
-            value = {"status": "passed", "release": release, "variant": variant, "architecture": architecture,
-                     "revision": "a" * 40, "run_id": "123-1", "contract": "roles", "images": {
-                         role: {"role": role, "architecture": architecture, "image_id": digest(n + 1),
-                                "config_digest": digest(n + 1), "digest": digest(n + 11),
-                                "rootfs_diff_ids": [digest(100)]}
-                         for n, role in enumerate(publish.check.ROLES)}}
-            publish.save(directory / (variant + "-" + architecture) / "candidate.json", value)
+def candidates(directory, release=RELEASE, cohorts=ALL_COHORTS):
+    for variant, architecture in sorted(cohorts):
+        value = {"status": "passed", "release": release, "variant": variant, "architecture": architecture,
+                 "revision": "a" * 40, "run_id": "123-1", "contract": "roles", "images": {
+                     role: {"role": role, "architecture": architecture, "image_id": digest(n + 1),
+                            "config_digest": digest(n + 1), "digest": digest(n + 11),
+                            "rootfs_diff_ids": [digest(100)]}
+                     for n, role in enumerate(publish.check.ROLES)}}
+        publish.save(directory / (variant + "-" + architecture) / "candidate.json", value)
 
 
 class PublicationTests(unittest.TestCase):
@@ -79,8 +81,15 @@ class PublicationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary); value = report(); value["status"] = "failed"
             publish.save(root / "check.json", value)
-            args = SimpleNamespace(report=root / "check.json", architecture="arm64", release=RELEASE)
+            args = SimpleNamespace(report=root / "check.json", variant="official", architecture="arm64", release=RELEASE)
             with mock.patch.object(publish, "run") as run, self.assertRaises(publish.PublishError):
+                publish.stage(args)
+            run.assert_not_called()
+            # A cohort that the catalogue marks unavailable is refused even with a passing report.
+            publish.save(root / "check.json", report(UNAVAILABLE_RELEASE))
+            args = SimpleNamespace(report=root / "check.json", variant="debian", architecture="arm64",
+                                   release=UNAVAILABLE_RELEASE)
+            with mock.patch.object(publish, "run") as run, self.assertRaisesRegex(publish.PublishError, "unavailable"):
                 publish.stage(args)
             run.assert_not_called()
 
@@ -203,3 +212,80 @@ class PublicationTests(unittest.TestCase):
             publish.health(args)
         self.assertIn("linux/arm64 image", "".join(str(call) for call in stderr.write.call_args_list))
 
+    def test_only_available_catalogued_cohorts_are_required_for_promotion(self):
+        expected = publish.releases.cohorts(UNAVAILABLE_RELEASE)
+        self.assertEqual(expected, ALL_COHORTS - {("debian", "arm64")})
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary); candidates(root, UNAVAILABLE_RELEASE)
+            # A candidate for an unavailable cohort is foreign, not an extra child.
+            with self.assertRaises(publish.PublishError):
+                publish.collect_candidates(root, "a" * 40, "123-1", UNAVAILABLE_RELEASE)
+            (root / "debian-arm64/candidate.json").unlink()
+            self.assertEqual(set(publish.collect_candidates(root, "a" * 40, "123-1", UNAVAILABLE_RELEASE)), expected)
+            # A failed available cohort cannot be omitted to make the release publish.
+            (root / "official-arm64/candidate.json").unlink()
+            with self.assertRaises(publish.PublishError):
+                publish.collect_candidates(root, "a" * 40, "123-1", UNAVAILABLE_RELEASE)
+
+    def test_promotion_without_an_unavailable_child_and_its_health(self):
+        cohorts = publish.releases.cohorts(UNAVAILABLE_RELEASE)
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary); candidates(root / "candidates", UNAVAILABLE_RELEASE, cohorts)
+            observed = {}
+            def run(command):
+                tag = command[command.index("--tag") + 1]
+                observed[tag] = command[command.index("--tag") + 2:]
+                return ""
+            def manifest(tag):
+                refs = observed.get(tag)
+                return {"digest": refs[0].split("@", 1)[1] if refs and len(refs) == 1 else digest(999)}
+            def raw(tag):
+                variant = next(v for v in publish.VARIANTS if ":" + v + "-" in tag)
+                architectures = [a for a in publish.ARCHITECTURES if (variant, a) in cohorts]
+                return {"manifests": [{"platform": {"os": "linux", "architecture": a}, "digest": ref.split("@", 1)[1]}
+                                      for a, ref in zip(architectures, observed[tag])]}
+            args = SimpleNamespace(candidates=root / "candidates", revision="a" * 40, run_id="123-1",
+                                   release=UNAVAILABLE_RELEASE, output=root / "promotion.json", github_output=None)
+            with mock.patch.object(publish, "run", side_effect=run), mock.patch.object(publish, "manifest", side_effect=manifest), \
+                    mock.patch.object(publish, "raw_manifest", side_effect=raw), mock.patch.object(publish, "verify_image") as verify:
+                publish.promote(args)
+            self.assertEqual(verify.call_count, 30)
+            debian = publish.release_tag(UNAVAILABLE_RELEASE, "debian", "essential")
+            self.assertEqual(len(observed[debian]), 1)
+            self.assertNotIn(publish.release_tag(UNAVAILABLE_RELEASE, "debian", "essential", "arm64"), observed)
+            saved = json.loads(args.output.read_text())
+            self.assertEqual((len(saved["platforms"]), len(saved["indexes"])), (30, 18))
+            with mock.patch.object(publish, "check_tags") as checked:
+                publish.health(SimpleNamespace(promotion=args.output))
+            tags, architectures, identities = checked.call_args.args
+            self.assertEqual(len(tags), 18)
+            self.assertEqual(architectures[debian], ["amd64"])
+            self.assertEqual(architectures[publish.release_tag(UNAVAILABLE_RELEASE, "ubuntu", "all")], ["amd64", "arm64"])
+            self.assertEqual(identities[debian], {("linux", "amd64"): saved["images"]["debian"]["amd64"]["essential"]})
+            # A receipt that claims the unavailable child is refused before any registry read.
+            saved["images"]["debian"]["arm64"] = saved["images"]["debian"]["amd64"]
+            publish.save(args.output, saved)
+            with mock.patch.object(publish, "check_tags") as checked, self.assertRaises(publish.PublishError):
+                publish.health(SimpleNamespace(promotion=args.output))
+            checked.assert_not_called()
+
+    def test_single_platform_health_still_refuses_extra_missing_or_foreign_children(self):
+        tag = publish.release_tag(UNAVAILABLE_RELEASE, "debian", "all")
+        child = publish.REGISTRY + "@" + digest(1)
+        index = {"manifests": [{"platform": {"os": "linux", "architecture": "amd64"}, "digest": digest(1)}]}
+        def raw(reference):
+            if reference == tag:
+                return index
+            if reference == child:
+                return {"config": {}}
+            raise publish.PublishError("manifest unknown")
+        with mock.patch.object(publish, "raw_manifest", side_effect=raw), mock.patch("sys.stdout"), mock.patch("sys.stderr"):
+            publish.check_tags([tag], {tag: ["amd64"]})
+            with self.assertRaises(publish.PublishError):
+                publish.check_tags([tag], {tag: ["amd64"]}, {tag: {("linux", "amd64"): digest(99)}})
+            index["manifests"].append({"platform": {"os": "linux", "architecture": "arm64"}, "digest": digest(2)})
+            with self.assertRaises(publish.PublishError):
+                publish.check_tags([tag], {tag: ["amd64"]})
+            index["manifests"] = [{"platform": {"os": "linux", "architecture": "amd64"}, "digest": digest(2)}]
+            with self.assertRaises(publish.PublishError):
+                publish.check_tags([tag], {tag: ["amd64"]})

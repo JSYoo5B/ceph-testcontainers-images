@@ -119,6 +119,8 @@ def verify_image(entry):
 
 
 def stage(args):
+    require((args.variant, args.architecture) in releases.cohorts(args.release),
+            "The catalogue marks this cohort unavailable")
     report_bytes = args.report.read_bytes()
     report = json.loads(report_bytes)
     validate_report(report, args.architecture, args.release)
@@ -156,8 +158,10 @@ def stage(args):
 
 
 def collect_candidates(directory, revision, run_id, release):
+    """One passing candidate for every available cohort of the release; a
+    cohort that the catalogue marks unavailable has none and is not required."""
     result = {}
-    expected = {(v, a) for v in VARIANTS for a in ARCHITECTURES}
+    expected = releases.cohorts(release)
     for path in sorted(directory.rglob("candidate.json")):
         candidate = json.loads(path.read_text())
         key = (candidate.get("variant"), candidate.get("architecture"))
@@ -172,7 +176,7 @@ def collect_candidates(directory, revision, run_id, release):
             require(all(isinstance(entry.get(field), str) and DIGEST.fullmatch(entry[field])
                         for field in ("digest", "config_digest", "image_id")), "Invalid candidate identity")
         result[key] = candidate
-    require(set(result) == expected, "All six candidate platforms must pass")
+    require(set(result) == expected, "Every available catalogued cohort must pass, and no other")
     return result
 
 
@@ -466,17 +470,39 @@ def promote_extension(args):
             output.write("images=" + json.dumps(digests, separators=(",", ":")) + "\n")
 
 
+def published_architectures(release):
+    """The platforms each role index of a release lists: its available cohorts."""
+    expected = releases.cohorts(release)
+    return {variant: [a for a in ARCHITECTURES if (variant, a) in expected]
+            for variant in VARIANTS if any(v == variant for v, _ in expected)}
+
+
 def health(args):
-    """Check both native platforms of the selected published role indexes."""
+    """Check the native platforms of the selected published role indexes."""
     promotion = getattr(args, 'promotion', None)
     if promotion:
         receipt = json.loads(promotion.read_text())
         require(receipt.get('status') == 'passed', 'Promotion must have completed')
-        tags = list(receipt['indexes'])
+        release = receipt.get('release')
+        require(release in releases.RELEASES, 'Promotion names an uncatalogued release')
+        platforms = published_architectures(release)
+        tags = {release_tag(release, v, r): platforms[v] for v in platforms for r in active_roles()}
+        require(set(receipt.get('indexes', {})) == set(tags), 'Promotion indexes differ from the catalogued cohorts')
+        images = receipt.get('images', {})
+        require(isinstance(images, dict) and set(images) == set(platforms)
+                and all(isinstance(images[v], dict) and set(images[v]) == set(platforms[v]) for v in platforms),
+                'Promotion images differ from the catalogued cohorts')
+        require(all(isinstance(roles, dict) and set(roles) == set(active_roles())
+                    and all(isinstance(d, str) and DIGEST.fullmatch(d) for d in roles.values())
+                    for v in platforms for roles in images[v].values()), 'Promotion image digests are incomplete')
+        identities = {release_tag(release, v, r): {('linux', a): images[v][a][r] for a in platforms[v]}
+                      for v in platforms for r in active_roles()}
+        check_tags(list(tags), tags, identities)
     else:
-        tags = [releases.published_role(release, variant, role)
-                for release in args.releases for variant in VARIANTS for role in active_roles()]
-    check_tags(tags)
+        tags = {releases.published_role(release, v, r): architectures
+                for release in args.releases for v, architectures in published_architectures(release).items()
+                for r in active_roles()}
+        check_tags(list(tags), tags)
 
 
 def extension_health(args):
