@@ -12,13 +12,20 @@ class ProductionWorkflowTests(unittest.TestCase):
         for job in ('official-image:', 'extracted-images:', 'distribution-images:', 'legacy_images:'):
             self.assertNotIn(job,workflow)
 
-    def test_images_are_explicit_and_publication_keeps_full_checks(self):
+    def test_images_are_explicit_and_the_requirement_check_gates_publication(self):
         workflow=(ROOT/'.github/workflows/images.yml').read_text()
         self.assertIn('  workflow_dispatch:',workflow)
         self.assertNotIn('  pull_request:',workflow)
         self.assertNotIn('  push:',workflow)
+        # The functional scenarios still run in the publication workflow.
         self.assertIn('--scope full',workflow)
-        self.assertIn('image/publish.py stage',workflow)
+        stage=workflow[workflow.index('image/publish.py stage'):workflow.index('actions/upload-artifact')]
+        # Staging is gated by the quick report; the functional summary is only recorded.
+        self.assertIn('--report "$RUNNER_TEMP/images/quick/check-report.json"',stage)
+        self.assertIn('--functional-summary "$RUNNER_TEMP/images/functional-summary.json"',stage)
+        self.assertNotIn('full/check-report.json',stage)
+        # Every report is uploaded.
+        self.assertIn('${{ runner.temp }}/images\n',workflow)
         self.assertIn('needs: [unit, build]',workflow)
         self.assertIn("github.event_name == 'workflow_dispatch' && inputs.publish",workflow)
 
