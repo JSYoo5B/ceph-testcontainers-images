@@ -13,7 +13,7 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 class RegistryCacheTests(unittest.TestCase):
-    def run_make(self, target, reference="", write="false", platform="linux/amd64", fail_role=""):
+    def run_make(self, target, reference="", write="false", platform="linux/amd64", fail_role="", release="20.2.4"):
         with tempfile.TemporaryDirectory() as directory:
             directory = Path(directory)
             python = directory / "python3"
@@ -34,7 +34,7 @@ if '--target' in sys.argv and sys.argv[sys.argv.index('--target') + 1] == os.env
                        BUILD_COMMANDS=str(log), FAIL_ROLE=fail_role)
             result = subprocess.run([
                 "make", "--no-print-directory", "-s", target,
-                "CEPH_RELEASE=20.2.4", "PLATFORM=" + platform, "IMAGE_REPOSITORY=cache-test",
+                "CEPH_RELEASE=" + release, "PLATFORM=" + platform, "IMAGE_REPOSITORY=cache-test",
                 "BUILD_CACHE_REF=" + reference, "BUILD_CACHE_WRITE=" + write,
             ], cwd=ROOT, env=env, text=True, capture_output=True)
             commands = [json.loads(line) for line in log.read_text().splitlines()] if log.exists() else []
@@ -78,6 +78,17 @@ if '--target' in sys.argv and sys.argv[sys.argv.index('--target') + 1] == os.env
                                              "cache-test:%s-20.2.4-%s" % (distribution, role))
                             self.assertIn("--load", command)
                             self.assertNotIn("--push", command)
+
+    def test_catalogued_build_arguments_reach_docker_as_whole_words(self):
+        for distribution in ("debian", "ubuntu"):
+            with self.subTest(distribution=distribution):
+                result, commands = self.run_make(distribution + "-images", release="21.2.0")
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(len(commands), 1)
+                version = "21.2.0-1" + {"debian": "bookworm", "ubuntu": "noble"}[distribution]
+                self.assertIn("CEPH_MGR_PACKAGES=ceph-mgr-mirroring=%s ceph-mgr-snap-schedule=%s"
+                              % (version, version), commands[0])
+                self.assertIn("CEPH_PACKAGE_VERSION=" + version, commands[0])
 
     def test_extension_cache_uses_its_own_reference(self):
         for write in ("false", "true"):

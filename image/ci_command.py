@@ -40,11 +40,13 @@ def select(event, pull):
     selected = list(releases.RELEASES) if requested == 'all' else [requested or releases.DEFAULT]
     if any(value not in releases.RELEASES for value in selected):
         raise ValueError('Unsupported Ceph release')
-    variants = ('official', 'debian', 'ubuntu') if scope == 'full' else ('official',)
-    architectures = ('amd64', 'arm64') if scope == 'full' else ('amd64',)
+    variants = releases.VARIANTS if scope == 'full' else ('official',)
+    architectures = releases.ARCHITECTURES if scope == 'full' else ('amd64',)
+    # Cohorts that the catalogue marks unavailable have no inputs to check.
     cells = [{'release': release, 'variant': variant, 'architecture': arch, 'scope': scope,
-              'runner': 'ubuntu-24.04-arm' if arch == 'arm64' else 'ubuntu-24.04'}
-             for release in selected for variant in variants for arch in architectures]
+              'runner': releases.RUNNERS[arch]}
+             for release in selected for variant in variants for arch in architectures
+             if (variant, arch) in releases.cohorts(release)]
     context = 'Image checks / ' + str(comment['id'])
     key = hashlib.sha256(json.dumps([sha, cells], sort_keys=True).encode()).hexdigest()[:24]
     return {'sha': sha, 'matrix': {'include': cells}, 'context': context, 'key': key}

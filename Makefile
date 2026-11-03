@@ -29,14 +29,15 @@ official-check:
 # dependency assembler below builds the published role images.
 role-images:
 	@case "$(VARIANT)" in official|debian|ubuntu|alpine) ;; *) exit 2 ;; esac
-	@if [ "$(VARIANT)" = official ]; then \
+	@set --; if [ "$(VARIANT)" = official ]; then \
 		source="$(OFFICIAL_IMAGE)"; backend=rpm; docker pull --platform "$(PLATFORM)" "$$source" || exit 1; \
 	else \
-		build_args=""; backend=deb; \
+		backend=deb; \
 		if [ "$(VARIANT)" = alpine ]; then backend=apk; else \
-			build_args="$$(python3 image/releases.py build-args $(CEPH_RELEASE) $(VARIANT))" || exit 1; fi; \
+			build_args="$$(python3 image/releases.py build-args $(CEPH_RELEASE) $(VARIANT))" || exit 1; \
+			eval "set -- $$build_args"; fi; \
 		$(call registry_cache,-source) \
-		docker buildx build --load --platform "$(PLATFORM)" --provenance=false --target all $$build_args $$cache_args \
+		docker buildx build --load --platform "$(PLATFORM)" --provenance=false --target all "$$@" $$cache_args \
 			-t "$(ROLE_SOURCE)" image/$(VARIANT) || exit 1; source="$(ROLE_SOURCE)"; \
 	fi; \
 	python3 image/roles/build.py --package-backend $$backend --source-runtime-env \

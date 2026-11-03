@@ -235,13 +235,13 @@ def extension_tag(extension, architecture=None):
 
 def extension_targets(extension):
     """The targets every published helper must pass. The netem helper: the
-    official image and the published essential role image of every release.
-    The capture helper: the official image of every release, which is what its
-    CI job checks."""
+    official image and the published essential role image of every published
+    release. The capture helper: the official image of every published release,
+    which is what its CI job checks."""
     if extension == "capture":
-        return {value["official"] for value in releases.RELEASES.values()}
-    return {reference for release, value in releases.RELEASES.items()
-            for reference in (value["official"], releases.published_role(release, "official", "essential"))}
+        return {releases.official(release) for release in releases.published()}
+    return {reference for release in releases.published()
+            for reference in (releases.official(release), releases.published_role(release, "official", "essential"))}
 
 
 def validate_extension_report(report, extension, architecture):
@@ -554,7 +554,7 @@ def main():
     artifacts.add_argument("--directory", type=Path, required=True)
     args = parser.parse_args()
     if args.command == "health":
-        args.releases = args.releases or list(releases.RELEASES)
+        args.releases = args.releases or releases.published()
         health(args)
         return
     if args.command == "extension-health":

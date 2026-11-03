@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "purpose": "Discovery image inputs; does not expand production-supported releases.",
+  "purpose": "Pinned inputs of every Ceph release this repository builds, checks and publishes; see docs/RELEASES.md.",
   "releases": {
     "19.2.0": {
       "codename": "squid",

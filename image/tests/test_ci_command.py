@@ -18,11 +18,16 @@ class ImageCommandTests(unittest.TestCase):
         self.assertEqual(result['sha'],'a'*40)
         self.assertEqual(result['matrix']['include'],[{'release':'20.2.4','variant':'official','architecture':'amd64','scope':'quick','runner':'ubuntu-24.04'}])
 
-    def test_full_all_retains_twelve_cohorts(self):
+    def test_full_all_selects_every_available_catalogued_cohort(self):
         result=ci_command.select(*fixture())
-        self.assertEqual(len(result['matrix']['include']),12)
-        self.assertEqual(len({(c['release'],c['variant'],c['architecture']) for c in result['matrix']['include']}),12)
+        self.assertEqual(len(result['matrix']['include']),79)
+        self.assertEqual(len({(c['release'],c['variant'],c['architecture']) for c in result['matrix']['include']}),79)
         self.assertEqual(len(ci_command.select(*fixture('/ci run image-full on 19.2.5'))['matrix']['include']),6)
+        # The catalogue has no usable Ubuntu 19.2.6 arm64 input.
+        cells=ci_command.select(*fixture('/ci run image-full on 19.2.6'))['matrix']['include']
+        self.assertEqual(len(cells),5)
+        self.assertNotIn(('ubuntu','arm64'),{(c['variant'],c['architecture']) for c in cells})
+        self.assertEqual(len(ci_command.select(*fixture('/ci run image-quick on all'))['matrix']['include']),14)
 
     def test_unauthorized_forks_closed_and_bad_heads_are_refused(self):
         for kind in ('author','fork','closed','sha','number'):
