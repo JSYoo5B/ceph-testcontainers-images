@@ -366,7 +366,9 @@ def gated(node):
 
 
 def imports(path):
-    """Top-level names of the absolute imports a file requires."""
+    """The absolute imports a file requires, as (dotted module, name) pairs:
+    name is None for `import a.b` and `from a.b import *`, and the imported
+    name (an attribute or a submodule) for `from a.b import name`."""
     found = set()
 
     def visit(node, optional):
@@ -386,9 +388,10 @@ def imports(path):
             return
         if not optional:
             if isinstance(node, ast.Import):
-                found.update(alias.name.split('.')[0] for alias in node.names)
+                found.update((alias.name, None) for alias in node.names)
             elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
-                found.add(node.module.split('.')[0])
+                found.update((node.module, None if alias.name == '*' else alias.name)
+                             for alias in node.names)
         for child in ast.iter_child_nodes(node):
             visit(child, optional)
 
@@ -407,42 +410,75 @@ def sources(root, name):
     return sorted(p for p in (root / name).rglob('*.py') if not test_file(p))
 
 
+def spec(module, name):
+    """The probe argument and the reported form of an import."""
+    return module + ':' + name if name else module
+
+
 def closure(root, name):
-    """Missing internal names and external imports of name and the internal
-    names it imports, transitively."""
+    """Missing internal modules and the external imports of name and the
+    internal names it imports, transitively. Dotted imports keep their full
+    path: a present parent package does not stand in for a missing submodule."""
     internal = lambda n: ((root / (n + '.py')).is_file() or (root / n / '__init__.py').is_file()
                           or (root / n / 'module.py').is_file())
-    seen, external, todo = {name}, set(), [name]
+
+    def located(module):
+        # Internal files cannot be imported outside the MGR, so a dotted
+        # internal path is checked on disk (a directory is a namespace package).
+        path = root.joinpath(*module.split('.'))
+        return (path.with_name(path.name + '.py').is_file() or path.is_dir()
+                or any(path.parent.glob(path.name + '.*.so')))
+
+    seen, external, missing, todo = {name}, set(), set(), [name]
     while todo:
         for path in sources(root, todo.pop()):
-            for imported in imports(path):
-                if imported in EMBEDDED or imported in sys.builtin_module_names:
+            for module, imported in imports(path):
+                top = module.split('.')[0]
+                if top in EMBEDDED:
                     continue
-                if internal(imported):
-                    if imported not in seen:
-                        seen.add(imported)
-                        todo.append(imported)
+                if top in sys.builtin_module_names:
+                    # A built-in module always loads; its names still count.
+                    if module != top or imported:
+                        external.add(spec(module, imported))
+                    continue
+                if internal(top):
+                    if not located(module):
+                        missing.add('%s: internal module not found under %s' % (module, root))
+                    if top not in seen:
+                        seen.add(top)
+                        todo.append(top)
                 else:
-                    external.add(imported)
-    return external
+                    external.add(spec(module, imported))
+    return external, missing
 
 
 def load(names):
-    """Import external dependencies in a clean interpreter, as the MGR does."""
+    """Import external dependencies in a clean interpreter, as the MGR does.
+    `from module import name` passes when name is an attribute of module or
+    an importable submodule, as the import statement resolves it."""
     if not names:
         return []
     program = ('import importlib, sys\n'
                'for n in sys.argv[1:]:\n'
+               '    module, _, name = n.partition(":")\n'
                '    try:\n'
-               '        importlib.import_module(n)\n'
+               '        loaded = importlib.import_module(module)\n'
+               '        if name and not hasattr(loaded, name):\n'
+               '            importlib.import_module(module + "." + name)\n'
                '    except Exception as e:\n'
-               '        print("%s: %s: %s" % (n, type(e).__name__, str(e).splitlines()[0] if str(e) else ""))\n')
+               '        shown = "from %s import %s" % (module, name) if name else module\n'
+               '        print("%s: %s: %s" % (shown, type(e).__name__, str(e).splitlines()[0] if str(e) else ""))\n')
     output = subprocess.run([sys.executable, '-I', '-c', program] + sorted(names), cwd='/',
                             capture_output=True, text=True, timeout=120)
     lines = [line for line in output.stdout.splitlines() if line]
     if output.returncode:
         lines.append('dependency probe exited %d: %s' % (output.returncode, output.stderr.strip()[-500:]))
     return lines
+
+
+def problems_of(name):
+    external, missing = closure(root, name)
+    return sorted(missing) + load(external)
 
 
 root, release, requested = Path(sys.argv[1]), sys.argv[2], sys.argv[3:]
@@ -456,7 +492,7 @@ invalid = [name for name in requested if not NAME.match(name)]
 result('mgr-module-names', not invalid, 'quick_failure',
        '' if not invalid else 'invalid MGR module names: ' + ', '.join(invalid))
 if present:
-    problems = load(closure(root, 'mgr_module'))
+    problems = problems_of('mgr_module')
     result('mgr-module-load:mgr_module', not problems, 'loading_failure', '\n'.join(problems))
     selected = sorted(set(always_on or ()) | set(BASELINE) | {n for n in requested if NAME.match(n)})
     for name in selected:
@@ -465,7 +501,7 @@ if present:
                '' if exists else 'MGR module %s has no %s' % (name, root / name / 'module.py'))
         if not exists:
             continue
-        problems = load(closure(root, name))
+        problems = problems_of(name)
         result('mgr-module-load:' + name, not problems, 'loading_failure',
                '\n'.join('MGR module %s dependency %s' % (name, line) for line in problems))
         for asset in ASSETS.get(name, ()):

@@ -140,6 +140,80 @@ class MGRModuleProbeTests(unittest.TestCase):
             self.assertEqual(failed, {"mgr-module-load:tc_broken": "loading_failure",
                                       "mgr-module:absent_module": "missing_file"})
 
+    def dotted_probe(self, root, body):
+        write(root / "tc_dotted" / "module.py", body)
+        result, checks, kinds = self.run_probe(root, requested=["tc_dotted"])
+        return result, checks["mgr-module-load:tc_dotted"]
+
+    def test_a_dotted_import_needs_its_submodule_not_only_the_parent_package(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            module_tree(root)
+            # Positive controls: present submodules of a present package.
+            result, status = self.dotted_probe(root, """
+                import email.mime.text
+                import xml.etree.ElementTree as ElementTree
+                import os.path
+                """)
+            self.assertEqual((result.returncode, status), (0, "passed"), result.stdout)
+            # The parent package email exists; its submodule does not.
+            result, status = self.dotted_probe(root, "import email.tc_missing_submodule\n")
+            self.assertEqual((result.returncode, status), (1, "failed"))
+            self.assertIn("MGR module tc_dotted dependency email.tc_missing_submodule: ModuleNotFoundError",
+                          result.stdout)
+
+    def test_a_from_import_needs_its_module_path_and_each_name(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            module_tree(root)
+            # Positive controls: an attribute, a submodule that is not yet an
+            # attribute of its package, a dotted module path, a star import,
+            # a built-in module's attribute and the embedded MGR module.
+            result, status = self.dotted_probe(root, """
+                from json import dumps
+                from email import mime
+                from email.mime import text
+                from email.mime.text import MIMEText
+                from os.path import *
+                from sys import argv
+                from ceph_module import BaseMgrModule
+                """)
+            self.assertEqual((result.returncode, status), (0, "passed"), result.stdout)
+            for body, shown in (
+                    # A missing submodule in the dotted module path.
+                    ("from email.tc_missing_submodule import anything\n",
+                     "from email.tc_missing_submodule import anything: ModuleNotFoundError"),
+                    # A present module without that attribute or submodule.
+                    ("from email import tc_missing_name\n",
+                     "from email import tc_missing_name: ModuleNotFoundError"),
+                    ("from email.mime.text import tc_missing_name\n",
+                     "from email.mime.text import tc_missing_name: ModuleNotFoundError"),
+                    ("from sys import tc_missing_name\n",
+                     "from sys import tc_missing_name: ModuleNotFoundError")):
+                result, status = self.dotted_probe(root, body)
+                self.assertEqual((result.returncode, status), (1, "failed"), body)
+                self.assertIn("MGR module tc_dotted dependency " + shown, result.stdout)
+
+    def test_a_dotted_internal_import_needs_its_file(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            module_tree(root)
+            write(root / "tc_internal" / "__init__.py")
+            write(root / "tc_internal" / "part.py", "import json\n")
+            write(root / "tc_internal" / "sub" / "__init__.py")
+            result, status = self.dotted_probe(root, """
+                import tc_internal.part
+                from tc_internal.sub import anything
+                from mgr_util import helper
+                """)
+            self.assertEqual((result.returncode, status), (0, "passed"), result.stdout)
+            result, status = self.dotted_probe(root, "from tc_internal.tc_missing import anything\n")
+            self.assertEqual((result.returncode, status), (1, "failed"))
+            self.assertIn("MGR module tc_dotted dependency tc_internal.tc_missing: internal module not found",
+                          result.stdout)
+            result, status = self.dotted_probe(root, "import mgr_util.tc_missing\n")
+            self.assertEqual((result.returncode, status), (1, "failed"))
+
     def test_environment_gated_hooks_and_import_fallbacks_are_optional(self):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
