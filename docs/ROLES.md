@@ -155,12 +155,25 @@ The check requires a module's unconditional imports at their full dotted
 path. `import a.b.c` needs the submodule `a.b.c`, not only the package `a`,
 and `from a.b import c` needs `a.b` and a name `c` that is either an
 attribute of `a.b` or its importable submodule. Imports of the module tree
-itself cannot run outside the MGR, so their dotted module paths are checked
-on disk. A branch for a Python version other than the image's interpreter,
-which the MGR embeds, is never taken: `if sys.version_info >= (3, 3):`
-skips its `else` import of `threading._Timer`. A dependency that a module
-imports inside an import fallback is optional to the check, because
-the module itself then reports that it cannot run. The official Tentacle
+itself cannot run outside the MGR, so they are checked on disk: the dotted
+module path needs its file, and an imported name needs a submodule or a
+name the module binds at module level. An explicit relative import is
+resolved from the importing file's package, as the MGR imports each module
+directory as a package: `from .helper import read` in `dashboard/module.py`
+needs `dashboard/helper.py` and its `read`, and a relative import in a
+top-level file or with more dots than the package has fails. A branch for a
+Python version other than the image's interpreter, which the MGR embeds, is
+never taken: `if sys.version_info >= (3, 3):` skips its `else` import of
+`threading._Timer`.
+
+An import fallback needs one branch that loads. A `try` loads when its body
+loads and then its `else`, or when the first handler that catches the
+body's failure loads (`ModuleNotFoundError` for a missing module,
+`ImportError` for a missing name); `finally` always runs. So
+`try: import A` with `except ImportError: import B` needs A or B, while a
+handler that only records a missing optional dependency
+(`except ImportError: A = None`) needs nothing, because the module itself
+then reports that it cannot run. The official Tentacle
 20.2.4 image ships the influx module without the `influxdb` Python client,
 so in a running MGR influx reports "influxdb python module not found", and
 the project bundle keeps that parity with its source. The cluster-lifecycle
