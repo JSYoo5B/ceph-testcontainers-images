@@ -151,8 +151,13 @@ health data; alerts, influx, telegraf and prometheus need an SMTP, InfluxDB,
 Telegraf or scrape receiver. Module functionality belongs to the
 corresponding feature scenarios of the consumer.
 
-The check requires a module's unconditional imports. A dependency that a
-module imports inside an import fallback is optional to the check, because
+The check requires a module's unconditional imports at their full dotted
+path. `import a.b.c` needs the submodule `a.b.c`, not only the package `a`,
+and `from a.b import c` needs `a.b` and a name `c` that is either an
+attribute of `a.b` or its importable submodule. Imports of the module tree
+itself cannot run outside the MGR, so their dotted module paths are checked
+on disk. A dependency that a module imports inside an import fallback is
+optional to the check, because
 the module itself then reports that it cannot run. The official Tentacle
 20.2.4 image ships the influx module without the `influxdb` Python client,
 so in a running MGR influx reports "influxdb python module not found", and
