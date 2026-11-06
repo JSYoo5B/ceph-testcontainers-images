@@ -156,8 +156,10 @@ path. `import a.b.c` needs the submodule `a.b.c`, not only the package `a`,
 and `from a.b import c` needs `a.b` and a name `c` that is either an
 attribute of `a.b` or its importable submodule. Imports of the module tree
 itself cannot run outside the MGR, so their dotted module paths are checked
-on disk. A dependency that a module imports inside an import fallback is
-optional to the check, because
+on disk. A branch for a Python version other than the image's interpreter,
+which the MGR embeds, is never taken: `if sys.version_info >= (3, 3):`
+skips its `else` import of `threading._Timer`. A dependency that a module
+imports inside an import fallback is optional to the check, because
 the module itself then reports that it cannot run. The official Tentacle
 20.2.4 image ships the influx module without the `influxdb` Python client,
 so in a running MGR influx reports "influxdb python module not found", and
