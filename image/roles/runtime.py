@@ -50,11 +50,19 @@ def configure(kind):
         version = subprocess.check_output(['ceph', '--version'], text=True).strip()
         supplement = ceph_license.restore(release, version, Path(__file__).resolve().parent)
     inventory, closure, base = backend.load(kind, analyze)
-    packaging.ROLES = contract.ROLES
     packaging.ROOT_PACKAGES = backend.roots(kind, inventory)
+    # An optional role is built only when its backend selected roots for it.
+    packaging.ROLES = tuple(role for role in contract.roles(kind) if role in packaging.ROOT_PACKAGES)
+    packaging.AGGREGATE_ROLES = contract.ROLES
+    module_path, modules = backend.mgr_modules(inventory)
+    packaging.ROLE_METADATA = {}
+    if 'mgr-modules' in packaging.ROLES:
+        packaging.ROLE_METADATA['mgr-modules'] = {
+            'mgr_module_path': module_path, 'mgr_modules': sorted(modules),
+            'mgr_module_packages': dict(sorted(modules.items()))}
     executables = {role:contract.executables(role,
         {name for name in contract.OPTIONAL_EXECUTABLES.get(role,set()) if shutil.which(name)}, kind)
-        for role in contract.ROLES}
+        for role in packaging.ROLES}
     packaging.REQUIRED_EXECUTABLES = {
         role: tuple('/usr/sbin/cryptsetup' if name=='cryptsetup' else '/usr/bin/'+name
                     for name in sorted(names)) for role,names in executables.items()
@@ -69,7 +77,7 @@ def configure(kind):
     packaging.include_path = lambda role,p: contract.permits_path(role,p,ceph_bins)
     packaging.EXCLUDED_EXECUTABLES = {
         role: sorted(ceph_bins - executables[role] - contract.implementation_names(role, ceph_bins))
-        for role in contract.ROLES}
+        for role in packaging.ROLES}
     analyze.BASE = base
     analyze.installed_inventory = lambda: inventory
     analyze.closure = closure

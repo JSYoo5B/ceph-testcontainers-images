@@ -25,6 +25,10 @@ import assemble
 import contract
 
 ROLES = contract.ROLES
+# The roles whose union is the aggregate all image; optional roles are not.
+AGGREGATE_ROLES = contract.ROLES
+# Role-specific inventory recorded in a role's image manifest.
+ROLE_METADATA = {}
 ROOT_PACKAGES = {}
 REQUIRED_EXECUTABLES = {}
 include_path = lambda role, path: True
@@ -311,14 +315,15 @@ def main():
     inventory = analyze.installed_inventory()
     roots = {role: tuple(dict.fromkeys(ROOT_PACKAGES[role] + analyze.BASE)) for role in ROLES}
     selected = {role: analyze.closure(roots[role]) for role in ROLES}
-    all_roots = tuple(dict.fromkeys(package for role in ROLES for package in roots[role]))
-    all_selected = set().union(*(selected[role] for role in ROLES))
-    if all_selected.difference(inventory):
+    aggregate = [role for role in ROLES if role in AGGREGATE_ROLES]
+    all_roots = tuple(dict.fromkeys(package for role in aggregate for package in roots[role]))
+    all_selected = set().union(*(selected[role] for role in aggregate))
+    if set().union(*selected.values()).difference(inventory):
         raise RuntimeError("Role dependency closure references uninstalled packages")
 
     materialized = output / ".materialized"
     assemble.ROOT = materialized
-    assemble.PACKAGES = all_roots
+    assemble.PACKAGES = tuple(dict.fromkeys(package for role in ROLES for package in roots[role]))
     assemble.copied.clear()
     assemble.hardlinks.clear()
     assemble.license_files.clear()
@@ -375,9 +380,10 @@ def main():
     roots["all"] = all_roots
     selected["all"] = all_selected
     for role in ROLES + ("all",):
-        role_groups = [name for name in ordered if role == "all" or role in groups[name]["members"]]
+        role_groups = [name for name in ordered if (set(aggregate) if role == "all" else {role}) & set(groups[name]["members"])]
         versions = sorted(name + "-" + inventory[name]["version"] for name in selected[role])
-        executables = list(REQUIRED_EXECUTABLES[role]) if role != "all" else sorted(set().union(*REQUIRED_EXECUTABLES.values()))
+        executables = list(REQUIRED_EXECUTABLES[role]) if role != "all" else sorted(
+            set().union(*(REQUIRED_EXECUTABLES[name] for name in aggregate)))
         metadata = {
             "role": role,
             "contract": "roles",
@@ -394,6 +400,7 @@ def main():
             "metadata_probes": role_metadata_probes(probes, path_members, materialized, role),
             "logical_regular_file_bytes": sum(group_metadata[name]["regular_file_bytes"] for name in role_groups),
         }
+        metadata.update(ROLE_METADATA.get(role, {}))
         role_metadata[role] = metadata
         manifest_root = output / "manifests" / role
         manifest_directory = manifest_root / MANIFEST_DIRECTORY

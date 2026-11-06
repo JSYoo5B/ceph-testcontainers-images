@@ -22,6 +22,7 @@ import contract
 import ceph_license
 
 ROLES = contract.ROLES + ("all",)
+MGR_MODULES_LABEL = "io.ceph-testcontainers.mgr-modules"
 HERE = Path(__file__).resolve().parent
 PROJECT_URL = "https://github.com/JSYoo5B/ceph-testcontainers-images"
 NOTICE = "/usr/share/ceph-testcontainers/SOURCES.txt"
@@ -154,6 +155,26 @@ def check_runtime_env(image, supplied):
     return observed
 
 
+def plan_roles(plan):
+    """The image targets of an assembly plan: the baseline roles, the optional
+    roles the plan built, then all."""
+    known = contract.ROLES + tuple(contract.OPTIONAL_ROLES)
+    built = tuple(role for role in known if role in plan["roles"])
+    if set(plan["roles"]) != set(built) | {"all"} or not set(contract.ROLES) <= set(built):
+        raise BuildError("Assembly plan roles differ from the role contract")
+    return built + ("all",)
+
+
+def mgr_modules(plan, role):
+    """The MGR module inventory a role's image carries, or None."""
+    modules = plan["roles"][role].get("mgr_modules")
+    if modules is None:
+        return None
+    if not modules or any(not isinstance(m, str) or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", m) for m in modules):
+        raise BuildError("Invalid MGR module inventory for role " + role)
+    return sorted(modules)
+
+
 def dockerfile(plan, runtime_env=None):
     """Reuse identical independent tar layers across every target, including all."""
     groups = plan["groups"]
@@ -178,7 +199,7 @@ def dockerfile(plan, runtime_env=None):
         "LABEL io.ceph-testcontainers.source-notice=" + json.dumps(NOTICE),
     ]
     lines += runtime_env_lines(runtime_env or {})
-    for role in ROLES:
+    for role in plan_roles(plan):
         selected = plan["roles"][role]["groups"]
         if selected != [group for group in ordered if group in selected] or selected[0] != "common":
             raise BuildError("Invalid group ordering for role " + role)
@@ -191,13 +212,18 @@ def dockerfile(plan, runtime_env=None):
             "LABEL org.opencontainers.image.version=" + json.dumps(plan["ceph_version"]),
             "LABEL io.ceph-testcontainers.role=" + json.dumps(role),
         ]
+        modules = mgr_modules(plan, role)
+        if modules is not None:
+            # The packaged inventory, which the publication gate requires the
+            # image requirement check to have requested.
+            lines.append("LABEL " + MGR_MODULES_LABEL + "=" + json.dumps(" ".join(modules)))
     return "\n".join(lines) + "\n"
 
 
 def check_layers(plan, images):
     by_group = {}
     uses = {}
-    for role in ROLES:
+    for role in plan_roles(plan):
         selected = plan["roles"][role]["groups"]
         layers = images[role]["rootfs_diff_ids"]
         if len(layers) != len(selected) + 1:
@@ -244,11 +270,14 @@ def arguments(argv=None):
     return args
 
 
-def check_command(tags, level, output):
-    """image/check.py invocation for the built mixed roles and all image."""
+def check_command(tags, level, output, modules=()):
+    """image/check.py invocation for the built roles and all image, requiring
+    the packaged MGR module inventory of the mgr-modules image."""
     command = [sys.executable, str(PROJECT / "image" / "check.py"), "--output-dir", str(output)]
-    for role in ROLES:
+    for role in tags:
         command += ["--image", role + "=" + tags[role]]
+    for module in modules:
+        command += ["--mgr-module", module]
     return command + (["--full"] if level == "full" else [])
 
 
@@ -327,11 +356,12 @@ def main():
             tag = args.tag or "official-" + release.group(1)
             if not re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9_.-]{0,119}", tag):
                 raise BuildError("Invalid output tag prefix; specify --tag")
-            tags = {role: "%s:%s-%s" % (args.repository, tag, role) for role in ROLES}
+            roles = plan_roles(plan)
+            tags = {role: "%s:%s-%s" % (args.repository, tag, role) for role in roles}
             report.update({"ceph_version": plan["ceph_version"], "tags": tags})
             save_json(output / "plan.json", plan)
             archives = {archive_path(g["archive"], "groups") for g in plan["groups"].values()}
-            archives.update(archive_path(plan["roles"][role]["manifest_archive"], "manifests") for role in ROLES)
+            archives.update(archive_path(plan["roles"][role]["manifest_archive"], "manifests") for role in roles)
             for archive in sorted(archives):
                 target = context / archive
                 target.parent.mkdir(exist_ok=True)
@@ -349,7 +379,7 @@ def main():
             report["images"] = {}
             if args.runtime_env:
                 report["checks"]["runtime_env"] = "running"
-            for role in ROLES:
+            for role in roles:
                 print("Building " + tags[role], flush=True)
                 run(["docker", "buildx", "build", "--load", "--network=none", "--platform", platform,
                      "--provenance=false", "--target", role, "-t", tags[role], str(context)], log=output / ("build-" + role + ".log"))
@@ -370,7 +400,7 @@ def main():
         else:
             report["checks"]["smoke"] = "running"
             save_json(output / "build-report.json", report)
-            for role in ROLES:
+            for role in roles:
                 print("Smoke testing " + role, flush=True)
                 run(["docker", "run", "--rm", "-i", "--network=none", "--platform", platform,
                      "--entrypoint", "/bin/sh", tags[role], "-s", "--", role],
@@ -380,7 +410,9 @@ def main():
             print("Running the " + args.check + " image check...", flush=True)
             report["checks"]["image_check"] = "running"
             save_json(output / "build-report.json", report)
-            run(check_command(tags, args.check, output / "image-check"), log=output / "image-check.log")
+            modules = mgr_modules(plan, "mgr-modules") if "mgr-modules" in plan["roles"] else None
+            run(check_command(tags, args.check, output / "image-check", modules or ()),
+                log=output / "image-check.log")
             report["checks"]["image_check"] = "passed"
         report["status"] = "passed"
         print("Built contract images; report: " + str(output / "build-report.json"), flush=True)

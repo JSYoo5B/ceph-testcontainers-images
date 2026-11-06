@@ -84,6 +84,31 @@ def load(kind, analyze):
     return inventory, closure, ('ca-certificates','coreutils','procps')
 
 
+def mgr_modules(inventory):
+    """The MGR modules an installed source ships, by the package that owns each.
+
+    The module path is the directory of the packaged mgr_module.py, and a
+    module is a directory there with its own module.py. Returns (path,
+    {module: package}); the path is None when no package ships mgr_module.py.
+    """
+    owners = {}
+    paths = {str(Path(p).parent) for pkg in inventory.values() for p in pkg.get('files', ())
+             if Path(p).name == 'mgr_module.py'}
+    if not paths:
+        return None, {}
+    if len(paths) != 1:
+        raise RuntimeError('Ambiguous MGR module paths: ' + ', '.join(sorted(paths)))
+    root = paths.pop()
+    for name, pkg in inventory.items():
+        for p in pkg.get('files', ()):
+            path = Path(p)
+            if path.name == 'module.py' and str(path.parent.parent) == root:
+                module = path.parent.name
+                if owners.setdefault(module, name) != name:
+                    raise RuntimeError('MGR module %s is owned by two packages' % module)
+    return root, owners
+
+
 # The packages of required MGR modules that Umbrella moved out of
 # ceph-mgr-modules-core: mirroring and snap_schedule. volumes and rbd_support
 # stay in modules-core.
@@ -123,4 +148,9 @@ def roots(kind, inventory=None):
         for package in SPLIT_MGR_PACKAGES:
             if package in inventory and package not in result['essential']:
                 result['essential'] += (package,)
+        # The project MGR bundle: ceph-mgr, the local CLI and every installed
+        # package that ships a MGR module, each with its dependency closure.
+        _, owners = mgr_modules(inventory) if kind == 'rpm' else (None, {})
+        if owners:
+            result['mgr-modules'] = ('ceph-mgr', 'ceph-common') + tuple(sorted(set(owners.values()) - {'ceph-mgr'}))
     return result
