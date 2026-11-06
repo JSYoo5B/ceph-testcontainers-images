@@ -195,9 +195,12 @@ External dependencies are imported in a separate clean interpreter, and an
 imported package may print anything while it loads: a banner, a warning, or
 a line on stdout or stderr that looks like a check result. The interpreter
 returns its results as JSON in a file of its own, its stdout is discarded,
-and the end of its stderr is kept only to explain a crash. When it ends
-without writing that result, for example because an imported package calls
-`os._exit(0)`, every `mgr-module-load` check fails with that crash.
+and the end of its stderr is kept only to explain a crash. Output need not
+be UTF-8: bytes that do not decode, in that stderr or in a failure report
+such as a file name, are shown as backslash escapes (`\xff` or `\udcff`).
+When it ends without writing that result, for example because an imported
+package calls `os._exit(0)`, every `mgr-module-load` check fails with that
+crash.
 
 The official Tentacle
 20.2.4 image ships the influx module without the `influxdb` Python client,
