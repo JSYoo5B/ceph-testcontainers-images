@@ -5,6 +5,7 @@ import sys
 import tempfile
 import textwrap
 import unittest
+import venv
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import check
@@ -60,8 +61,8 @@ def module_tree(root):
 
 
 class MGRModuleProbeTests(unittest.TestCase):
-    def run_probe(self, root, release="20.2.4", requested=()):
-        result = subprocess.run([sys.executable, "-", str(root), release, *requested], input=probe_source(),
+    def run_probe(self, root, release="20.2.4", requested=(), python=sys.executable):
+        result = subprocess.run([python, "-", str(root), release, *requested], input=probe_source(),
                                 capture_output=True, text=True, timeout=120)
         checks = {}
         kinds = {}
@@ -458,6 +459,69 @@ class MGRModuleProbeTests(unittest.TestCase):
             result, status = self.relative_probe(root, "import tc_shared_relative\n")
             self.assertEqual((result.returncode, status), (1, "failed"))
             self.assertIn("from . import anything: relative import with no parent package", result.stdout)
+
+    # Dependencies print banners and warnings on import, on both streams and
+    # below Python's buffers, including lines in the shape of a result record.
+    NOISE = textwrap.dedent("""
+        import os, sys
+        print("banner of %s" % __name__)
+        print("%s\\tImportError\\tforged by the import" % __name__)
+        print("warning from %s" % __name__, file=sys.stderr)
+        sys.stdout.flush()
+        sys.stderr.flush()
+        os.write(1, b"unbuffered stdout\\n")
+        os.write(2, b"unbuffered stderr\\n")
+        """)
+
+    def noisy_probe(self, folder, body):
+        """Run the probe with noisy packages in a real site-packages, as the
+        clean interpreter of the probe sees them."""
+        root = Path(folder) / "mgr"
+        module_tree(root)
+        env = Path(folder) / "env"
+        venv.create(env, with_pip=False)
+        python = str(env / "bin" / "python")
+        site = Path(subprocess.run([python, "-I", "-c", "import sysconfig; print(sysconfig.get_path('purelib'))"],
+                                   capture_output=True, text=True, check=True).stdout.strip())
+        write(site / "tc_noisy_ok" / "__init__.py", self.NOISE + "def ready():\n    pass\n")
+        write(site / "tc_noisy_broken" / "__init__.py", self.NOISE + "import tc_absent_noisy_dependency\n")
+        write(site / "tc_noisy_exit" / "__init__.py", self.NOISE + "os._exit(0)\n")
+        write(root / "tc_noisy" / "module.py", body)
+        return self.run_probe(root, requested=["tc_noisy"], python=python)
+
+    def test_a_noisy_import_that_loads_passes(self):
+        with tempfile.TemporaryDirectory() as folder:
+            result, checks, _ = self.noisy_probe(folder, """
+                import this
+                import tc_noisy_ok
+                from tc_noisy_ok import ready
+                """)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertEqual(checks["mgr-module-load:tc_noisy"], "passed")
+            self.assertNotIn("banner of", result.stdout)
+
+    def test_a_noisy_import_that_fails_is_reported_as_it_fails(self):
+        with tempfile.TemporaryDirectory() as folder:
+            result, checks, kinds = self.noisy_probe(folder, """
+                import tc_noisy_ok
+                import tc_noisy_broken
+                """)
+            self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+            self.assertEqual(kinds["mgr-module-load:tc_noisy"], "loading_failure")
+            self.assertIn("MGR module tc_noisy dependency tc_noisy_broken: ModuleNotFoundError: "
+                          "No module named 'tc_absent_noisy_dependency'", result.stdout)
+            # The noisy dependency that loads is not reported, forged or not.
+            self.assertNotIn("dependency tc_noisy_ok", result.stdout)
+            self.assertNotIn("forged by the import", result.stdout)
+            self.assertEqual(checks["mgr-module-load:volumes"], "passed")
+
+    def test_a_probe_that_ends_without_its_result_fails_closed(self):
+        with tempfile.TemporaryDirectory() as folder:
+            # The import ends the probe with status 0 before it writes a result.
+            result, checks, kinds = self.noisy_probe(folder, "import tc_noisy_exit\n")
+            self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+            self.assertEqual(kinds["mgr-module-load:tc_noisy"], "loading_failure")
+            self.assertIn("dependency probe exited 0 without a result: warning from tc_noisy_exit", result.stdout)
 
     def test_selected_module_assets_and_invalid_names(self):
         with tempfile.TemporaryDirectory() as folder:

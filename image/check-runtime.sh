@@ -299,12 +299,14 @@ PY
     mgr_release=$(ceph-mgr --version 2>/dev/null | awk '/^ceph version / {print $3; exit}')
     python3 - "$mgr_module_path" "$mgr_release" "$@" <<'MGR' || failed=1
 import ast
+import json
 import operator
 import os
 from pathlib import Path
 import re
 import subprocess
 import sys
+import tempfile
 
 # Observed with `ceph mgr module ls` on a MON of each catalogued release
 # (Squid 19.2.5, Tentacle 20.2.4 and Umbrella 21.2.0), keyed by major release.
@@ -662,11 +664,15 @@ def load(names):
     and return each failure by spec as (exception name, report), with the
     report of a crashed probe. `from module import name` passes when name is
     an attribute of module or an importable submodule, as the import
-    statement resolves it, and otherwise raises ImportError as it does."""
+    statement resolves it, and otherwise raises ImportError as it does.
+    Imported modules may print anything: the results come back as JSON in a
+    file of their own, and the probe's stdout is discarded."""
     if not names:
         return {}, None
-    program = ('import importlib, sys\n'
-               'for n in sys.argv[1:]:\n'
+    program = ('import importlib, json, os, sys\n'
+               'channel = os.fdopen(int(sys.argv[1]), "w")\n'
+               'failures = {}\n'
+               'for n in sys.argv[2:]:\n'
                '    module, _, name = n.partition(":")\n'
                '    try:\n'
                '        loaded = importlib.import_module(module)\n'
@@ -679,14 +685,22 @@ def load(names):
                '                raise ImportError("cannot import name %r from %r" % (name, module)) from None\n'
                '    except Exception as e:\n'
                '        shown = "from %s import %s" % (module, name) if name else module\n'
-               '        print("%s\\t%s\\t%s: %s: %s" % (n, type(e).__name__, shown, type(e).__name__,\n'
-               '                                       str(e).splitlines()[0] if str(e) else ""))\n')
-    output = subprocess.run([sys.executable, '-I', '-c', program] + sorted(names), cwd='/',
-                            capture_output=True, text=True, timeout=120)
-    failures = {}
-    for line in output.stdout.splitlines():
-        name, kind, report = line.split('\t', 2)
-        failures[name] = (kind, report)
+               '        failures[n] = [type(e).__name__, "%s: %s: %s" % (\n'
+               '            shown, type(e).__name__, str(e).splitlines()[0] if str(e) else "")]\n'
+               'json.dump({"failures": failures}, channel)\n'
+               'channel.close()\n')
+    with tempfile.TemporaryFile() as channel:
+        output = subprocess.run([sys.executable, '-I', '-c', program, str(channel.fileno())] + sorted(names),
+                                cwd='/', stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                stderr=subprocess.PIPE, text=True, timeout=120, pass_fds=(channel.fileno(),))
+        channel.seek(0)
+        written = channel.read()
+    try:
+        failures = {name: tuple(failure) for name, failure in json.loads(written)['failures'].items()}
+    except (ValueError, KeyError, TypeError, AttributeError):
+        failures = {}
+        if not output.returncode:
+            return failures, ('dependency probe exited 0 without a result: %s' % output.stderr.strip()[-500:])
     crash = None
     if output.returncode:
         crash = 'dependency probe exited %d: %s' % (output.returncode, output.stderr.strip()[-500:])
