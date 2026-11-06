@@ -21,7 +21,7 @@ call for a different image:
 Extension images are different: a fault-injection feature that needs one
 (see [Extension images](#extension-images)) cannot run without it.
 
-With size in mind, the requirements are split by dependency: `essential`, `client`, `cephfs`, `rbd-aux` and `rgw`, so each container pulls only what it runs. An image that holds every component (`all`) is also allowed, and it can still be much lighter than the official image as long as it meets the requirements.
+With size in mind, the requirements are split by dependency: `essential`, `client`, `cephfs`, `rbd-aux` and `rgw`, so each container pulls only what it runs. An image that holds every component (`all`) is also allowed, and it can still be much lighter than the official image as long as it meets the requirements. The optional `mgr-modules` role replaces only the MGR process image when a test needs MGR modules beyond essential's baseline, such as the dashboard.
 
 The requirements keep the components that tests depend on and leave out those that only operations need, such as the dashboard. How a custom image is built is up to its owner; this repository defines the requirements and checks images against them. For the size need alone, role images can be extracted directly from the official image.
 
@@ -56,7 +56,9 @@ Unit tests live in `tests/` next to each tool. Reports and logs go to the ignore
 The [role requirements](docs/ROLES.md) define essential, client, cephfs,
 rbd-aux, rgw and all. Essential contains MON/MGR/OSD and their daemon-local
 modules/plugins. Client supplies ordinary CLI and Python bindings; optional
-processes and RGW administration stay with their feature role.
+processes and RGW administration stay with their feature role. The optional
+mgr-modules role carries the MGR with essential's baseline modules and every
+MGR module of the official release; MON and OSD stay on essential.
 
 Build with `make role-images VARIANT=official` (or debian, ubuntu, alpine).
 `image/check.py` and `image/publish.py` use this contract directly.
@@ -92,7 +94,7 @@ make role-images        # extract, smoke test and quick check
 make role-images-full   # extract, smoke test and full check
 ```
 
-The output is `ceph-testcontainers:official-<release>-<role>` for the five roles and `all`. See [Role Images](docs/ROLE_IMAGES.md).
+The output is `ceph-testcontainers:official-<release>-<role>` for the five roles, `all` and `mgr-modules`. See [Role Images](docs/ROLE_IMAGES.md).
 
 ## Images from distribution packages
 
@@ -157,7 +159,8 @@ Images of every catalogued release use
 for `linux/amd64` and `linux/arm64`, except the cohorts that
 [the catalogue](docs/RELEASES.md#unavailable-cohorts) marks unavailable.
 Roles are `essential`, `client`, `cephfs`, `rbd-aux`, `rgw` and the aggregate
-`all`. Select only the roles required by the feature, as documented in
+`all`; the `official` variant also publishes `mgr-modules`. Select only the
+roles required by the feature, as documented in
 [Dependency roles](docs/ROLES.md).
 
 The [checker workflow](.github/workflows/test.yml) runs the host unit and

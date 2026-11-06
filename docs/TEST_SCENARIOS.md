@@ -29,9 +29,11 @@ python3 image/check.py \
 
 | Option | Behavior |
 | --- | --- |
-| `--image ROLE=REF` | Repeat for `essential`, `client`, `cephfs`, `rbd-aux`, `rgw` or `all`; additional components are allowed |
+| `--image ROLE=REF` | Repeat for `essential`, `client`, `cephfs`, `rbd-aux`, `rgw`, `mgr-modules` or `all`; additional components are allowed |
+| `--mgr-module NAME` | Repeat to require a MGR module and its dependencies in the `mgr-modules` image, beyond its baseline; any valid module name, recorded as `requested_mgr_modules` |
 | `--full` | Run every functional scenario after quick checks; requires `all` or all five role images |
 | `--scenario NAME` | Repeat with `--full` to select scenarios; report level is `functional-selected` |
+| `--topology NAME` | Repeat with `--full` to select `mixed`, `all` or `mgr-modules`; default is every topology whose images are supplied |
 | `--platform PLATFORM` | Select `linux/arm64` or `linux/amd64` from a local multi-platform image |
 | `--output-dir DIR` | Empty report directory; default `artifacts/image-check-<uuid>` |
 | `--probe-timeout SECONDS` | Quick timeout per image; default 120 seconds |
@@ -50,6 +52,17 @@ python3 image/check.py \
   --image rgw=my-company/ceph:rgw \
   --image all=my-company/ceph:all --full \
   --scenario rbd-encryption --scenario rados-object-class --scenario rados-striper
+```
+
+To check a replacement MGR image for the modules a test needs, and run the
+MGR-dependent scenarios with every MGR started from it:
+
+```sh
+python3 image/check.py \
+  --image essential=my-company/ceph:essential --image client=my-company/ceph:client \
+  --image cephfs=my-company/ceph:cephfs --image mgr-modules=my-company/ceph:mgr \
+  --mgr-module dashboard --mgr-module my_module \
+  --full --topology mgr-modules --scenario cluster-lifecycle --scenario cephfs
 ```
 
 `image/functional/run.py` offers the same scenario selection and uses the
@@ -78,7 +91,8 @@ the image's effective paths rather than a distribution's fixed layout.
 | RBD parent cache plugin | rbd-aux | Find `libceph_librbd_parent_cache.so` under the `librbd` directory of the image's `plugin_dir`, load it eagerly and look up its plugin entry points; verifies that librbd can load the plugin that `rbd_plugins=parent_cache` names |
 | Python client APIs | client | Require callable RBD encryption format/load, compound class execute, exclusive lock and unlock APIs; verifies the installed bindings expose the functions used by the functional probes |
 | Striper CLI option | client | Run `rados --help` and require a successful result containing `--striper`; verifies the CLI advertises the required interface |
-| MGR module files | essential | Query `mgr_module_path` and require `mgr_module.py` and module files for volumes, rbd_support, mirroring and snap_schedule; verifies those module sources are present, without claiming their cluster operations have run |
+| MGR modules | essential/mgr-modules | Query `mgr_module_path` and require `mgr_module.py`, then each baseline module (the release's always-on modules, volumes, rbd_support, mirroring and snap_schedule) and, for mgr-modules, each requested module. A module's `module.py` must exist (`mgr-module:NAME`). Its import closure is parsed, following internal modules and shared files transitively, and every external dependency is imported in a clean interpreter (`mgr-module-load:NAME`). Imports guarded by an import fallback, `TYPE_CHECKING` or an environment-gated test hook and module test suites are not required. A requested dashboard needs its frontend build and a requested cephadm its executable (`mgr-module-assets:NAME`). MGR modules themselves are never imported: they need the embedded MGR interpreter. An unrecorded release fails `mgr-baseline-list`. This verifies installation and import closure, not module operation |
+| MGR replacement executables | mgr-modules | Run `ceph` and `ceph-mgr` with `--version` and import `rados`, `ceph_argparse` and `ceph_daemon`; MON, OSD and other daemon executables are not required |
 | Keyring creation and reading | essential | Generate a temporary client keyring with `ceph-authtool`, then read its key back; verifies bootstrap keyring generation and parsing work |
 | Monmap creation | essential | Create a temporary monmap with a supplied FSID and v1/v2 MON addresses; verifies the monmap tool accepts the runtime bootstrap inputs |
 | Mirror/admin executables | rbd-aux/cephfs/rgw | Run `rbd-mirror`, `cephfs-mirror` and `radosgw-admin` with `--version`; verifies startup and version identity, while replication is checked in separate functional scenarios |
@@ -107,6 +121,10 @@ Scenarios run real clusters on private Docker networks. Single-cluster
 scenarios share one cluster; each multi-cluster scenario starts its own
 pair. MON/MGR/OSD use essential, clients use client, gateways and RGW setup
 use rgw, MDS and CephFS mirrors use cephfs, and RBD mirrors use rbd-aux. For `all`, every container uses that image.
+The `mgr-modules` topology is the mixed one with every MGR started from the
+mgr-modules image. cluster-lifecycle records the active MGR's always-on,
+enabled and disabled modules, and those that report they cannot run, as its
+proof.
 
 | Scenario | Clusters | Pass criteria |
 | --- | --- | --- |

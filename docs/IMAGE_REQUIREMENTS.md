@@ -19,7 +19,7 @@ The requirements include every component that tests depend on and exclude compon
 - NFS Ganesha and iSCSI gateways
 - compilers and development headers
 
-None of these is required. Images may still contain them, or any other additional executable.
+None of these is required. Images may still contain them, or any other additional executable. A test that needs an additional MGR module, such as the dashboard, selects the optional mgr-modules role for its MGRs.
 
 The testcontainers module supplies all cluster setup at run time: configuration, keyrings, bootstrap commands and entrypoints. Images carry no setup logic. Any build method, distribution, package manager, file layout or label scheme is acceptable; building the image is up to its owner. For a ready-made option, [role images](ROLE_IMAGES.md) can be extracted from the official image.
 
@@ -37,6 +37,11 @@ explicit role; only an explicit all selection supplies every role.
 | rbd-aux | rbd-mirror and cache-capable client runtime: rados/rbd CLI/bindings, ceph-immutable-object-cache and the librbd parent_cache plugin, local ceph CLI |
 | rgw | RGW Beast/TLS, radosgw-admin and readlink; ceph/Python runtime for independently invoked per-zone setup containers |
 | all | Union of the five responsibilities |
+| mgr-modules | Optional MGR process image: `ceph-mgr` and the local CLI, the baseline MGR modules of essential and each additionally requested module, with dependencies |
+
+mgr-modules replaces only the MGR process image; MON and OSD stay on
+essential. It is not part of all. Its baseline, the project bundle and the
+requested-module rules are in [Roles](ROLES.md#the-mgr-modules-role).
 
 ## Common requirements
 
@@ -55,7 +60,8 @@ These apply to every role. The official image meets all of them.
 ## Role requirements
 
 The [role capability table](ROLES.md) specifies executables, libraries and
-bindings. MGR modules and OSD classes/plugins remain inside essential.
+bindings. MGR modules and OSD classes/plugins remain inside essential; mgr-modules
+carries the MGR daemon and its modules when a test replaces the MGR image.
 Client includes ordinary CLI/bindings, encryption/striper clients and offline
 map tools. The cache daemon, parent-cache plugin and consuming librbd stay
 together in rbd-aux. RGW administration belongs to rgw; CephFS daemons and
@@ -86,6 +92,7 @@ The table lists what a testcontainers module does with each component. Rows mark
 | MGR `volumes` | `essential` | CephFS filesystems, subvolumes, snapshots, clones, data pools and quiesce |
 | MGR `rbd_support` with Python `rbd` | `essential` | RBD background tasks and mirror snapshot schedules |
 | MGR `mirroring` | `essential` | CephFS snapshot mirroring peers and directory configuration |
+| `ceph-mgr` with the baseline and requested modules | `mgr-modules` | Active and standby MGRs started from a replacement MGR image, for tests that need modules essential does not promise; modules are enabled by the caller, never by the image |
 | `rbd-mirror` | `rbd-aux` | RBD journal and snapshot mirroring daemon, started in its own container when RBD mirroring between clusters is requested |
 | `cephfs-mirror` | `cephfs` | CephFS snapshot mirroring daemon, started in its own container when CephFS mirroring between clusters is requested |
 | `radosgw-admin` | `rgw` | RGW multisite realm, zonegroup, zone, period and sync policy management, executed from a client container |

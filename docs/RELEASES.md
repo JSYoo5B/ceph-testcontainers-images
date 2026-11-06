@@ -11,7 +11,9 @@ ghcr.io/jsyoo5b/ceph-testcontainers-images:<variant>-<release>-<role>-linux-<arc
 ```
 
 Variants are `official`, `debian` and `ubuntu`; roles are `essential`,
-`client`, `cephfs`, `rbd-aux`, `rgw` and `all`. A published release that turns
+`client`, `cephfs`, `rbd-aux`, `rgw` and `all`, and the `official` variant
+also publishes the optional `mgr-modules` role
+([Roles](ROLES.md#the-mgr-modules-role)). A published release that turns
 out to be broken is rebuilt and its tags are replaced by a later publication.
 Each promotion receipt records the manifests the tags pointed to before.
 
@@ -159,3 +161,7 @@ The index digests of published releases are recorded in
 target those releases, and the weekly
 [published image health workflow](../.github/workflows/published-health.yml)
 checks that every recorded index still lists exactly its available platforms.
+The inventory records the roles that a release's publication staged and
+promoted: a release published before its variant gained mgr-modules records
+no mgr-modules index until it is published again, and the health check covers
+the roles it records.
