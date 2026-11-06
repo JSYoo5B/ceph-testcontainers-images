@@ -28,8 +28,55 @@ class ImageContractTests(unittest.TestCase):
             check.runtime_sets({"control": "control", "osd": "osd"})
         images = {role: role for role in check.ROLES}
         sets = check.runtime_sets(images)
-        self.assertEqual(sets["mixed"], {role: role for role in check.ROLES[:-1]})
+        baseline = {role: role for role in check.contract.ROLES}
+        self.assertEqual(sets["mixed"], baseline)
         self.assertEqual(set(sets["all"].values()), {"all"})
+        # mgr-modules replaces only the MGR image of the mixed roles.
+        self.assertEqual(sets["mgr-modules"], dict(baseline, **{"mgr-modules": "mgr-modules"}))
+        self.assertEqual(set(sets), {"mixed", "all", "mgr-modules"})
+
+    def test_topologies_select_and_require_their_images(self):
+        images = {"essential": "e", "client": "c", "cephfs": "f", "mgr-modules": "m"}
+        sets = check.runtime_sets(images, ["cephfs"], ["mgr-modules"])
+        self.assertEqual(sets, {"mgr-modules": dict(images)})
+        self.assertEqual(set(check.runtime_sets(images, ["cephfs"])), {"mixed", "mgr-modules"})
+        for topologies in (["all"], ["mgr-modules", "all"]):
+            with self.subTest(topologies=topologies), self.assertRaisesRegex(check.CheckError, "lack"):
+                check.runtime_sets(images, ["cephfs"], topologies)
+        # Without its baseline roles mgr-modules has no topology of its own.
+        with self.assertRaises(check.CheckError):
+            check.runtime_sets({"mgr-modules": "m"}, ["cephfs"])
+
+    def test_requested_mgr_modules_are_validated_and_reach_only_the_mgr_probe(self):
+        args = check.arguments(["--image", "mgr-modules=m", "--mgr-module", "volumes",
+                                "--mgr-module", "my_custom", "--mgr-module", "volumes"])
+        self.assertEqual(args.mgr_module, ["my_custom", "volumes"])
+        for name in ("bad-name", "1st", "a.b", ""):
+            with self.subTest(name=name), mock.patch("sys.stderr"), self.assertRaises(SystemExit):
+                check.arguments(["--image", "mgr-modules=m", "--mgr-module", name])
+        with mock.patch("sys.stderr"), self.assertRaises(SystemExit):
+            check.arguments(["--image", "all=a", "--topology", "all"])
+        with self.assertRaisesRegex(check.CheckError, "mgr-modules=REF"):
+            check.main(["--image", "essential=e", "--mgr-module", "dashboard"])
+        commands = []
+        def run(command, **kwargs):
+            commands.append(command)
+            return ""
+        started = mock.Mock(stdout="COMPLETE\tmgr-modules\nCHECK\tpassed\tx\nVERSION\tceph-mgr\t"
+                                   "ceph version 20.2.4 (abc) tentacle (stable)\n", stderr="", returncode=0)
+        with tempfile.TemporaryDirectory() as folder, mock.patch.object(check, "run", side_effect=run), \
+                mock.patch.object(check.subprocess, "run", return_value=started):
+            for role in ("mgr-modules", "essential"):
+                image = {"image_id": "sha256:" + "1" * 64, "platform": "linux/amd64"}
+                check.probe_image(role, image, args, Path(folder))
+                create = next(c for c in reversed(commands) if c[:2] == ["docker", "create"])
+                tail = create[create.index("--") + 1:]
+                if role == "mgr-modules":
+                    self.assertEqual(tail, ["mgr-modules", "my_custom", "volumes"])
+                    self.assertEqual(image["requested_mgr_modules"], ["my_custom", "volumes"])
+                else:
+                    self.assertEqual(tail, ["essential"])
+                    self.assertNotIn("requested_mgr_modules", image)
 
     def test_multiarch_probe_uses_runnable_index_id_without_resolving_tag_twice(self):
         root_id = "sha256:" + "1" * 64

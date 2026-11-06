@@ -3,6 +3,8 @@
 # Python probes run only in roles that provide the interpreter. Run only in a disposable container as root.
 set -u
 role=${1:?role required}
+shift
+# The mgr-modules role takes the requested MGR module names after the role.
 failed=0
 work=/tmp/ceph-image-check-$$
 
@@ -83,13 +85,16 @@ osd=false
 rgw=false
 mds=false
 fstools=false
+mgr=false
+mgrbundle=false
 case "$role" in
-    essential) core=true; osd=true ;;
+    essential) core=true; osd=true; mgr=true ;;
+    mgr-modules) mgr=true; mgrbundle=true ;;
     client) client=true ;;
     cephfs) mds=true; fsmirror=true; fstools=true ;;
     rbd-aux) cache=true ;;
     rgw) rgw=true ;;
-    all) core=true; client=true; cache=true; fsmirror=true; osd=true; rgw=true; mds=true; fstools=true ;;
+    all) core=true; client=true; cache=true; fsmirror=true; osd=true; rgw=true; mds=true; fstools=true; mgr=true ;;
     *) exit 2 ;;
 esac
 # Alpine packages the CephFS recovery tools in ceph19-utils, which the
@@ -138,9 +143,10 @@ pgrep_inspection() {
         return 1
     fi
 }
-if "$core" || "$client" || "$cache" || "$fsmirror" || "$rgw"; then
+if "$core" || "$client" || "$cache" || "$fsmirror" || "$rgw" || "$mgrbundle"; then
     binaries="ceph"
     if "$core"; then binaries="$binaries ceph-mon ceph-mgr ceph-authtool monmaptool"; fi
+    if "$mgrbundle"; then binaries="$binaries ceph-mgr"; fi
     if "$client" || "$cache"; then binaries="$binaries rados rbd"; fi
     for binary in $binaries; do
         check "version:$binary" version "$binary"
@@ -278,24 +284,204 @@ PY
         check path:pgrep external_command pgrep
         check process-inspection:pgrep pgrep_inspection
     fi
-    mgr_modules() {
-        module_path=$(ceph-mgr --show-config-value mgr_module_path) || return 1
-        python3 - "$module_path" <<'PY'
-from pathlib import Path
-import sys
-root = Path(sys.argv[1])
-assert (root / "mgr_module.py").is_file(), "missing mgr_module.py"
-modules = ("volumes", "rbd_support", "mirroring", "snap_schedule")
-for name in modules:
-    assert (root / name / "module.py").is_file(), "missing MGR module: " + name
-PY
-    }
-    check mgr-modules mgr_modules
     check tmp-mode python3 -c 'import os, stat; assert stat.S_IMODE(os.stat("/tmp").st_mode) == 0o1777'
     check keyring ceph-authtool --create-keyring "$work/keyring" --gen-key -n client.admin
     check keyring-read /bin/sh -c 'ceph-authtool "$1" --print-key > /dev/null' check "$work/keyring"
     check monmap monmaptool --create --fsid 9df1f6ea-6047-4d0c-bb3d-408fbef094b4 \
         --addv a '[v2:127.0.0.1:3300,v1:127.0.0.1:6789]' "$work/monmap"
+    fi
+    if "$mgr"; then
+    # The release's always-on modules, volumes, rbd_support, mirroring and
+    # snap_schedule, and any requested module, each with its import closure.
+    # Modules are parsed, never imported: mgr_module needs the native bindings
+    # that only the embedded MGR interpreter provides.
+    mgr_module_path=$(ceph-mgr --show-config-value mgr_module_path 2>/dev/null)
+    mgr_release=$(ceph-mgr --version 2>/dev/null | awk '/^ceph version / {print $3; exit}')
+    python3 - "$mgr_module_path" "$mgr_release" "$@" <<'MGR' || failed=1
+import ast
+import os
+from pathlib import Path
+import re
+import subprocess
+import sys
+
+# Observed with `ceph mgr module ls` on a MON of each catalogued release
+# (Squid 19.2.5, Tentacle 20.2.4 and Umbrella 21.2.0), keyed by major release.
+ALWAYS_ON = dict.fromkeys(('19', '20', '21'), (
+    'balancer', 'crash', 'devicehealth', 'orchestrator', 'pg_autoscaler', 'progress',
+    'rbd_support', 'status', 'telemetry', 'volumes'))
+BASELINE = ('volumes', 'rbd_support', 'mirroring', 'snap_schedule')
+# Files a module needs besides Python, checked only when it is selected.
+ASSETS = {'dashboard': ('frontend/dist',)}
+# Provided by the embedded MGR interpreter, not by an importable file.
+EMBEDDED = {'ceph_module'}
+NAME = re.compile(r'[A-Za-z_][A-Za-z0-9_]*\Z')
+failed = False
+
+
+def result(name, passed, kind, detail=''):
+    global failed
+    if detail:
+        print(detail)
+    print('CHECK\t%s\t%s' % ('passed' if passed else 'failed', name))
+    if not passed:
+        failed = True
+        print('FAILURE\t%s\t%s' % (kind, name))
+
+
+def handled(node):
+    """A try whose handlers catch a failed import makes its imports optional."""
+    for handler in node.handlers:
+        if handler.type is None:
+            return True
+        types = handler.type.elts if isinstance(handler.type, ast.Tuple) else [handler.type]
+        if {getattr(t, 'id', getattr(t, 'attr', '')) for t in types} & {
+                'ImportError', 'ModuleNotFoundError', 'Exception', 'BaseException'}:
+            return True
+    return False
+
+
+def environ(node):
+    """Whether an expression reads the environment (os.environ, os.getenv, or
+    the names imported from os)."""
+    return any((isinstance(n, ast.Attribute) and n.attr in ('environ', 'getenv')
+                and isinstance(n.value, ast.Name) and n.value.id == 'os')
+               or (isinstance(n, ast.Name) and n.id in ('environ', 'getenv')) for n in ast.walk(node))
+
+
+def gated(node):
+    """Which branches of an if are type-checking or environment-gated hooks
+    (UNITTEST, COVERAGE_ENABLED): (body, orelse)."""
+    test = node.test
+    if (getattr(test, 'id', None) or getattr(test, 'attr', None)) == 'TYPE_CHECKING':
+        return True, False
+    if isinstance(test, ast.Compare) and len(test.ops) == 1 and environ(test.comparators[0]):
+        if isinstance(test.ops[0], ast.In):
+            return True, False
+        if isinstance(test.ops[0], ast.NotIn):
+            return False, True
+    if environ(test):
+        return True, False
+    return False, False
+
+
+def imports(path):
+    """Top-level names of the absolute imports a file requires."""
+    found = set()
+
+    def visit(node, optional):
+        if isinstance(node, ast.Try) and handled(node):
+            for child in node.body + node.handlers:
+                visit(child, True)
+            for child in node.orelse + node.finalbody:
+                visit(child, optional)
+            return
+        if isinstance(node, ast.If):
+            body, orelse = gated(node)
+            visit(node.test, optional)
+            for child in node.body:
+                visit(child, optional or body)
+            for child in node.orelse:
+                visit(child, optional or orelse)
+            return
+        if not optional:
+            if isinstance(node, ast.Import):
+                found.update(alias.name.split('.')[0] for alias in node.names)
+            elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+                found.add(node.module.split('.')[0])
+        for child in ast.iter_child_nodes(node):
+            visit(child, optional)
+
+    visit(ast.parse(path.read_bytes(), str(path)), False)
+    return found
+
+
+def sources(root, name):
+    """The Python files of an internal name; module test suites are not run."""
+    if (root / (name + '.py')).is_file():
+        return [root / (name + '.py')]
+    def test_file(path):
+        parts = path.relative_to(root / name).parts
+        return (any(part in ('tests', 'test') for part in parts[:-1])
+                or parts[-1].startswith('test_') or parts[-1] == 'conftest.py')
+    return sorted(p for p in (root / name).rglob('*.py') if not test_file(p))
+
+
+def closure(root, name):
+    """Missing internal names and external imports of name and the internal
+    names it imports, transitively."""
+    internal = lambda n: ((root / (n + '.py')).is_file() or (root / n / '__init__.py').is_file()
+                          or (root / n / 'module.py').is_file())
+    seen, external, todo = {name}, set(), [name]
+    while todo:
+        for path in sources(root, todo.pop()):
+            for imported in imports(path):
+                if imported in EMBEDDED or imported in sys.builtin_module_names:
+                    continue
+                if internal(imported):
+                    if imported not in seen:
+                        seen.add(imported)
+                        todo.append(imported)
+                else:
+                    external.add(imported)
+    return external
+
+
+def load(names):
+    """Import external dependencies in a clean interpreter, as the MGR does."""
+    if not names:
+        return []
+    program = ('import importlib, sys\n'
+               'for n in sys.argv[1:]:\n'
+               '    try:\n'
+               '        importlib.import_module(n)\n'
+               '    except Exception as e:\n'
+               '        print("%s: %s: %s" % (n, type(e).__name__, str(e).splitlines()[0] if str(e) else ""))\n')
+    output = subprocess.run([sys.executable, '-I', '-c', program] + sorted(names), cwd='/',
+                            capture_output=True, text=True, timeout=120)
+    lines = [line for line in output.stdout.splitlines() if line]
+    if output.returncode:
+        lines.append('dependency probe exited %d: %s' % (output.returncode, output.stderr.strip()[-500:]))
+    return lines
+
+
+root, release, requested = Path(sys.argv[1]), sys.argv[2], sys.argv[3:]
+present = bool(sys.argv[1]) and (root / 'mgr_module.py').is_file()
+result('mgr-module-path', present, 'missing_file',
+       '' if present else 'mgr_module_path %r has no mgr_module.py' % sys.argv[1])
+always_on = ALWAYS_ON.get(release.split('.')[0], None)
+result('mgr-baseline-list', always_on is not None, 'quick_failure',
+       '' if always_on is not None else 'no recorded always-on MGR modules for release %r' % release)
+invalid = [name for name in requested if not NAME.match(name)]
+result('mgr-module-names', not invalid, 'quick_failure',
+       '' if not invalid else 'invalid MGR module names: ' + ', '.join(invalid))
+if present:
+    problems = load(closure(root, 'mgr_module'))
+    result('mgr-module-load:mgr_module', not problems, 'loading_failure', '\n'.join(problems))
+    selected = sorted(set(always_on or ()) | set(BASELINE) | {n for n in requested if NAME.match(n)})
+    for name in selected:
+        exists = (root / name / 'module.py').is_file()
+        result('mgr-module:' + name, exists, 'missing_file',
+               '' if exists else 'MGR module %s has no %s' % (name, root / name / 'module.py'))
+        if not exists:
+            continue
+        problems = load(closure(root, name))
+        result('mgr-module-load:' + name, not problems, 'loading_failure',
+               '\n'.join('MGR module %s dependency %s' % (name, line) for line in problems))
+        for asset in ASSETS.get(name, ()):
+            path = root / name / asset
+            ok = path.is_dir() and any(path.iterdir())
+            result('mgr-module-assets:' + name, ok, 'missing_file',
+                   '' if ok else 'MGR module %s has no %s' % (name, path))
+    if 'cephadm' in requested:
+        # The cephadm module reads the executable it deploys at load time.
+        option = subprocess.run(['ceph-mgr', '--show-config-value', 'cephadm_path'],
+                                capture_output=True, text=True).stdout.strip()
+        ok = bool(option) and os.path.isfile(option) and os.access(option, os.R_OK)
+        result('mgr-module-assets:cephadm', ok, 'missing_file',
+               '' if ok else 'cephadm_path %r is not a readable file' % option)
+sys.exit(1 if failed else 0)
+MGR
     fi
     binaries=""
     if "$cache"; then binaries="$binaries rbd-mirror ceph-immutable-object-cache"; fi
