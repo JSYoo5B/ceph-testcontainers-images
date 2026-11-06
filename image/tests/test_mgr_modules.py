@@ -461,7 +461,8 @@ class MGRModuleProbeTests(unittest.TestCase):
             self.assertIn("from . import anything: relative import with no parent package", result.stdout)
 
     # Dependencies print banners and warnings on import, on both streams and
-    # below Python's buffers, including lines in the shape of a result record.
+    # below Python's buffers, including lines in the shape of a result record
+    # and bytes that are not UTF-8.
     NOISE = textwrap.dedent("""
         import os, sys
         print("banner of %s" % __name__)
@@ -471,6 +472,8 @@ class MGRModuleProbeTests(unittest.TestCase):
         sys.stderr.flush()
         os.write(1, b"unbuffered stdout\\n")
         os.write(2, b"unbuffered stderr\\n")
+        os.write(1, b"raw stdout \\xff\\n")
+        os.write(2, b"raw stderr of %s \\xff\\n" % __name__.encode())
         """)
 
     def noisy_probe(self, folder, body):
@@ -486,6 +489,11 @@ class MGRModuleProbeTests(unittest.TestCase):
         write(site / "tc_noisy_ok" / "__init__.py", self.NOISE + "def ready():\n    pass\n")
         write(site / "tc_noisy_broken" / "__init__.py", self.NOISE + "import tc_absent_noisy_dependency\n")
         write(site / "tc_noisy_exit" / "__init__.py", self.NOISE + "os._exit(0)\n")
+        write(site / "tc_noisy_crash" / "__init__.py", self.NOISE + "os._exit(3)\n")
+        # An exception message with an undecodable file name, as the import
+        # system builds it from bytes that are not UTF-8.
+        write(site / "tc_noisy_undecodable" / "__init__.py", self.NOISE +
+              "raise ImportError('cannot open ' + b'lib\\xff.so'.decode('utf-8', 'surrogateescape'))\n")
         write(root / "tc_noisy" / "module.py", body)
         return self.run_probe(root, requested=["tc_noisy"], python=python)
 
@@ -499,17 +507,21 @@ class MGRModuleProbeTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             self.assertEqual(checks["mgr-module-load:tc_noisy"], "passed")
             self.assertNotIn("banner of", result.stdout)
+            self.assertNotIn("raw st", result.stdout)
 
     def test_a_noisy_import_that_fails_is_reported_as_it_fails(self):
         with tempfile.TemporaryDirectory() as folder:
             result, checks, kinds = self.noisy_probe(folder, """
                 import tc_noisy_ok
                 import tc_noisy_broken
+                import tc_noisy_undecodable
                 """)
             self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
             self.assertEqual(kinds["mgr-module-load:tc_noisy"], "loading_failure")
             self.assertIn("MGR module tc_noisy dependency tc_noisy_broken: ModuleNotFoundError: "
                           "No module named 'tc_absent_noisy_dependency'", result.stdout)
+            self.assertIn("MGR module tc_noisy dependency tc_noisy_undecodable: ImportError: "
+                          "cannot open lib\\udcff.so", result.stdout)
             # The noisy dependency that loads is not reported, forged or not.
             self.assertNotIn("dependency tc_noisy_ok", result.stdout)
             self.assertNotIn("forged by the import", result.stdout)
@@ -522,6 +534,17 @@ class MGRModuleProbeTests(unittest.TestCase):
             self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
             self.assertEqual(kinds["mgr-module-load:tc_noisy"], "loading_failure")
             self.assertIn("dependency probe exited 0 without a result: warning from tc_noisy_exit", result.stdout)
+            self.assertIn("raw stderr of tc_noisy_exit \\xff", result.stdout)
+
+    def test_a_probe_that_crashes_reports_its_undecodable_diagnostic(self):
+        with tempfile.TemporaryDirectory() as folder:
+            result, checks, kinds = self.noisy_probe(folder, "import tc_noisy_crash\n")
+            self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+            self.assertEqual(kinds["mgr-module-load:tc_noisy"], "loading_failure")
+            self.assertIn("dependency probe exited 3: warning from tc_noisy_crash", result.stdout)
+            self.assertIn("raw stderr of tc_noisy_crash \\xff", result.stdout)
+            # The crash is reported on the module that needs the dependency.
+            self.assertEqual(checks["mgr-module-load:volumes"], "failed")
 
     def test_selected_module_assets_and_invalid_names(self):
         with tempfile.TemporaryDirectory() as folder:

@@ -169,7 +169,7 @@ with tempfile.TemporaryDirectory(dir=sys.argv[1]) as directory:
     root = Path(directory)
     osdmap, exported, text, compiled, restored = (root/name for name in ('osdmap', 'exported', 'crush.txt', 'compiled', 'restored'))
     def run(*args):
-        return subprocess.run(args, check=True, capture_output=True, text=True, timeout=30).stdout
+        return subprocess.run(args, check=True, capture_output=True, text=True, errors='backslashreplace', timeout=30).stdout
     run('osdmaptool', str(osdmap), '--createsimple', '2')
     printed = run('osdmaptool', str(osdmap), '--print')
     assert 'max_osd 2' in printed.splitlines(), 'synthetic OSD map lost its device limit: '+printed
@@ -248,7 +248,7 @@ for name, (fallback, symbols) in libraries.items():
 if sys.argv[1] in ('all','rbd-aux'):
     config_program = 'ceph-conf' if sys.argv[1] == 'rbd-aux' else 'ceph-mgr'
     plugin_dir = subprocess.run([config_program, '--show-config-value', 'plugin_dir'],
-                                capture_output=True, text=True).stdout.strip()
+                                capture_output=True, text=True, errors='backslashreplace').stdout.strip()
     plugin = os.path.join(plugin_dir, 'librbd', 'libceph_librbd_parent_cache.so')
     present = bool(plugin_dir) and os.path.isfile(plugin)
     result('library-present:rbd-parent-cache', present, 'missing_file')
@@ -273,7 +273,7 @@ if sys.argv[1] != 'rbd-aux':
         result('python-client-features', False, 'loading_failure')
     else:
         result('python-client-features', True, 'loading_failure')
-    help_output = subprocess.run(['rados', '--help'], capture_output=True, text=True)
+    help_output = subprocess.run(['rados', '--help'], capture_output=True, text=True, errors='backslashreplace')
     result('rados-striper-option', help_output.returncode == 0 and '--striper' in help_output.stdout,
            'unsupported_feature')
 sys.exit(1 if failed else 0)
@@ -665,8 +665,9 @@ def load(names):
     report of a crashed probe. `from module import name` passes when name is
     an attribute of module or an importable submodule, as the import
     statement resolves it, and otherwise raises ImportError as it does.
-    Imported modules may print anything: the results come back as JSON in a
-    file of their own, and the probe's stdout is discarded."""
+    Imported modules may print anything, in any encoding: the results come
+    back as JSON in a file of their own, the probe's stdout is discarded and
+    undecodable bytes of its stderr and of failure reports are escaped."""
     if not names:
         return {}, None
     program = ('import importlib, json, os, sys\n'
@@ -685,14 +686,15 @@ def load(names):
                '                raise ImportError("cannot import name %r from %r" % (name, module)) from None\n'
                '    except Exception as e:\n'
                '        shown = "from %s import %s" % (module, name) if name else module\n'
-               '        failures[n] = [type(e).__name__, "%s: %s: %s" % (\n'
-               '            shown, type(e).__name__, str(e).splitlines()[0] if str(e) else "")]\n'
+               '        report = "%s: %s: %s" % (shown, type(e).__name__, str(e).splitlines()[0] if str(e) else "")\n'
+               '        # A message may carry undecodable bytes of a file name.\n'
+               '        failures[n] = [type(e).__name__, report.encode("ascii", "backslashreplace").decode()]\n'
                'json.dump({"failures": failures}, channel)\n'
                'channel.close()\n')
     with tempfile.TemporaryFile() as channel:
         output = subprocess.run([sys.executable, '-I', '-c', program, str(channel.fileno())] + sorted(names),
                                 cwd='/', stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                                stderr=subprocess.PIPE, text=True, timeout=120, pass_fds=(channel.fileno(),))
+                                stderr=subprocess.PIPE, text=True, errors='backslashreplace', timeout=120, pass_fds=(channel.fileno(),))
         channel.seek(0)
         written = channel.read()
     try:
@@ -814,7 +816,7 @@ if present:
     if 'cephadm' in requested:
         # The cephadm module reads the executable it deploys at load time.
         option = subprocess.run(['ceph-mgr', '--show-config-value', 'cephadm_path'],
-                                capture_output=True, text=True).stdout.strip()
+                                capture_output=True, text=True, errors='backslashreplace').stdout.strip()
         ok = bool(option) and os.path.isfile(option) and os.access(option, os.R_OK)
         result('mgr-module-assets:cephadm', ok, 'missing_file',
                '' if ok else 'cephadm_path %r is not a readable file' % option)
