@@ -188,7 +188,7 @@ def probe_image(role, image, args, output):
             + requested)
         result = subprocess.run(["docker", "start", "--attach", "--interactive", container],
                                 input=(HERE / "check-runtime.sh").read_text(), capture_output=True,
-                                text=True, timeout=args.probe_timeout)
+                                text=True, errors="backslashreplace", timeout=args.probe_timeout)
         log = output / (role + ".log")
         log.write_text(result.stdout + result.stderr)
         # Preserve all failed check names even if no binary could report a version.
