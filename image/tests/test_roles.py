@@ -54,7 +54,11 @@ class RoleSelectionTests(unittest.TestCase):
         self.assertNotIn('rbd-aux',contract.required(['rbd-backup']))
 
     def test_publication_uses_the_default_role_tags(self):
-        self.assertEqual(publish.active_roles(),contract.ROLES+('all',))
+        self.assertEqual(publish.active_roles('debian'),contract.ROLES+('all',))
+        self.assertEqual(publish.active_roles('ubuntu'),contract.ROLES+('all',))
+        self.assertEqual(publish.active_roles('official'),contract.ROLES+('all','mgr-modules'))
+        self.assertEqual(publish.release_tag('20.2.4','official','mgr-modules'),
+                         publish.REGISTRY+':official-20.2.4-mgr-modules')
         self.assertEqual(publish.release_tag('19.2.5','official','all'),publish.REGISTRY+':official-19.2.5-all')
 
 class VersionDiagnosticsTests(unittest.TestCase):

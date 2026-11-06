@@ -20,6 +20,9 @@ VARIANTS = ("official", "debian", "ubuntu")
 DISTRIBUTIONS = ("debian", "ubuntu")
 ARCHITECTURES = ("amd64", "arm64")
 ROLES = ("essential", "client", "cephfs", "rbd-aux", "rgw", "all")
+# Optional roles, published only for the listed variants: mgr-modules is
+# extracted from the official image's MGR module bundle.
+OPTIONAL_ROLES = {"mgr-modules": ("official",)}
 RUNNERS = {"amd64": "ubuntu-24.04", "arm64": "ubuntu-24.04-arm"}
 CATALOGUE = Path(__file__).with_name("releases.json")
 INVENTORY = Path(__file__).resolve().parents[1] / ".github/ceph-role-images.json"
@@ -121,6 +124,13 @@ def plan(value):
         if (variant, architecture) in available[name]]}}
 
 
+def roles(variant):
+    """The published roles of a variant: the baseline roles, all, then its optional roles."""
+    if variant not in VARIANTS:
+        raise KeyError("Unknown variant " + repr(variant))
+    return ROLES + tuple(role for role, variants in OPTIONAL_ROLES.items() if variant in variants)
+
+
 def build_args(name, distribution):
     """Docker build arguments for one distribution image of a release."""
     if distribution not in DISTRIBUTIONS:
@@ -141,8 +151,21 @@ def published():
     return [name for name in names() if name in recorded]
 
 
+def recorded_roles(name, variant):
+    """The roles whose indexes the digest inventory records for a published
+    release and variant. An optional role is absent until a publication of
+    its release has recorded it."""
+    recorded = set(inventory()[name][variant])
+    expected = roles(variant)
+    if not set(ROLES) <= recorded <= set(expected):
+        raise ValueError("Recorded roles differ from the role contract: " + name + " " + variant)
+    return tuple(role for role in expected if role in recorded)
+
+
 def published_role(name, variant, role):
     release(name)
+    if role not in roles(variant):
+        raise KeyError("Variant " + variant + " publishes no " + role + " role")
     digest = inventory()[name][variant][role]
     if not DIGEST.fullmatch(digest):
         raise ValueError("Invalid published role digest")
@@ -164,7 +187,7 @@ def main(argv=None):
     role = commands.add_parser("role", help="Print an immutable published role reference")
     role.add_argument("release")
     role.add_argument("variant", choices=VARIANTS)
-    role.add_argument("role", choices=ROLES)
+    role.add_argument("role", choices=ROLES + tuple(OPTIONAL_ROLES))
     plan_parser = commands.add_parser("plan", help="Print the releases and native matrix of available cohorts")
     plan_parser.add_argument("--releases", default=DEFAULT, help="all or comma-separated catalogued releases")
     plan_parser.add_argument("--github-output", type=Path)
