@@ -299,6 +299,7 @@ PY
     mgr_release=$(ceph-mgr --version 2>/dev/null | awk '/^ceph version / {print $3; exit}')
     python3 - "$mgr_module_path" "$mgr_release" "$@" <<'MGR' || failed=1
 import ast
+import operator
 import os
 from pathlib import Path
 import re
@@ -349,10 +350,37 @@ def environ(node):
                or (isinstance(n, ast.Name) and n.id in ('environ', 'getenv')) for n in ast.walk(node))
 
 
+COMPARE = {ast.Lt: operator.lt, ast.LtE: operator.le, ast.Gt: operator.gt, ast.GtE: operator.ge,
+           ast.Eq: operator.eq, ast.NotEq: operator.ne}
+
+
+def version_gate(test):
+    """The value of a `sys.version_info <op> (x, y)` test for this
+    interpreter, which is the MGR's, or None for any other test."""
+    if not (isinstance(test, ast.Compare) and len(test.ops) == 1 and type(test.ops[0]) in COMPARE):
+        return None
+    left = test.left
+    if not ((isinstance(left, ast.Attribute) and left.attr == 'version_info'
+             and isinstance(left.value, ast.Name) and left.value.id == 'sys')
+            or (isinstance(left, ast.Name) and left.id == 'version_info')):
+        return None
+    try:
+        bound = ast.literal_eval(test.comparators[0])
+    except ValueError:
+        return None
+    if not (isinstance(bound, tuple) and all(isinstance(part, int) for part in bound)):
+        return None
+    return COMPARE[type(test.ops[0])](tuple(sys.version_info), bound)
+
+
 def gated(node):
     """Which branches of an if are type-checking or environment-gated hooks
-    (UNITTEST, COVERAGE_ENABLED): (body, orelse)."""
+    (UNITTEST, COVERAGE_ENABLED), or Python-version branches this interpreter
+    never takes: (body, orelse)."""
     test = node.test
+    taken = version_gate(test)
+    if taken is not None:
+        return not taken, taken
     if (getattr(test, 'id', None) or getattr(test, 'attr', None)) == 'TYPE_CHECKING':
         return True, False
     if isinstance(test, ast.Compare) and len(test.ops) == 1 and environ(test.comparators[0]):

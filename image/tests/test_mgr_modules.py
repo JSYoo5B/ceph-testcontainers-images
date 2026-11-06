@@ -194,6 +194,38 @@ class MGRModuleProbeTests(unittest.TestCase):
                 self.assertEqual((result.returncode, status), (1, "failed"), body)
                 self.assertIn("MGR module tc_dotted dependency " + shown, result.stdout)
 
+    def test_a_python_version_branch_not_taken_is_not_required(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            module_tree(root)
+            # The shapes of the release modules (mgr_util, smb): the branch
+            # for another Python version imports names this one lacks.
+            result, status = self.dotted_probe(root, """
+                import sys
+                from sys import version_info
+                if sys.version_info >= (3, 3):
+                    from threading import Timer
+                else:
+                    from threading import _Timer as Timer
+                if sys.version_info < (3, 0):
+                    from tc_absent_python2 import name
+                if version_info >= (99, 0):
+                    from typing import tc_absent_future_name
+                elif sys.version_info >= (3, 0):
+                    import json
+                """)
+            self.assertEqual((result.returncode, status), (0, "passed"), result.stdout)
+            # The branch this interpreter takes stays required.
+            result, status = self.dotted_probe(root, """
+                import sys
+                if sys.version_info >= (3, 0):
+                    from threading import tc_absent_name
+                else:
+                    import json
+                """)
+            self.assertEqual((result.returncode, status), (1, "failed"))
+            self.assertIn("from threading import tc_absent_name", result.stdout)
+
     def test_a_dotted_internal_import_needs_its_file(self):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
