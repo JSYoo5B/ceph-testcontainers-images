@@ -347,6 +347,76 @@ class MGRModuleProbeTests(unittest.TestCase):
                 for line in shown:
                     self.assertIn("MGR module tc_dotted dependency " + line, result.stdout, body)
 
+    def test_a_handler_that_cannot_complete_does_not_recover_the_import(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            module_tree(root)
+            for body in (
+                    # A genuine optional fallback completes, so the import is recovered.
+                    "import logging\ntry:\n    import tc_fast\nexcept ImportError:\n"
+                    "    logging.warning('no tc_fast')\n    tc_fast = None\n",
+                    # A conditional raise: one path through the handler completes.
+                    "import os\ntry:\n    import tc_fast\nexcept ImportError:\n"
+                    "    if os.getpid() == 0:\n        raise\n    tc_fast = None\n",
+                    "import os\ntry:\n    import tc_fast\nexcept ImportError as e:\n"
+                    "    if os.getpid() == 0:\n        raise RuntimeError('x') from e\n    else:\n        tc_fast = None\n",
+                    # A raise in a nested function does not run when the handler does.
+                    "try:\n    import tc_fast\nexcept ImportError:\n    def fail():\n        raise\n",
+                    # A handler that catches its own raise completes.
+                    "try:\n    import tc_fast\nexcept ImportError:\n    try:\n        raise KeyError()\n"
+                    "    except KeyError:\n        tc_fast = None\n",
+                    # contextlib.suppress swallows the raise.
+                    "import contextlib\ntry:\n    import tc_fast\nexcept ImportError:\n"
+                    "    with contextlib.suppress(RuntimeError):\n        raise RuntimeError('x')\n",
+                    # The raise in a branch for another Python version is never taken.
+                    "import sys\ntry:\n    import tc_fast\nexcept ImportError:\n"
+                    "    if sys.version_info < (3, 0):\n        raise\n    tc_fast = None\n",
+                    # An outer handler recovers what an inner one re-raises.
+                    "try:\n    try:\n        import tc_fast\n    except ImportError:\n        raise\n"
+                    "except ImportError:\n    tc_fast = None\n",
+                    "try:\n    try:\n        import tc_fast\n    except ImportError as e:\n"
+                    "        raise ImportError('wrapped') from e\nexcept ImportError:\n    tc_fast = None\n"):
+                result, status = self.dotted_probe(root, body)
+                self.assertEqual((result.returncode, status), (0, "passed"), body + result.stdout)
+            missing = "MGR module tc_dotted dependency tc_missing_first: ModuleNotFoundError"
+            for body, shown in (
+                    # A bare re-raise propagates the failed import.
+                    ("try:\n    import tc_missing_first\nexcept ImportError:\n    raise\n",
+                     "tc_dotted/module.py:3: the handler re-raises"),
+                    # Also after logging.
+                    ("import logging\ntry:\n    import tc_missing_first\nexcept ImportError:\n"
+                     "    logging.error('tc_missing_first is required')\n    raise\n",
+                     "tc_dotted/module.py:4: the handler re-raises"),
+                    # Re-raising the bound exception.
+                    ("try:\n    import tc_missing_first\nexcept ImportError as e:\n    raise e\n",
+                     "tc_dotted/module.py:3: the handler re-raises"),
+                    # A different exception, with or without a cause.
+                    ("try:\n    import tc_missing_first\nexcept ImportError:\n    raise RuntimeError('required')\n",
+                     "tc_dotted/module.py:3: the handler raises RuntimeError"),
+                    ("try:\n    import tc_missing_first\nexcept ImportError as e:\n"
+                     "    raise RuntimeError('required') from e\n",
+                     "tc_dotted/module.py:3: the handler raises RuntimeError"),
+                    # Every branch of the handler raises.
+                    ("import os\ntry:\n    import tc_missing_first\nexcept ImportError:\n"
+                     "    if os.getpid():\n        raise\n    else:\n        raise KeyError()\n",
+                     "tc_dotted/module.py:4: the handler re-raises"),
+                    # Other unconditional exits.
+                    ("import sys\ntry:\n    import tc_missing_first\nexcept ImportError:\n    sys.exit(1)\n",
+                     "tc_dotted/module.py:4: the handler raises SystemExit"),
+                    ("import os\ntry:\n    import tc_missing_first\nexcept ImportError:\n    os._exit(1)\n",
+                     "tc_dotted/module.py:4: the handler raises SystemExit"),
+                    ("try:\n    import tc_missing_first\nexcept ImportError:\n    assert False, 'required'\n",
+                     "tc_dotted/module.py:3: the handler raises AssertionError"),
+                    # A re-raised ImportError is still caught by an outer ImportError
+                    # handler, but RuntimeError is not.
+                    ("try:\n    try:\n        import tc_missing_first\n    except ImportError as e:\n"
+                     "        raise RuntimeError('x') from e\nexcept ImportError:\n    tc_missing_first = None\n",
+                     "tc_dotted/module.py:4: the handler raises RuntimeError")):
+                result, status = self.dotted_probe(root, body)
+                self.assertEqual((result.returncode, status), (1, "failed"), body + result.stdout)
+                self.assertIn(missing, result.stdout, body)
+                self.assertIn("MGR module tc_dotted dependency " + shown, result.stdout, body)
+
     def relative_probe(self, root, body):
         write(root / "tc_rel" / "module.py", body + "class Module:\n    pass\n")
         result, checks, kinds = self.run_probe(root, requested=["tc_rel"])

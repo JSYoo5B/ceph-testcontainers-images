@@ -334,8 +334,81 @@ def result(name, passed, kind, detail=''):
 # module raises ModuleNotFoundError, a missing name ImportError, and an error
 # while a found module runs only Exception and BaseException catch.
 CATCHES = {'ModuleNotFoundError': {'ModuleNotFoundError', 'ImportError', 'Exception', 'BaseException'},
-           'ImportError': {'ImportError', 'Exception', 'BaseException'}}
+           'ImportError': {'ImportError', 'Exception', 'BaseException'},
+           'SystemExit': {'SystemExit', 'BaseException'}}
 TRY = tuple(t for t in (ast.Try, getattr(ast, 'TryStar', None)) if t)
+# Calls that end the interpreter: sys.exit raises SystemExit, and os._exit
+# and os.abort end the process, which the MGR import does not survive either.
+EXITS = {('sys', 'exit'), ('os', '_exit'), ('os', 'abort'), (None, 'exit'), (None, 'quit')}
+RERAISE = ''
+
+
+def catching(kind):
+    """The handler names that catch an exception of this name."""
+    return CATCHES.get(kind, {kind, 'Exception', 'BaseException'})
+
+
+def name_of(node):
+    if isinstance(node, ast.Call):
+        node = node.func
+    return getattr(node, 'id', getattr(node, 'attr', None))
+
+
+def raised(node, handler):
+    """The exception a statement unconditionally raises, RERAISE for the
+    exception being handled, or None when the statement can complete."""
+    if isinstance(node, ast.Raise):
+        if node.exc is None or (isinstance(node.exc, ast.Name) and node.exc.id == handler):
+            return RERAISE
+        return name_of(node.exc) or 'Exception'
+    if isinstance(node, ast.Assert):
+        # The MGR does not run optimized, so an assert always runs.
+        try:
+            return None if ast.literal_eval(node.test) else 'AssertionError'
+        except ValueError:
+            return None
+    if isinstance(node, ast.Expr) and isinstance(node.value, ast.Call):
+        func = node.value.func
+        owner = func.value.id if isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name) else None
+        return 'SystemExit' if (owner, name_of(func)) in EXITS else None
+    if isinstance(node, ast.If):
+        body, orelse = gated(node)
+        branches = [b for b, skipped in ((node.body, body), (node.orelse, orelse)) if not skipped]
+        kinds = [exits(branch, handler) for branch in branches]
+        return kinds[0] if kinds and None not in kinds else None
+    if isinstance(node, (ast.With, ast.AsyncWith)):
+        # A context manager may suppress the exception; contextlib.suppress does.
+        if any(name_of(item.context_expr) == 'suppress' for item in node.items):
+            return None
+        return exits(node.body, handler)
+    if isinstance(node, TRY):
+        final = exits(node.finalbody, handler)
+        if final is not None:
+            return final
+        kind = exits(node.body, handler)
+        if kind is None:
+            kind = exits(node.orelse, handler)
+        if kind is None:
+            return None
+        # A handler of the raised exception may complete instead.
+        for h in node.handlers:
+            if (kind == RERAISE or caught(h) & catching(kind)) and exits(h.body, h.name or handler) is None:
+                return None
+        return kind
+    # return, break and continue complete the import without an exception,
+    # and a loop, a match or a nested definition may complete.
+    return None
+
+
+def exits(nodes, handler=None):
+    """The exception a block unconditionally raises, as raised() names it,
+    or None when the block can complete normally: the first statement that
+    cannot complete ends the block."""
+    for node in nodes:
+        kind = raised(node, handler)
+        if kind is not None:
+            return kind
+    return None
 
 
 def caught(handler):
@@ -402,11 +475,21 @@ def requirements(path):
     is an ('external', spec), ('internal', parts, name, shown) or
     ('failure', exception name, report) leaf, a block is ('all', items),
     and a try is ('try', body, handlers, orelse), each handler a
-    (caught names, block) pair. finally always runs, so its imports join
+    (caught names, block, ended) triple, ended saying how a handler that
+    cannot complete normally ends. finally always runs, so its imports join
     the enclosing block."""
     # The package a relative import starts from: the file's directory, as
     # the MGR imports each module directory as a package.
     package = path.relative_to(root).parts[:-1]
+
+    def ended(handler):
+        """How a handler that cannot complete ends, as (exception name or
+        RERAISE, report), or None."""
+        kind = exits(handler.body, handler.name)
+        if kind is None:
+            return None
+        where = '%s:%d' % (path.relative_to(root), handler.lineno)
+        return kind, where + (': the handler re-raises' if kind == RERAISE else ': the handler raises ' + kind)
 
     def block(nodes):
         items = []
@@ -416,8 +499,8 @@ def requirements(path):
 
     def visit(node, out):
         if isinstance(node, TRY):
-            out.append(('try', block(node.body), [(caught(h), block(h.body)) for h in node.handlers],
-                        block(node.orelse)))
+            out.append(('try', block(node.body),
+                        [(caught(h), block(h.body), ended(h)) for h in node.handlers], block(node.orelse)))
             out.extend(block(node.finalbody)[1])
             return
         if isinstance(node, ast.If):
@@ -570,7 +653,7 @@ def leaves(node):
     if node[0] == 'all':
         return [leaf for item in node[1] for leaf in leaves(item)]
     if node[0] == 'try':
-        return leaves(node[1]) + [leaf for _, h in node[2] for leaf in leaves(h)] + leaves(node[3])
+        return leaves(node[1]) + [leaf for _, h, _ in node[2] for leaf in leaves(h)] + leaves(node[3])
     return [node]
 
 
@@ -619,9 +702,10 @@ class Closure:
     """The load failures of internal names with their import closures,
     each an ordered list of (exception name, report): the first is the one
     the import raises. A try loads when its body loads and then its else,
-    or when the first handler that catches the body's failure loads, so a
-    fallback needs one branch that loads, and a handler that only records a
-    missing optional import needs nothing."""
+    or when the first handler that catches the body's failure loads and
+    completes, so a fallback needs one branch that loads, a handler that
+    only records a missing optional import needs nothing, and a handler that
+    re-raises, raises or exits does not recover the import."""
 
     def __init__(self, names):
         self.trees, todo, external = {}, list(names), set()
@@ -653,10 +737,14 @@ class Closure:
             failed = self.evaluate(body)
             if not failed:
                 return self.evaluate(orelse)
-            catching = CATCHES.get(failed[0][0], {'Exception', 'BaseException'})
-            for names, handler in handlers:
-                if names & catching:
+            for names, handler, ended in handlers:
+                if names & catching(failed[0][0]):
                     fallback = self.evaluate(handler)
+                    if ended:
+                        # The handler propagates the failure, or raises its own
+                        # exception, which an enclosing try may still catch.
+                        kind, report = ended
+                        return fallback + [(failed[0][0] if kind == RERAISE else kind, report)] + failed
                     return fallback + failed if fallback else []
             return failed
         if node[0] == 'external':
