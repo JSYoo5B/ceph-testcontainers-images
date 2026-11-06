@@ -67,8 +67,22 @@ class ImageCommandTests(unittest.TestCase):
         self.assertIn('linux/amd64',gate[1])
         self.assertIn(str(Path('output')/'quick'),gate[1])
         self.assertIn('all=ceph-testcontainers:official-20.2.4-all',gate[1])
-        self.assertEqual(set(functional),{'full','rgw-only'})
+        self.assertEqual(set(functional),{'full','rgw-only','mgr-modules'})
         self.assertIn('all=ceph-testcontainers:official-20.2.4-all',functional['full'])
+        # The gate checks mgr-modules; the full topologies keep essential MGRs.
+        self.assertIn('mgr-modules=ceph-testcontainers:official-20.2.4-mgr-modules',gate[1])
+        self.assertFalse(any('mgr-modules=' in item for item in functional['full']))
+        mgr=functional['mgr-modules']
+        self.assertEqual(mgr[mgr.index('--topology')+1],'mgr-modules')
+        self.assertIn('mgr-modules=ceph-testcontainers:official-20.2.4-mgr-modules',mgr)
+        self.assertFalse(any(item.startswith(('all=','rgw=','rbd-aux=')) for item in mgr))
+        # The requirement check requires the packaged inventory.
+        gate,_=ci.commands('20.2.4','official','amd64','full',Path('output'),['dashboard','volumes'])
+        self.assertEqual(gate[1][-4:],['--mgr-module','dashboard','--mgr-module','volumes'])
+        # Distribution variants publish no mgr-modules role.
+        gate,functional=ci.commands('20.2.4','debian','amd64','full',Path('output'))
+        self.assertFalse(any('mgr-modules' in item for item in gate[1]))
+        self.assertEqual(set(functional),{'full','rgw-only'})
         self.assertIn('rgw-multisite',functional['rgw-only'])
         self.assertFalse(any('client=' in item for item in functional['rgw-only']))
         self.assertFalse(any('publish' in item for cmd in (*gate,*functional.values()) for item in cmd))
@@ -77,7 +91,7 @@ class ImageCommandTests(unittest.TestCase):
 class FunctionalAuxiliaryTests(unittest.TestCase):
     """Functional scenarios are recorded, never a gate."""
 
-    def run_full(self, failing=(), raising=(), unstartable=()):
+    def run_full(self, failing=(), raising=(), unstartable=(), no_plan=False):
         import json, tempfile
         from types import SimpleNamespace
         calls=[]
@@ -89,6 +103,10 @@ class FunctionalAuxiliaryTests(unittest.TestCase):
                 raise ci.subprocess.CalledProcessError(1, command)
             if name in unstartable:
                 raise OSError('cannot start')
+            if name=='build' and not no_plan:
+                build=Path(next(item for item in command if item.startswith('ROLE_OUTPUT=')).split('=',1)[1])
+                build.mkdir(parents=True)
+                (build/'plan.json').write_text(json.dumps({'roles':{'mgr-modules':{'mgr_modules':['dashboard','volumes']}}}))
             if output and '--full' in command:
                 output.mkdir(parents=True)
                 status='failed' if name in failing else 'passed'
@@ -108,7 +126,10 @@ class FunctionalAuxiliaryTests(unittest.TestCase):
     def test_full_scope_records_functional_failures_without_failing(self):
         code,summary,calls=self.run_full(failing=('rgw-only',))
         self.assertEqual(code,0)
-        self.assertEqual([check for _,check in calls],[True,True,False,False])
+        self.assertEqual([check for _,check in calls],[True,True,False,False,False])
+        quick=calls[1][0]
+        self.assertEqual(quick[-4:],['--mgr-module','dashboard','--mgr-module','volumes'])
+        self.assertEqual(summary['runs']['mgr-modules']['outcome'],'passed')
         self.assertEqual((summary['status'],summary['gating']),('failed',False))
         rgw=summary['runs']['rgw-only']
         self.assertEqual((rgw['exit_status'],rgw['status'],rgw['outcome']),(1,'failed','failed'))
@@ -123,6 +144,10 @@ class FunctionalAuxiliaryTests(unittest.TestCase):
         self.assertEqual((code,summary['status']),(0,'failed'))
         record=summary['runs']['full']
         self.assertEqual((record['status'],record['outcome'],record['exit_status']),('no_report','failed',None))
+
+    def test_a_build_without_the_mgr_inventory_fails_the_gate(self):
+        with self.assertRaises(FileNotFoundError):
+            self.run_full(no_plan=True)
 
     def test_build_and_quick_check_failures_still_fail(self):
         for gate in ('build','quick'):
