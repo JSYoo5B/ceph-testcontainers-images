@@ -399,10 +399,15 @@ def gated(node):
 
 def requirements(path):
     """What a file needs to load, as a tree in statement order: an import
-    is an ('external', spec) or ('internal', parts, name, shown) leaf, a
-    block is ('all', items), and a try is ('try', body, handlers, orelse),
-    each handler a (caught names, block) pair. finally always runs, so its
-    imports join the enclosing block."""
+    is an ('external', spec), ('internal', parts, name, shown) or
+    ('failure', exception name, report) leaf, a block is ('all', items),
+    and a try is ('try', body, handlers, orelse), each handler a
+    (caught names, block) pair. finally always runs, so its imports join
+    the enclosing block."""
+    # The package a relative import starts from: the file's directory, as
+    # the MGR imports each module directory as a package.
+    package = path.relative_to(root).parts[:-1]
+
     def block(nodes):
         items = []
         for node in nodes:
@@ -425,10 +430,15 @@ def requirements(path):
             return
         if isinstance(node, ast.Import):
             for alias in node.names:
-                out.extend(dependency(alias.name, None))
-        elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+                out.extend(dependency(alias.name, None, 'import ' + alias.name))
+        elif isinstance(node, ast.ImportFrom) and node.level == 0:
             for alias in node.names:
-                out.extend(dependency(node.module, None if alias.name == '*' else alias.name))
+                out.extend(dependency(node.module, None if alias.name == '*' else alias.name,
+                                      shown(node.module, alias.name)))
+        elif isinstance(node, ast.ImportFrom):
+            for alias in node.names:
+                out.append(relative(package, node.level, node.module,
+                                    None if alias.name == '*' else alias.name))
         for child in ast.iter_child_nodes(node):
             visit(child, out)
 
@@ -465,8 +475,84 @@ def located(parts):
             or any(path.parent.glob(path.name + '.*.so')))
 
 
-def dependency(module, name):
-    """The leaves of `import module` (name None) or `from module import name`.
+def shown(module, name):
+    return 'from %s import %s' % (module, name) if name else 'import ' + module
+
+
+def relative(package, level, module, name):
+    """The leaf of `from .module import name` (level dots) in package,
+    resolved as the import statement does. Relative imports stay within
+    their top-level name, so the target is internal."""
+    written = shown('.' * level + (module or ''), name or '*')
+    if not package:
+        return ('failure', 'ImportError', '%s: relative import with no parent package' % written)
+    if level > len(package):
+        return ('failure', 'ImportError', '%s: relative import beyond the top-level package' % written)
+    parts = package[:len(package) - level + 1] + tuple(module.split('.') if module else ())
+    return ('internal', parts, name, written)
+
+
+# Names every module has without binding them.
+MODULE_NAMES = {'__name__', '__file__', '__doc__', '__package__', '__spec__', '__loader__',
+                '__path__', '__builtins__', '__cached__'}
+
+
+def bound(path, cache={}):
+    """The names a module file binds at module level, or None when it may
+    bind any name (a star import, a module __getattr__ or globals())."""
+    if path in cache:
+        return cache[path]
+    names = set(MODULE_NAMES)
+
+    def visit(node):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            names.add(node.name)
+            # Only a global statement binds module names from a nested scope.
+            for inner in ast.walk(node):
+                if isinstance(inner, ast.Global):
+                    names.update(inner.names)
+                elif isinstance(inner, ast.Name) and inner.id == 'globals':
+                    names.add(None)
+            return
+        if isinstance(node, ast.Lambda):
+            return
+        if isinstance(node, ast.Import):
+            names.update(alias.asname or alias.name.split('.')[0] for alias in node.names)
+        elif isinstance(node, ast.ImportFrom):
+            names.update(None if alias.name == '*' else alias.asname or alias.name for alias in node.names)
+        elif isinstance(node, ast.Name) and (isinstance(node.ctx, ast.Store) or node.id == 'globals'):
+            names.add(node.id if isinstance(node.ctx, ast.Store) else None)
+        elif isinstance(node, ast.ExceptHandler) and node.name:
+            names.add(node.name)
+        for child in ast.iter_child_nodes(node):
+            visit(child)
+
+    visit(ast.parse(path.read_bytes(), str(path)))
+    cache[path] = None if None in names or '__getattr__' in names else names
+    return cache[path]
+
+
+def provides(parts, name):
+    """Whether `from <parts> import name` finds name: a submodule, or a name
+    the module binds. A regular package is its __init__.py, a namespace
+    package has only submodules, and an extension module is not parsed."""
+    if located(parts + (name,)):
+        return True
+    path = root.joinpath(*parts)
+    if (path / '__init__.py').is_file():
+        names = bound(path / '__init__.py')
+    elif path.with_name(path.name + '.py').is_file():
+        names = bound(path.with_name(path.name + '.py'))
+    elif path.is_dir():
+        return False
+    else:
+        return True
+    return names is None or name in names
+
+
+def dependency(module, name, written):
+    """The leaves of `import module` or `from module import *` (name None)
+    or of `from module import name`, written as in the source.
     Dotted imports keep their full path: a present parent package does not
     stand in for a missing submodule."""
     top = module.split('.')[0]
@@ -476,7 +562,7 @@ def dependency(module, name):
         # A built-in module always loads; its names still count.
         return [('external', spec(module, name))] if module != top or name else []
     if internal(top):
-        return [('internal', tuple(module.split('.')), name, module)]
+        return [('internal', tuple(module.split('.')), name, written)]
     return [('external', spec(module, name))]
 
 
@@ -575,11 +661,18 @@ class Closure:
             return failed
         if node[0] == 'external':
             return [self.loaded[node[1]]] if node[1] in self.loaded else []
-        _, parts, name, shown = node
+        if node[0] == 'failure':
+            return [node[1:]]
+        _, parts, name, written = node
         # The top-level internal name runs first, then its submodule is found.
         problems = list(self.failures.get(parts[0], ()))
+        dotted = '.'.join(parts)
         if not located(parts):
-            problems.append(('ModuleNotFoundError', '%s: internal module not found under %s' % (shown, root)))
+            problems.append(('ModuleNotFoundError', '%s: internal module %s not found under %s'
+                             % (written, dotted, root)))
+        elif name and not provides(parts, name):
+            problems.append(('ImportError', '%s: internal name %s.%s not found under %s'
+                             % (written, dotted, name, root)))
         return problems
 
     def problems(self, name):

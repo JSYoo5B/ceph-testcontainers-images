@@ -30,6 +30,8 @@ def module_tree(root):
         import os
         import ceph_module
         from mgr_util import helper
+        class MgrModule:
+            pass
         """)
     write(root / "mgr_util.py", """
         import os
@@ -50,6 +52,8 @@ def module_tree(root):
                 import optional_accelerator
             except ImportError:
                 optional_accelerator = None
+            class Module(MgrModule):
+                pass
             """)
         # A module's own test suite is not part of its runtime closure.
         write(root / name / "tests" / "test_module.py", "import pytest_only_in_tests\n")
@@ -232,7 +236,7 @@ class MGRModuleProbeTests(unittest.TestCase):
             module_tree(root)
             write(root / "tc_internal" / "__init__.py")
             write(root / "tc_internal" / "part.py", "import json\n")
-            write(root / "tc_internal" / "sub" / "__init__.py")
+            write(root / "tc_internal" / "sub" / "__init__.py", "anything = None\n")
             result, status = self.dotted_probe(root, """
                 import tc_internal.part
                 from tc_internal.sub import anything
@@ -241,10 +245,16 @@ class MGRModuleProbeTests(unittest.TestCase):
             self.assertEqual((result.returncode, status), (0, "passed"), result.stdout)
             result, status = self.dotted_probe(root, "from tc_internal.tc_missing import anything\n")
             self.assertEqual((result.returncode, status), (1, "failed"))
-            self.assertIn("MGR module tc_dotted dependency tc_internal.tc_missing: internal module not found",
-                          result.stdout)
+            self.assertIn("MGR module tc_dotted dependency from tc_internal.tc_missing import anything: "
+                          "internal module tc_internal.tc_missing not found", result.stdout)
             result, status = self.dotted_probe(root, "import mgr_util.tc_missing\n")
             self.assertEqual((result.returncode, status), (1, "failed"))
+            # A present internal module without the imported name.
+            for body in ("from mgr_util import tc_missing_name\n", "from tc_internal.sub import tc_missing_name\n",
+                         "from tc_internal import tc_missing_name\n"):
+                result, status = self.dotted_probe(root, body)
+                self.assertEqual((result.returncode, status), (1, "failed"), body)
+                self.assertIn(".tc_missing_name not found", result.stdout)
 
     def test_environment_gated_hooks_and_import_fallbacks_are_optional(self):
         with tempfile.TemporaryDirectory() as folder:
@@ -336,6 +346,48 @@ class MGRModuleProbeTests(unittest.TestCase):
                 self.assertEqual((result.returncode, status), (1, "failed"), body + result.stdout)
                 for line in shown:
                     self.assertIn("MGR module tc_dotted dependency " + line, result.stdout, body)
+
+    def relative_probe(self, root, body):
+        write(root / "tc_rel" / "module.py", body + "class Module:\n    pass\n")
+        result, checks, kinds = self.run_probe(root, requested=["tc_rel"])
+        return result, checks["mgr-module-load:tc_rel"]
+
+    def test_an_explicit_relative_import_needs_its_target(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            module_tree(root)
+            write(root / "tc_rel" / "__init__.py", "from .module import Module\n")
+            write(root / "tc_rel" / "helper.py", "import json\ndef read():\n    pass\n")
+            write(root / "tc_rel" / "sub" / "__init__.py", "from .. import helper\nVALUE = 1\n")
+            write(root / "tc_rel" / "sub" / "leaf.py", "from ..helper import read\n")
+            # Positive controls: a sibling module and its name, the package's
+            # submodules, a name of a subpackage and a parent-relative import.
+            result, status = self.relative_probe(root, """\
+                from .helper import read
+                from . import helper, sub
+                from .sub import VALUE, leaf
+                from .sub.leaf import read as leaf_read
+                """.replace("                ", ""))
+            self.assertEqual((result.returncode, status), (0, "passed"), result.stdout)
+            for body, shown in (
+                    ("from .missing_helper import read\n",
+                     "from .missing_helper import read: internal module tc_rel.missing_helper not found"),
+                    ("from . import missing_helper\n",
+                     "from . import missing_helper: internal name tc_rel.missing_helper not found"),
+                    ("from .helper import tc_missing_name\n",
+                     "from .helper import tc_missing_name: internal name tc_rel.helper.tc_missing_name not found"),
+                    ("from .sub.missing import x\n",
+                     "from .sub.missing import x: internal module tc_rel.sub.missing not found"),
+                    ("from ..pkg import y\n",
+                     "from ..pkg import y: relative import beyond the top-level package")):
+                result, status = self.relative_probe(root, body)
+                self.assertEqual((result.returncode, status), (1, "failed"), body + result.stdout)
+                self.assertIn("MGR module tc_rel dependency " + shown, result.stdout, body)
+            # A module outside a package has no parent for a relative import.
+            write(root / "tc_shared_relative.py", "from . import anything\n")
+            result, status = self.relative_probe(root, "import tc_shared_relative\n")
+            self.assertEqual((result.returncode, status), (1, "failed"))
+            self.assertIn("from . import anything: relative import with no parent package", result.stdout)
 
     def test_selected_module_assets_and_invalid_names(self):
         with tempfile.TemporaryDirectory() as folder:
