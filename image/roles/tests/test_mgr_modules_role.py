@@ -64,7 +64,6 @@ class InventoryTests(unittest.TestCase):
         self.assertEqual(contract.roles("rpm"), contract.ROLES + ("mgr-modules",))
         for kind in ("deb", "apk"):
             self.assertEqual(contract.roles(kind), contract.ROLES)
-        self.assertEqual(contract.roles("rpm", optional=False), contract.ROLES)
         inventory = rpm_inventory()
         self.assertNotIn("mgr-modules", backend.roots("deb", inventory))
         self.assertNotIn("mgr-modules", backend.roots("rpm", {"ceph-mgr": {"files": ["/usr/bin/ceph-mgr"]}}))

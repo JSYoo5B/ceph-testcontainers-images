@@ -27,12 +27,11 @@ OPTIONAL_EXECUTABLES = {"client": {"ceph-dencoder"}, "mgr-modules": {"cephadm"}}
 # (installing it would also add ceph-dencoder and its denc plugins).
 SOURCE_LACKS = {"apk": {"cephfs-journal-tool"}}
 
-def roles(backend, optional=True):
+def roles(backend):
     """The packaging roles of one build: the baseline roles, then the optional
-    roles this backend builds. optional=False leaves the optional roles out,
-    for a source that ships no MGR module inventory."""
-    return ROLES + tuple(role for role, backends in OPTIONAL_ROLES.items()
-                         if optional and backend in backends)
+    roles this backend builds. A build omits an optional role whose source
+    supplies no package roots for it (runtime.configure)."""
+    return ROLES + tuple(role for role, backends in OPTIONAL_ROLES.items() if backend in backends)
 
 
 def executables(role, available, backend=None):
