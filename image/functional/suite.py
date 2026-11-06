@@ -56,6 +56,16 @@ def cluster_lifecycle(cluster):
     cluster.wait_clean()
     same()
     cluster.wait_health_ok()
+    # Which modules the active MGR offers and which cannot run, as evidence of
+    # the MGR image's module inventory; enablement stays the MON's default.
+    modules = cluster.ceph("mgr", "module", "ls")
+    disabled = modules.get("disabled_modules", [])
+    return {"mgr_modules": {
+        "always_on": sorted(modules.get("always_on_modules", [])),
+        "enabled": sorted(modules.get("enabled_modules", [])),
+        "disabled": sorted(entry.get("name") for entry in disabled),
+        "cannot_run": {entry.get("name"): entry.get("error_string", "") for entry in disabled
+                       if not entry.get("can_run", True)}}}
 
 
 def rbd(cluster):

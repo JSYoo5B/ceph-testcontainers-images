@@ -273,7 +273,9 @@ class Cluster:
 
     def start_mgr(self, name="x"):
         keyring = self.auth("mgr." + name, "mon", "allow profile mgr", "osd", "allow *", "mds", "allow *")
-        self.container("mgr-" + name, self.images["essential"], MGR_SCRIPT, env=self.shared_env() + [
+        # The optional mgr-modules image replaces only the MGR process image.
+        image = self.images.get("mgr-modules", self.images["essential"])
+        self.container("mgr-" + name, image, MGR_SCRIPT, env=self.shared_env() + [
             ("TC_ID", name), ("TC_KEYRING", keyring), ("TC_DATA_DIR", "/var/lib/ceph/mgr/ceph-" + name)])
         wait("MGR " + self.name, lambda: self.ceph("mgr", "dump")["available"], timeout=180)
 
