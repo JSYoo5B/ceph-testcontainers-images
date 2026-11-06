@@ -330,16 +330,20 @@ def result(name, passed, kind, detail=''):
         print('FAILURE\t%s\t%s' % (kind, name))
 
 
-def handled(node):
-    """A try whose handlers catch a failed import makes its imports optional."""
-    for handler in node.handlers:
-        if handler.type is None:
-            return True
-        types = handler.type.elts if isinstance(handler.type, ast.Tuple) else [handler.type]
-        if {getattr(t, 'id', getattr(t, 'attr', '')) for t in types} & {
-                'ImportError', 'ModuleNotFoundError', 'Exception', 'BaseException'}:
-            return True
-    return False
+# The exceptions a handler must name to catch a failed import: a missing
+# module raises ModuleNotFoundError, a missing name ImportError, and an error
+# while a found module runs only Exception and BaseException catch.
+CATCHES = {'ModuleNotFoundError': {'ModuleNotFoundError', 'ImportError', 'Exception', 'BaseException'},
+           'ImportError': {'ImportError', 'Exception', 'BaseException'}}
+TRY = tuple(t for t in (ast.Try, getattr(ast, 'TryStar', None)) if t)
+
+
+def caught(handler):
+    """The exception names a handler catches; a bare except catches any."""
+    if handler.type is None:
+        return {'BaseException'}
+    types = handler.type.elts if isinstance(handler.type, ast.Tuple) else [handler.type]
+    return {getattr(t, 'id', getattr(t, 'attr', '')) for t in types}
 
 
 def environ(node):
@@ -393,38 +397,42 @@ def gated(node):
     return False, False
 
 
-def imports(path):
-    """The absolute imports a file requires, as (dotted module, name) pairs:
-    name is None for `import a.b` and `from a.b import *`, and the imported
-    name (an attribute or a submodule) for `from a.b import name`."""
-    found = set()
+def requirements(path):
+    """What a file needs to load, as a tree in statement order: an import
+    is an ('external', spec) or ('internal', parts, name, shown) leaf, a
+    block is ('all', items), and a try is ('try', body, handlers, orelse),
+    each handler a (caught names, block) pair. finally always runs, so its
+    imports join the enclosing block."""
+    def block(nodes):
+        items = []
+        for node in nodes:
+            visit(node, items)
+        return ('all', items)
 
-    def visit(node, optional):
-        if isinstance(node, ast.Try) and handled(node):
-            for child in node.body + node.handlers:
-                visit(child, True)
-            for child in node.orelse + node.finalbody:
-                visit(child, optional)
+    def visit(node, out):
+        if isinstance(node, TRY):
+            out.append(('try', block(node.body), [(caught(h), block(h.body)) for h in node.handlers],
+                        block(node.orelse)))
+            out.extend(block(node.finalbody)[1])
             return
         if isinstance(node, ast.If):
             body, orelse = gated(node)
-            visit(node.test, optional)
-            for child in node.body:
-                visit(child, optional or body)
-            for child in node.orelse:
-                visit(child, optional or orelse)
+            visit(node.test, out)
+            if not body:
+                out.extend(block(node.body)[1])
+            if not orelse:
+                out.extend(block(node.orelse)[1])
             return
-        if not optional:
-            if isinstance(node, ast.Import):
-                found.update((alias.name, None) for alias in node.names)
-            elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
-                found.update((node.module, None if alias.name == '*' else alias.name)
-                             for alias in node.names)
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                out.extend(dependency(alias.name, None))
+        elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+            for alias in node.names:
+                out.extend(dependency(node.module, None if alias.name == '*' else alias.name))
         for child in ast.iter_child_nodes(node):
-            visit(child, optional)
+            visit(child, out)
 
-    visit(ast.parse(path.read_bytes(), str(path)), False)
-    return found
+    return block(ast.parse(path.read_bytes(), str(path)).body)
 
 
 def sources(root, name):
@@ -443,70 +451,140 @@ def spec(module, name):
     return module + ':' + name if name else module
 
 
-def closure(root, name):
-    """Missing internal modules and the external imports of name and the
-    internal names it imports, transitively. Dotted imports keep their full
-    path: a present parent package does not stand in for a missing submodule."""
-    internal = lambda n: ((root / (n + '.py')).is_file() or (root / n / '__init__.py').is_file()
-                          or (root / n / 'module.py').is_file())
+def internal(top):
+    return ((root / (top + '.py')).is_file() or (root / top / '__init__.py').is_file()
+            or (root / top / 'module.py').is_file())
 
-    def located(module):
-        # Internal files cannot be imported outside the MGR, so a dotted
-        # internal path is checked on disk (a directory is a namespace package).
-        path = root.joinpath(*module.split('.'))
-        return (path.with_name(path.name + '.py').is_file() or path.is_dir()
-                or any(path.parent.glob(path.name + '.*.so')))
 
-    seen, external, missing, todo = {name}, set(), set(), [name]
-    while todo:
-        for path in sources(root, todo.pop()):
-            for module, imported in imports(path):
-                top = module.split('.')[0]
-                if top in EMBEDDED:
-                    continue
-                if top in sys.builtin_module_names:
-                    # A built-in module always loads; its names still count.
-                    if module != top or imported:
-                        external.add(spec(module, imported))
-                    continue
-                if internal(top):
-                    if not located(module):
-                        missing.add('%s: internal module not found under %s' % (module, root))
-                    if top not in seen:
-                        seen.add(top)
-                        todo.append(top)
-                else:
-                    external.add(spec(module, imported))
-    return external, missing
+def located(parts):
+    """Whether an internal dotted path has a file. Internal files cannot be
+    imported outside the MGR, so the path is checked on disk (a directory is
+    a namespace package)."""
+    path = root.joinpath(*parts)
+    return (path.with_name(path.name + '.py').is_file() or path.is_dir()
+            or any(path.parent.glob(path.name + '.*.so')))
+
+
+def dependency(module, name):
+    """The leaves of `import module` (name None) or `from module import name`.
+    Dotted imports keep their full path: a present parent package does not
+    stand in for a missing submodule."""
+    top = module.split('.')[0]
+    if top in EMBEDDED:
+        return []
+    if top in sys.builtin_module_names:
+        # A built-in module always loads; its names still count.
+        return [('external', spec(module, name))] if module != top or name else []
+    if internal(top):
+        return [('internal', tuple(module.split('.')), name, module)]
+    return [('external', spec(module, name))]
+
+
+def leaves(node):
+    if node[0] == 'all':
+        return [leaf for item in node[1] for leaf in leaves(item)]
+    if node[0] == 'try':
+        return leaves(node[1]) + [leaf for _, h in node[2] for leaf in leaves(h)] + leaves(node[3])
+    return [node]
 
 
 def load(names):
-    """Import external dependencies in a clean interpreter, as the MGR does.
-    `from module import name` passes when name is an attribute of module or
-    an importable submodule, as the import statement resolves it."""
+    """Import external dependencies in a clean interpreter, as the MGR does,
+    and return each failure by spec as (exception name, report), with the
+    report of a crashed probe. `from module import name` passes when name is
+    an attribute of module or an importable submodule, as the import
+    statement resolves it, and otherwise raises ImportError as it does."""
     if not names:
-        return []
+        return {}, None
     program = ('import importlib, sys\n'
                'for n in sys.argv[1:]:\n'
                '    module, _, name = n.partition(":")\n'
                '    try:\n'
                '        loaded = importlib.import_module(module)\n'
                '        if name and not hasattr(loaded, name):\n'
-               '            importlib.import_module(module + "." + name)\n'
+               '            try:\n'
+               '                importlib.import_module(module + "." + name)\n'
+               '            except ModuleNotFoundError as e:\n'
+               '                if e.name != module + "." + name:\n'
+               '                    raise\n'
+               '                raise ImportError("cannot import name %r from %r" % (name, module)) from None\n'
                '    except Exception as e:\n'
                '        shown = "from %s import %s" % (module, name) if name else module\n'
-               '        print("%s: %s: %s" % (shown, type(e).__name__, str(e).splitlines()[0] if str(e) else ""))\n')
+               '        print("%s\\t%s\\t%s: %s: %s" % (n, type(e).__name__, shown, type(e).__name__,\n'
+               '                                       str(e).splitlines()[0] if str(e) else ""))\n')
     output = subprocess.run([sys.executable, '-I', '-c', program] + sorted(names), cwd='/',
                             capture_output=True, text=True, timeout=120)
-    lines = [line for line in output.stdout.splitlines() if line]
+    failures = {}
+    for line in output.stdout.splitlines():
+        name, kind, report = line.split('\t', 2)
+        failures[name] = (kind, report)
+    crash = None
     if output.returncode:
-        lines.append('dependency probe exited %d: %s' % (output.returncode, output.stderr.strip()[-500:]))
-    return lines
+        crash = 'dependency probe exited %d: %s' % (output.returncode, output.stderr.strip()[-500:])
+    return failures, crash
 
 
-def problems_of(name):
-    external, missing = closure(root, name)
-    return sorted(missing) + load(external)
+def unique(items):
+    seen = set()
+    return [item for item in items if not (item in seen or seen.add(item))]
+
+
+class Closure:
+    """The load failures of internal names with their import closures,
+    each an ordered list of (exception name, report): the first is the one
+    the import raises. A try loads when its body loads and then its else,
+    or when the first handler that catches the body's failure loads, so a
+    fallback needs one branch that loads, and a handler that only records a
+    missing optional import needs nothing."""
+
+    def __init__(self, names):
+        self.trees, todo, external = {}, list(names), set()
+        while todo:
+            top = todo.pop()
+            if top in self.trees:
+                continue
+            self.trees[top] = [requirements(path) for path in sources(root, top)]
+            for leaf in (leaf for tree in self.trees[top] for leaf in leaves(tree)):
+                if leaf[0] == 'external':
+                    external.add(leaf[1])
+                elif leaf[0] == 'internal':
+                    todo.append(leaf[1][0])
+        self.loaded, self.crash = load(external)
+        # Internal names import each other in cycles: iterate to a fixed point.
+        self.failures = dict.fromkeys(self.trees, [])
+        for _ in range(len(self.trees) + 1):
+            failures = {top: unique(problem for tree in trees for problem in self.evaluate(tree))
+                        for top, trees in self.trees.items()}
+            if failures == self.failures:
+                break
+            self.failures = failures
+
+    def evaluate(self, node):
+        if node[0] == 'all':
+            return [problem for item in node[1] for problem in self.evaluate(item)]
+        if node[0] == 'try':
+            _, body, handlers, orelse = node
+            failed = self.evaluate(body)
+            if not failed:
+                return self.evaluate(orelse)
+            catching = CATCHES.get(failed[0][0], {'Exception', 'BaseException'})
+            for names, handler in handlers:
+                if names & catching:
+                    fallback = self.evaluate(handler)
+                    return fallback + failed if fallback else []
+            return failed
+        if node[0] == 'external':
+            return [self.loaded[node[1]]] if node[1] in self.loaded else []
+        _, parts, name, shown = node
+        # The top-level internal name runs first, then its submodule is found.
+        problems = list(self.failures.get(parts[0], ()))
+        if not located(parts):
+            problems.append(('ModuleNotFoundError', '%s: internal module not found under %s' % (shown, root)))
+        return problems
+
+    def problems(self, name):
+        found = sorted(report for _, report in self.failures[name])
+        return found + [self.crash] if self.crash else found
 
 
 root, release, requested = Path(sys.argv[1]), sys.argv[2], sys.argv[3:]
@@ -520,16 +598,17 @@ invalid = [name for name in requested if not NAME.match(name)]
 result('mgr-module-names', not invalid, 'quick_failure',
        '' if not invalid else 'invalid MGR module names: ' + ', '.join(invalid))
 if present:
-    problems = problems_of('mgr_module')
-    result('mgr-module-load:mgr_module', not problems, 'loading_failure', '\n'.join(problems))
     selected = sorted(set(always_on or ()) | set(BASELINE) | {n for n in requested if NAME.match(n)})
+    closure = Closure(['mgr_module'] + [name for name in selected if (root / name / 'module.py').is_file()])
+    problems = closure.problems('mgr_module')
+    result('mgr-module-load:mgr_module', not problems, 'loading_failure', '\n'.join(problems))
     for name in selected:
         exists = (root / name / 'module.py').is_file()
         result('mgr-module:' + name, exists, 'missing_file',
                '' if exists else 'MGR module %s has no %s' % (name, root / name / 'module.py'))
         if not exists:
             continue
-        problems = problems_of(name)
+        problems = closure.problems(name)
         result('mgr-module-load:' + name, not problems, 'loading_failure',
                '\n'.join('MGR module %s dependency %s' % (name, line) for line in problems))
         for asset in ASSETS.get(name, ()):

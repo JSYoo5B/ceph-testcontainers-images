@@ -185,11 +185,11 @@ class MGRModuleProbeTests(unittest.TestCase):
                      "from email.tc_missing_submodule import anything: ModuleNotFoundError"),
                     # A present module without that attribute or submodule.
                     ("from email import tc_missing_name\n",
-                     "from email import tc_missing_name: ModuleNotFoundError"),
+                     "from email import tc_missing_name: ImportError"),
                     ("from email.mime.text import tc_missing_name\n",
-                     "from email.mime.text import tc_missing_name: ModuleNotFoundError"),
+                     "from email.mime.text import tc_missing_name: ImportError"),
                     ("from sys import tc_missing_name\n",
-                     "from sys import tc_missing_name: ModuleNotFoundError")):
+                     "from sys import tc_missing_name: ImportError")):
                 result, status = self.dotted_probe(root, body)
                 self.assertEqual((result.returncode, status), (1, "failed"), body)
                 self.assertIn("MGR module tc_dotted dependency " + shown, result.stdout)
@@ -280,6 +280,62 @@ class MGRModuleProbeTests(unittest.TestCase):
                 """)
             result, checks, _ = self.run_probe(root, requested=["tc_hooks"])
             self.assertEqual(checks["mgr-module-load:tc_hooks"], "failed")
+
+    def test_an_import_fallback_needs_one_branch_that_loads(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            module_tree(root)
+            for body in (
+                    # An optional accelerator without another required import.
+                    "try:\n    import tc_fast\nexcept ImportError:\n    tc_fast = None\n",
+                    "try:\n    import tc_fast\nexcept ImportError:\n    pass\n",
+                    "try:\n    import tc_fast\nexcept ModuleNotFoundError:\n    tc_fast = None\n",
+                    "try:\n    import tc_fast\nexcept Exception:\n    tc_fast = None\n",
+                    "try:\n    import tc_fast\nexcept:\n    tc_fast = None\n",
+                    # Either branch of a fallback may be the one that loads.
+                    "try:\n    import tc_missing_first\nexcept ImportError:\n    import json\n",
+                    "try:\n    import json\nexcept ImportError:\n    import tc_missing_fallback\n",
+                    # The first handler that catches the failure runs.
+                    "try:\n    import tc_missing\nexcept KeyError:\n    import tc_never\n"
+                    "except (AttributeError, ImportError):\n    import json\n",
+                    # A nested fallback that loads satisfies the outer try.
+                    "try:\n    try:\n        import tc_a\n    except ImportError:\n        import json\n"
+                    "except ImportError:\n    import tc_c\n",
+                    # else runs only after the body loaded.
+                    "try:\n    import tc_missing\nexcept ImportError:\n    tc_missing = None\n"
+                    "else:\n    import tc_never_run\n",
+                    # A version branch not taken inside a fallback.
+                    "import sys\ntry:\n    if sys.version_info < (3, 0):\n        import tc_python2\n"
+                    "    else:\n        import json\nexcept ImportError:\n    import tc_never\n"):
+                result, status = self.dotted_probe(root, body)
+                self.assertEqual((result.returncode, status), (0, "passed"), body + result.stdout)
+            for body, shown in (
+                    # Neither branch of the fallback loads.
+                    ("try:\n    import tc_missing_first\nexcept ImportError:\n    import tc_missing_fallback\n",
+                     ("tc_missing_first: ModuleNotFoundError", "tc_missing_fallback: ModuleNotFoundError")),
+                    # The handler that runs fails, though a later one would load.
+                    ("try:\n    import tc_missing\nexcept ModuleNotFoundError:\n    import tc_missing_fallback\n"
+                     "except ImportError:\n    import json\n", ("tc_missing_fallback: ModuleNotFoundError",)),
+                    # Nested fallbacks that all fail.
+                    ("try:\n    try:\n        import tc_a\n    except ImportError:\n        import tc_b\n"
+                     "except ImportError:\n    import tc_c\n", ("tc_c: ModuleNotFoundError",)),
+                    # else runs after the body loaded; finally always runs.
+                    ("try:\n    import json\nexcept ImportError:\n    json = None\nelse:\n    import tc_missing_after\n",
+                     ("tc_missing_after: ModuleNotFoundError",)),
+                    ("try:\n    import tc_fast\nexcept ImportError:\n    tc_fast = None\n"
+                     "finally:\n    import tc_missing_final\n", ("tc_missing_final: ModuleNotFoundError",)),
+                    # A handler that does not catch the failure.
+                    ("try:\n    import tc_missing\nexcept KeyError:\n    pass\n", ("tc_missing: ModuleNotFoundError",)),
+                    ("try:\n    from json import tc_missing_name\nexcept ModuleNotFoundError:\n    tc_missing_name = None\n",
+                     ("from json import tc_missing_name: ImportError",)),
+                    # The version branch taken inside a fallback stays one branch.
+                    ("import sys\ntry:\n    if sys.version_info >= (3, 0):\n        import tc_missing_a\n"
+                     "    else:\n        import json\nexcept ImportError:\n    import tc_missing_b\n",
+                     ("tc_missing_a: ModuleNotFoundError", "tc_missing_b: ModuleNotFoundError"))):
+                result, status = self.dotted_probe(root, body)
+                self.assertEqual((result.returncode, status), (1, "failed"), body + result.stdout)
+                for line in shown:
+                    self.assertIn("MGR module tc_dotted dependency " + line, result.stdout, body)
 
     def test_selected_module_assets_and_invalid_names(self):
         with tempfile.TemporaryDirectory() as folder:
