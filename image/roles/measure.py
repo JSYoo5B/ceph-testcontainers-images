@@ -39,7 +39,7 @@ def main():
     refs = {}
     for item in args.image:
         role,sep,ref = item.partition('=')
-        if not sep or role not in contract.ROLES+('all',) or role in refs or not ref:
+        if not sep or role not in contract.ROLES+tuple(contract.OPTIONAL_ROLES)+('all',) or role in refs or not ref:
             parser.error('expected distinct ROLE=REF for roles')
         refs[role] = ref
     if args.baseline:
@@ -87,7 +87,9 @@ def main():
                 result['images'][role] = dict(reference=refs[role],image_id=observed['Id'],config_digest=config,docker_size_bytes=observed['Size'],layers=identities)
     scenarios = {'essential-client':('essential','client'),'rbd-aux':('essential','client','rbd-aux'),
                  'cephfs':('essential','client','cephfs'),'rgw':('essential','rgw'),
-                 'complete':contract.ROLES,'all':('all',),'baseline':('baseline',)}
+                 'complete':contract.ROLES,'all':('all',),'baseline':('baseline',),
+                 # MON/OSD on essential with the MGR replaced by mgr-modules.
+                 'mgr-modules':('essential','mgr-modules'),'mgr-modules-only':('mgr-modules',)}
     for name,roles in scenarios.items():
         if not set(roles).issubset(result['images']): continue
         layers = set().union(*(set(result['images'][r]['layers']) for r in roles))

@@ -22,8 +22,11 @@ VARIANTS = ("official", "debian", "ubuntu")
 ARCHITECTURES = ("amd64", "arm64")
 CONTRACT = "roles"
 
-def active_roles():
-    return check.ROLES
+def active_roles(variant):
+    """The roles a variant publishes, as the release catalogue defines them."""
+    return releases.roles(variant)
+
+MGR_MODULES_LABEL = "io.ceph-testcontainers.mgr-modules"
 
 DIGEST = re.compile(r"sha256:[0-9a-f]{64}")
 
@@ -75,14 +78,19 @@ def previous_manifest(tag):
         raise
 
 
-def validate_report(report, architecture, release):
+def validate_report(report, architecture, release, variant):
     """The publication gate: a passing image requirement (quick) check of every
-    contract role on the requested platform and release, by the current checker."""
+    contract role of the variant on the requested platform and release, by the
+    current checker."""
     require(report.get("contract") == CONTRACT, "Image contract differs from publication namespace")
     require(report.get("status") == "passed" and report.get("level") == "quick",
             "Publishing requires a passing image requirement (quick) check")
     require(report.get("preflight") == "passed", "The image requirement check must pass")
-    require(set(report.get("images", {})) == set(active_roles()), "All contract images must be checked")
+    require(set(report.get("images", {})) == set(active_roles(variant)), "All contract images must be checked")
+    if "mgr-modules" in report["images"]:
+        requested = report["images"]["mgr-modules"].get("requested_mgr_modules")
+        require(isinstance(requested, list) and requested and all(isinstance(m, str) for m in requested),
+                "The mgr-modules check must require its packaged MGR modules")
     for image in report["images"].values():
         require(image.get("status") == "passed" and image.get("platform") == "linux/" + architecture,
                 "Every image must pass on the requested platform")
@@ -140,7 +148,7 @@ def stage(args):
             "The catalogue marks this cohort unavailable")
     report_bytes = args.report.read_bytes()
     report = json.loads(report_bytes)
-    validate_report(report, args.architecture, args.release)
+    validate_report(report, args.architecture, args.release, args.variant)
     require(re.fullmatch(r"[0-9a-f]{40}", args.revision) is not None, "Revision must be a full commit SHA")
     require(re.fullmatch(r"[0-9]+-[0-9]+", args.run_id) is not None, "Run identity must include run and attempt")
     prepared = {}
@@ -149,8 +157,14 @@ def stage(args):
         local = json.loads(run(["docker", "image", "inspect", checked["image_id"]]))[0]
         require(local["Id"] == checked["image_id"] and local["Os"] + "/" + local["Architecture"] == checked["platform"],
                 "Local image identity/platform differs from the tested result")
-        require(local.get("Config", {}).get("Labels", {}).get("io.ceph-testcontainers.role") == role,
+        labels = local.get("Config", {}).get("Labels", {}) or {}
+        require(labels.get("io.ceph-testcontainers.role") == role,
                 "Local image role differs from the checked role")
+        if role == "mgr-modules":
+            # Every module the image says it carries must have been checked.
+            packaged = labels.get(MGR_MODULES_LABEL, "").split()
+            require(packaged and set(packaged) <= set(checked.get("requested_mgr_modules") or []),
+                    "The check did not require every packaged MGR module")
         config_digest = local.get("Descriptor", {}).get("annotations", {}).get("config.digest", local["Id"])
         require(DIGEST.fullmatch(config_digest) is not None, "Missing tested image config digest")
         prepared[role] = {"role": role, "architecture": args.architecture,
@@ -189,7 +203,7 @@ def collect_candidates(directory, revision, run_id, release):
                 and candidate.get("run_id") == run_id, "Candidates must pass in the same CI run and revision")
         require(candidate.get("contract") == CONTRACT, "Candidate contract differs")
         require(candidate.get("release") == release, "Candidates must be built for release " + release)
-        require(set(candidate.get("images", {})) == set(active_roles()), "Incomplete candidate roles")
+        require(set(candidate.get("images", {})) == set(active_roles(key[0])), "Incomplete candidate roles")
         for role, entry in candidate["images"].items():
             require(entry.get("role") == role and entry.get("architecture") == key[1], "Candidate role/platform mismatch")
             require(all(isinstance(entry.get(field), str) and DIGEST.fullmatch(entry[field])
@@ -211,7 +225,7 @@ def promote(args):
         list(pool.map(verify_image, entries))
     variants = [v for v in VARIANTS if any(variant == v for variant, _ in candidates)]
     architectures = {v: [a for a in ARCHITECTURES if (v, a) in candidates] for v in variants}
-    tags = [release_tag(args.release, v, r, a) for v in variants for r in active_roles()
+    tags = [release_tag(args.release, v, r, a) for v in variants for r in active_roles(v)
             for a in (*architectures[v], None)]
     with ThreadPoolExecutor(max_workers=6) as pool:
         previous = dict(zip(tags, pool.map(previous_manifest, tags)))
@@ -235,7 +249,7 @@ def promote(args):
             result["platforms"][tag] = entry
             save(args.output, result)
     for variant in variants:
-        for role in active_roles():
+        for role in active_roles(variant):
             tag = release_tag(args.release, variant, role)
             expected = {("linux", a): digests[variant][a][role] for a in architectures[variant]}
             run(["docker", "buildx", "imagetools", "create", "--tag", tag] +
@@ -516,22 +530,24 @@ def health(args):
         release = receipt.get('release')
         require(release in releases.RELEASES, 'Promotion names an uncatalogued release')
         platforms = published_architectures(release)
-        tags = {release_tag(release, v, r): platforms[v] for v in platforms for r in active_roles()}
+        tags = {release_tag(release, v, r): platforms[v] for v in platforms for r in active_roles(v)}
         require(set(receipt.get('indexes', {})) == set(tags), 'Promotion indexes differ from the catalogued cohorts')
         images = receipt.get('images', {})
         require(isinstance(images, dict) and set(images) == set(platforms)
                 and all(isinstance(images[v], dict) and set(images[v]) == set(platforms[v]) for v in platforms),
                 'Promotion images differ from the catalogued cohorts')
-        require(all(isinstance(roles, dict) and set(roles) == set(active_roles())
+        require(all(isinstance(roles, dict) and set(roles) == set(active_roles(v))
                     and all(isinstance(d, str) and DIGEST.fullmatch(d) for d in roles.values())
                     for v in platforms for roles in images[v].values()), 'Promotion image digests are incomplete')
         identities = {release_tag(release, v, r): {('linux', a): images[v][a][r] for a in platforms[v]}
-                      for v in platforms for r in active_roles()}
+                      for v in platforms for r in active_roles(v)}
         check_tags(list(tags), tags, identities)
     else:
+        # The roles the digest inventory pins; an optional role is pinned once
+        # a publication of its release has recorded it.
         tags = {releases.published_role(release, v, r): architectures
                 for release in args.releases for v, architectures in published_architectures(release).items()
-                for r in active_roles()}
+                for r in releases.recorded_roles(release, v)}
         check_tags(list(tags), tags)
 
 

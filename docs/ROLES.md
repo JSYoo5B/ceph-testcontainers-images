@@ -10,9 +10,11 @@ This default production contract follows the execution/dependency analysis in is
 | rbd-aux | rbd-mirror and cache-capable client runtime: rados/rbd CLI/bindings, ceph-immutable-object-cache and the librbd parent_cache plugin, local ceph CLI |
 | rgw | RGW Beast/TLS, radosgw-admin and readlink; ceph/Python runtime for independently invoked per-zone setup containers |
 | all | Union of the five responsibilities |
+| mgr-modules | Optional replacement MGR process image: the baseline MGR of essential plus additional MGR modules; see [The mgr-modules role](#the-mgr-modules-role) |
 
 Common requirements in IMAGE_REQUIREMENTS.md continue to apply. MGR modules
-and OSD classes stay inside their host daemon. Libraries can be shared across
+and OSD classes stay inside their host daemon; the optional mgr-modules image
+carries the MGR daemon with its modules. Libraries can be shared across
 roles. Ordinary RBD needs essential + client, not rbd-aux. The cache daemon,
 plugin and consuming librbd client share the cache client's container/socket.
 
@@ -46,6 +48,167 @@ is reused by separate daemon containers. Optional MGR modules are enabled by
 the consumer when needed. Python in a client cannot supervise commands inside
 another container; custom targets retain explicit capability checks.
 
+## The mgr-modules role
+
+mgr-modules replaces only the MGR process image of a cluster. MON and OSD
+stay on essential, and every other daemon keeps its own role. It is a MGR
+capability superset of essential, not a filesystem superset: it need not
+contain ceph-mon, ceph-osd, ceph-bluestore-tool, ceph-mds, radosgw or the
+mirror daemons. It is optional and is not part of all, so the five roles and
+all are unchanged by it. Its contract has three separate parts.
+
+### Baseline role
+
+Any image used as mgr-modules must provide, like essential's MGR:
+
+- `ceph-mgr` with its ELF and Python runtime, and the local CLI `ceph` and
+  `ceph-conf`. Its release and commit must match the cluster's other role
+  images; the checker refuses a role set with different releases.
+- The launch path the module injects: `/bin/sh`, `mkdir` and `cp` for the
+  MGR script, writable `/etc/ceph`, `/var/lib/ceph`, `/var/run/ceph`,
+  `/var/log/ceph` and `/tmp`, supplied networking and a caller-controlled
+  entrypoint. Readiness runs `test -S` on the admin socket. The other common
+  requirements of [Image Requirements](IMAGE_REQUIREMENTS.md) apply too.
+  Admin socket commands to the MGR run from the control container through
+  the shared run directory, not inside the MGR image.
+- The baseline modules: the release's always-on modules (balancer, crash,
+  devicehealth, orchestrator, pg_autoscaler, progress, rbd_support, status,
+  telemetry and volumes for Squid, Tentacle and Umbrella, as `ceph mgr module
+  ls` reports them on each release's MON) and volumes, rbd_support,
+  mirroring and snap_schedule, each with `mgr_module.py` and the transitive
+  Python and module dependencies. These keep cluster health and the RBD,
+  CephFS and RGW fixtures working when the MGR runs from this image.
+
+The same baseline is the MGR requirement of essential and all.
+
+### Project bundle
+
+The project-built mgr-modules image is extracted from the official image
+only (the `official` variant). It holds every MGR module that the selected
+official release ships, with the runtime closure of the packages that ship
+them: `ceph-mgr`, `ceph-common` and each installed package that owns a module
+directory with a `module.py`. For Tentacle 20.2.4 these are the 29 module
+directories of `ceph-mgr-modules-core` plus dashboard, cephadm,
+diskprediction_local, k8sevents and rook (34 modules from
+`ceph-mgr-modules-core`, `ceph-mgr-dashboard`, `ceph-mgr-cephadm`,
+`ceph-mgr-diskprediction-local`, `ceph-mgr-k8sevents` and `ceph-mgr-rook`). The
+inventory follows the release: Squid 19.2.5 also ships 34 modules, with
+restful and zabbix instead of Tentacle's nvmeof and smb.
+Other Ceph executables are excluded as in every role. The bundle keeps
+`cephadm`, the executable the cephadm module reads at load time
+(`cephadm_path`).
+
+The inventory is derived from the installed packages at extraction and is
+recorded, with the owning package of every module, in the image's
+`image-manifest.json` (`mgr_modules`, `mgr_module_packages`) and in the
+`io.ceph-testcontainers.mgr-modules` label. Package versions, source packages
+and license files are recorded as for every role. The inventory is
+build-specific evidence of what is installed; it is not a claim that every
+module is operational.
+
+The module payload dominates its size. Measured with
+`image/roles/measure.py` for Tentacle 20.2.4 on linux/amd64, mgr-modules is
+280.8 MiB of gzip layers and 838.9 MiB unpacked, against 517.7 MiB and
+1447.8 MiB for the official image and 160.3 MiB and 423.4 MiB for essential.
+A cluster with MON and OSD on essential and MGR on mgr-modules pulls
+302.9 MiB of distinct compressed layers. Dashboard (148 MiB), the
+diskprediction_local models (66 MiB) and SciPy/NumPy are the largest parts.
+
+The Debian, Ubuntu and Alpine variants build no mgr-modules image. Their
+module packages would need their own pinned inputs, and the role's bundle is
+defined by the official release.
+
+### Requested capabilities and custom images
+
+A custom mgr-modules image, such as the official image itself or a consumer
+build with extra modules, needs the baseline and only the modules its tests
+request. It need not carry Dashboard or the project bundle's module list.
+`image/check.py --image mgr-modules=REF --mgr-module NAME` requires each
+named module in addition to the baseline. Any valid module name is accepted,
+including modules unknown to this repository; there is no allowlist. A
+requested module that is absent, or whose dependency closure cannot import,
+fails the check with that module's name, and the check never substitutes
+another image. The project bundle is checked with its complete recorded
+inventory, and publication requires that check.
+
+### Installation is not enablement
+
+Images enable nothing. Which modules are enabled stays in the MON's MgrMap:
+the release defaults plus whatever a caller or a feature extension enables
+and configures itself. Installing Dashboard, Prometheus, alerts, influx,
+telegraf, telemetry reporting, cephadm, rook or k8sevents does not activate
+them, open a port, send data or contact an external service.
+
+### Functional limitations
+
+The quick check proves module files, their Python import closure and
+selected assets (Dashboard's frontend build, the cephadm executable). It does
+not prove that a module works. Modules that need external systems remain
+unsupported by this image alone: cephadm, rook and k8sevents need managed
+hosts or a Kubernetes cluster, and the orchestrator-backed parts of
+Dashboard and nfs need an orchestrator; diskprediction_local needs device
+health data; alerts, influx, telegraf and prometheus need an SMTP, InfluxDB,
+Telegraf or scrape receiver. Module functionality belongs to the
+corresponding feature scenarios of the consumer.
+
+The check requires a module's unconditional imports at their full dotted
+path. `import a.b.c` needs the submodule `a.b.c`, not only the package `a`,
+and `from a.b import c` needs `a.b` and a name `c` that is either an
+attribute of `a.b` or its importable submodule. Imports of the module tree
+itself cannot run outside the MGR, so they are checked on disk: the dotted
+module path needs its file, and an imported name needs a submodule or a
+name the module binds at module level. An explicit relative import is
+resolved from the importing file's package, as the MGR imports each module
+directory as a package: `from .helper import read` in `dashboard/module.py`
+needs `dashboard/helper.py` and its `read`, and a relative import in a
+top-level file or with more dots than the package has fails. A branch for a
+Python version other than the image's interpreter, which the MGR embeds, is
+never taken: `if sys.version_info >= (3, 3):` skips its `else` import of
+`threading._Timer`.
+
+An import fallback needs one branch that loads. A `try` loads when its body
+loads and then its `else`, or when the first handler that catches the
+body's failure loads (`ModuleNotFoundError` for a missing module,
+`ImportError` for a missing name); `finally` always runs. So
+`try: import A` with `except ImportError: import B` needs A or B, while a
+handler that only records a missing optional dependency
+(`except ImportError: A = None`) needs nothing, because the module itself
+then reports that it cannot run.
+
+A handler recovers the import only when it can complete normally. A
+handler whose every path ends in `raise` (bare, `raise e` of the caught
+exception, `raise RuntimeError(...)` or `raise ... from e`), in
+`sys.exit`, `os._exit`, `os.abort`, `exit` or `quit`, or in an
+`assert` of a false constant (the MGR does not run optimized) propagates
+the failure, logging before it or not. Its exception is what an enclosing
+`try` sees: a re-raised or new `ImportError` can still be recovered there,
+a `RuntimeError` only by a handler that catches it. A raise in one branch
+of an `if` whose other branch completes, in a nested function, under
+`contextlib.suppress`, in a branch for another Python version or inside a
+nested `try` whose handler completes leaves the handler recoverable. So
+does `return`, `break` or `continue`, which ends the import without an
+exception. Loops and `match` statements are treated as able to complete,
+and exception subclasses are matched only by the names listed above, so
+`except LookupError` is not taken as catching `KeyError`.
+
+External dependencies are imported in a separate clean interpreter, and an
+imported package may print anything while it loads: a banner, a warning, or
+a line on stdout or stderr that looks like a check result. The interpreter
+returns its results as JSON in a file of its own, its stdout is discarded,
+and the end of its stderr is kept only to explain a crash. Output need not
+be UTF-8: bytes that do not decode, in that stderr or in a failure report
+such as a file name, are shown as backslash escapes (`\xff` or `\udcff`).
+When it ends without writing that result, for example because an imported
+package calls `os._exit(0)`, every `mgr-module-load` check fails with that
+crash.
+
+The official Tentacle
+20.2.4 image ships the influx module without the `influxdb` Python client,
+so in a running MGR influx reports "influxdb python module not found", and
+the project bundle keeps that parity with its source. The cluster-lifecycle
+scenario records such modules (`cannot_run`) as evidence; a consumer that
+needs one supplies an image with its dependency.
+
 ## Building and checking
 
 ```sh
@@ -61,6 +224,16 @@ python3 image/check.py --full \
   --image rbd-aux=ceph-testcontainers:official-19.2.5-rbd-aux \
   --image rgw=ceph-testcontainers:official-19.2.5-rgw \
   --image all=ceph-testcontainers:official-19.2.5-all
+```
+
+The official build also produces `official-<release>-mgr-modules` and checks
+it with `--mgr-module` for every module of its recorded inventory:
+
+```sh
+python3 image/check.py \
+  --image essential=ceph-testcontainers:official-19.2.5-essential \
+  --image mgr-modules=ceph-testcontainers:official-19.2.5-mgr-modules \
+  $(python3 -c 'import json; print(" ".join("--mgr-module " + m for m in json.load(open("artifacts/official-19.2.5-linux-amd64/plan.json"))["roles"]["mgr-modules"]["mgr_modules"]))')
 ```
 
 Installed RPM/deb/APK closures are resolved offline from the complete pinned
@@ -94,13 +267,19 @@ R01–R28 refer in order to IMAGE_REQUIREMENTS.md's component-use table.
 | R13 Python probes | Actual probe runtime | HTTP/S3 and native client probes |
 | R14 parent cache | rbd-aux, effective plugin directory without MGR | Consumer native cache/lease tests; quick loading alone is insufficient |
 | R15 process inspection | essential/client; other runtime only where required | Native command cancellation and process-observer tests |
-| R16–R19 MGR modules | essential | HEALTH_OK, volumes/tasks/mirroring; consumer scheduling/quiesce tests |
+| R16–R19 MGR modules | essential; mgr-modules with its requested modules | HEALTH_OK, volumes/tasks/mirroring; the mgr-modules topology; consumer scheduling/quiesce tests |
 | R20 RBD mirror | rbd-aux; setup in client | rbd-snapshot-mirror; consumer journal/failover/later-daemon tests |
 | R21 CephFS mirror | cephfs; MGR module in essential | cephfs-snapshot-mirror; consumer peer/MGR topology tests |
 | R22 RGW multisite administration | rgw setup runtime | rgw-multisite, independently with no generic client image |
 | R23–R24 OSD/classes/plugins | essential | cluster-lifecycle, hello/lock; consumer compressor/EC operations |
 | R25–R27 RGW/admin/listeners | rgw | rgw-s3; consumer TLS/Swift/STS/admin/host-listener tests |
 | R28 MDS | cephfs | cephfs; consumer standby/replacement/failover tests |
+
+With `--full`, a supplied mgr-modules image adds the `mgr-modules` topology:
+the mixed roles with every MGR started from mgr-modules. `--topology` selects
+topologies. The images workflow runs cluster-lifecycle, rbd and cephfs in
+that topology as auxiliary evidence; cluster-lifecycle records the MGR's
+always-on, enabled and non-runnable modules.
 
 The scenario-to-role manifest in image/roles/contract.py covers all eleven
 existing image scenarios. Selected runs resolve only that scenario union;

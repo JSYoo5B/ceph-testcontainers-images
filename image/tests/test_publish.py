@@ -15,17 +15,23 @@ RELEASE = publish.releases.DEFAULT
 # The catalogue has no Debian arm64 input for this release.
 UNAVAILABLE_RELEASE = "19.2.0"
 ALL_COHORTS = {(v, a) for v in publish.VARIANTS for a in publish.ARCHITECTURES}
+# Every published role name, longest first, to recognize a role in a tag.
+ROLE_NAMES = sorted(set(publish.releases.roles("official")), key=len, reverse=True)
+BASELINE = [r for r in publish.releases.ROLES if r != "all"]
+MGR_LABEL = {"io.ceph-testcontainers.mgr-modules": "dashboard volumes"}
 
 
 def digest(number):
     return "sha256:" + ("%064x" % number)
 
 
-def report(release=RELEASE):
+def report(release=RELEASE, variant="official"):
     """A passing image requirement (quick) report: the publication gate."""
     images = {role: {"image_id": digest(n + 1), "status": "passed", "platform": "linux/arm64",
                      "cleanup": {"status": "passed"}, "versions": {"ceph": {"release": release}}}
-              for n, role in enumerate(publish.check.ROLES)}
+              for n, role in enumerate(publish.active_roles(variant))}
+    if "mgr-modules" in images:
+        images["mgr-modules"]["requested_mgr_modules"] = ["dashboard", "telemetry", "volumes"]
     return {"status": "passed", "level": "quick", "preflight": "passed", "scenarios": "not_requested",
             "contract": "roles", "images": images, "functional": {},
             "contract_sha256": hashlib.sha256((publish.check.HERE / "check-runtime.sh").read_bytes()).hexdigest(),
@@ -38,10 +44,14 @@ def functional_summary(value, status="failed"):
     return {"schema": 1, "status": status, "gating": False, "runs": {
         "full": {"exit_status": 1 if status == "failed" else 0, "status": status, "outcome": status,
                  "report_sha256": "f" * 64, "topologies": {
-                     "mixed": {"status": status, "images": {r: value["images"][r]["image_id"] for r in publish.check.ROLES[:-1]},
+                     "mixed": {"status": status, "images": {r: value["images"][r]["image_id"] for r in BASELINE},
                                "scenarios": {"rgw-multisite": status}},
-                     "all": {"status": status, "images": {r: value["images"]["all"]["image_id"] for r in publish.check.ROLES[:-1]},
-                             "scenarios": {"rgw-multisite": status}}}}}}
+                     "all": {"status": status, "images": {r: value["images"]["all"]["image_id"] for r in BASELINE},
+                             "scenarios": {"rgw-multisite": status}}}},
+        "mgr-modules": {"exit_status": 0, "status": "passed", "outcome": "passed", "topologies": {
+            "mgr-modules": {"status": "passed", "images": {r: value["images"][r]["image_id"]
+                                                           for r in ("essential", "client", "cephfs", "mgr-modules")},
+                            "scenarios": {"cephfs": "passed"}}}}}}
 
 
 def candidates(directory, release=RELEASE, cohorts=ALL_COHORTS):
@@ -51,14 +61,14 @@ def candidates(directory, release=RELEASE, cohorts=ALL_COHORTS):
                      role: {"role": role, "architecture": architecture, "image_id": digest(n + 1),
                             "config_digest": digest(n + 1), "digest": digest(n + 11),
                             "rootfs_diff_ids": [digest(100)]}
-                     for n, role in enumerate(publish.check.ROLES)}}
+                     for n, role in enumerate(publish.active_roles(variant))}}
         publish.save(directory / (variant + "-" + architecture) / "candidate.json", value)
 
 
 class PublicationTests(unittest.TestCase):
     def test_only_a_passing_requirement_check_gates_publication(self):
         good = report()
-        publish.validate_report(good, "arm64", RELEASE)
+        publish.validate_report(good, "arm64", RELEASE, "official")
         bad = []
         for status in ("failed", "running"):
             value = copy.deepcopy(good); value["status"] = status; bad.append(value)
@@ -70,16 +80,20 @@ class PublicationTests(unittest.TestCase):
         value = copy.deepcopy(good); value["images"]["client"]["status"] = "failed"; bad.append(value)
         value = copy.deepcopy(good); value["images"]["essential"]["cleanup"]["status"] = "failed"; bad.append(value)
         value = copy.deepcopy(good); value["contract"] = "other"; bad.append(value)
+        # The official variant publishes mgr-modules, checked for its modules.
+        value = copy.deepcopy(good); del value["images"]["mgr-modules"]; bad.append(value)
+        value = copy.deepcopy(good); value["images"]["mgr-modules"]["requested_mgr_modules"] = []; bad.append(value)
+        value = copy.deepcopy(good); del value["images"]["mgr-modules"]["requested_mgr_modules"]; bad.append(value)
         for value in bad:
             with self.subTest(report=value), self.assertRaises(publish.PublishError):
-                publish.validate_report(value, "arm64", RELEASE)
+                publish.validate_report(value, "arm64", RELEASE, "official")
 
     def test_functional_results_are_not_required_by_the_gate(self):
         value = report()
         value["functional"] = {"mixed": {"status": "failed", "scenarios": {"rgw-multisite": {"status": "failed"}}}}
-        publish.validate_report(value, "arm64", RELEASE)
+        publish.validate_report(value, "arm64", RELEASE, "official")
         value = report(); value["functional_sha256"] = "old"
-        publish.validate_report(value, "arm64", RELEASE)
+        publish.validate_report(value, "arm64", RELEASE, "official")
 
     def test_wrong_platform_release_and_checker_block_publication(self):
         for mutation in (lambda v: v["images"]["essential"].update(platform="linux/amd64"),
@@ -88,10 +102,10 @@ class PublicationTests(unittest.TestCase):
                          lambda v: v.update(contract_sha256="old")):
             value = report(); mutation(value)
             with self.assertRaises(publish.PublishError):
-                publish.validate_report(value, "arm64", RELEASE)
+                publish.validate_report(value, "arm64", RELEASE, "official")
         # A report for the default release cannot publish another release.
         with self.assertRaises(publish.PublishError):
-            publish.validate_report(report(), "arm64", "19.2.5")
+            publish.validate_report(report(), "arm64", "19.2.5", "official")
 
     def test_stage_rejects_failed_report_before_any_docker_command(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -117,7 +131,9 @@ class PublicationTests(unittest.TestCase):
 
     def stage(self, root, value, summary_path):
         local = {i["image_id"]: {"Id": i["image_id"], "Os": "linux", "Architecture": "arm64",
-                 "Config": {"Labels": {"io.ceph-testcontainers.role": role}}, "RootFS": {"Layers": [digest(100)]}}
+                 "Config": {"Labels": dict({"io.ceph-testcontainers.role": role},
+                                           **(MGR_LABEL if role == "mgr-modules" else {}))},
+                 "RootFS": {"Layers": [digest(100)]}}
                  for role, i in value["images"].items()}
         calls = []
         def run(command):
@@ -126,8 +142,8 @@ class PublicationTests(unittest.TestCase):
                 return json.dumps([local[command[-1]]])
             return ""
         def manifest(tag):
-            role = next(role for role in sorted(publish.check.ROLES,key=len,reverse=True) if tag.rsplit("-linux-",1)[0].endswith("-"+role))
-            return {"digest": digest(publish.check.ROLES.index(role) + 11)}
+            role = next(role for role in ROLE_NAMES if tag.rsplit("-linux-",1)[0].endswith("-"+role))
+            return {"digest": digest(publish.active_roles("official").index(role) + 11)}
         args = SimpleNamespace(report=root / "check.json", architecture="arm64", variant="official",
                                release=RELEASE, revision="a" * 40, run_id="123-1", output=root / "candidate.json",
                                functional_summary=summary_path)
@@ -141,12 +157,53 @@ class PublicationTests(unittest.TestCase):
             root = Path(temporary); value = report(); publish.save(root / "check.json", value)
             calls, saved = self.stage(root, value, None)
             tagged = [c[2] for c in calls if c[:2] == ["docker", "tag"]]
-            self.assertEqual(tagged, [value["images"][r]["image_id"] for r in sorted(publish.check.ROLES)])
+            self.assertEqual(tagged, [value["images"][r]["image_id"] for r in sorted(publish.active_roles("official"))])
             self.assertEqual((saved["status"], saved["gate"], saved["functional"]), ("passed", "quick", {"status": "not_recorded"}))
             self.assertEqual(saved["report_sha256"], hashlib.sha256((root / "check.json").read_bytes()).hexdigest())
             for image in saved["images"].values():
                 self.assertEqual(image["config_digest"], image["image_id"])
                 self.assertNotEqual(image["digest"], image["image_id"])
+
+    def test_stage_requires_the_check_to_have_requested_every_packaged_mgr_module(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            for requested in (["dashboard"], ["telemetry", "volumes"]):
+                value = report(); value["images"]["mgr-modules"]["requested_mgr_modules"] = requested
+                publish.save(root / "check.json", value)
+                with self.subTest(requested=requested), \
+                        self.assertRaisesRegex(publish.PublishError, "packaged MGR module"):
+                    self.stage(root, value, None)
+            value = report(); publish.save(root / "check.json", value)
+            with mock.patch.dict(MGR_LABEL, {"io.ceph-testcontainers.mgr-modules": ""}), \
+                    self.assertRaisesRegex(publish.PublishError, "packaged MGR module"):
+                self.stage(root, value, None)
+
+    def test_distributions_publish_no_mgr_modules_role(self):
+        value = report(variant="debian")
+        self.assertNotIn("mgr-modules", value["images"])
+        publish.validate_report(value, "arm64", RELEASE, "debian")
+        with self.assertRaises(publish.PublishError):
+            publish.validate_report(report(), "arm64", RELEASE, "debian")
+        with self.assertRaises(publish.PublishError):
+            publish.validate_report(value, "arm64", RELEASE, "official")
+
+    def test_inventory_health_checks_the_roles_it_records(self):
+        recorded = publish.releases.recorded_roles(RELEASE, "official")
+        self.assertTrue(set(publish.releases.ROLES) <= set(recorded))
+        inventory = {RELEASE: {"official": dict({r: digest(1) for r in publish.releases.ROLES},
+                                                **{"mgr-modules": digest(2)})}}
+        with mock.patch.object(publish.releases, "inventory", return_value=inventory):
+            self.assertEqual(publish.releases.recorded_roles(RELEASE, "official"),
+                             publish.releases.roles("official"))
+            self.assertEqual(publish.releases.published_role(RELEASE, "official", "mgr-modules"),
+                             publish.REGISTRY + "@" + digest(2))
+        for broken in ({r: digest(1) for r in publish.releases.ROLES if r != "rgw"},
+                       dict({r: digest(1) for r in publish.releases.ROLES}, **{"other": digest(3)})):
+            with mock.patch.object(publish.releases, "inventory", return_value={RELEASE: {"official": broken}}), \
+                    self.subTest(roles=sorted(broken)), self.assertRaises(ValueError):
+                publish.releases.recorded_roles(RELEASE, "official")
+        with self.assertRaises(KeyError):
+            publish.releases.published_role(RELEASE, "debian", "mgr-modules")
 
     def test_a_failing_or_unreadable_functional_result_is_recorded_and_does_not_block_staging(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -232,11 +289,14 @@ class PublicationTests(unittest.TestCase):
                     mock.patch.object(publish, "raw_manifest", side_effect=raw), mock.patch.object(publish, "verify_image") as verify, \
                     mock.patch("sys.stdout"):
                 publish.promote(args)
-            self.assertEqual(verify.call_count, 36)
-            self.assertEqual(len(calls), 54)
+            # Official publishes mgr-modules too: 7 roles, the distributions 6.
+            self.assertEqual(verify.call_count, 38)
+            self.assertEqual(len(calls), 57)
             self.assertTrue(all(all('@sha256:' in ref for ref in refs) for refs in observed.values()))
             saved = json.loads(args.output.read_text())
-            self.assertEqual((saved["status"], len(saved["platforms"]), len(saved["indexes"])), ("passed", 36, 18))
+            self.assertEqual((saved["status"], len(saved["platforms"]), len(saved["indexes"])), ("passed", 38, 19))
+            self.assertIn(publish.release_tag(RELEASE, "official", "mgr-modules"), saved["indexes"])
+            self.assertNotIn(publish.release_tag(RELEASE, "debian", "mgr-modules"), saved["indexes"])
             # A failing functional outcome promotes and is carried into the receipt.
             self.assertEqual(saved["functional"]["ubuntu"]["arm64"]["status"], "failed")
             self.assertEqual(saved["functional"]["official"]["amd64"]["status"], "passed")
@@ -256,7 +316,8 @@ class PublicationTests(unittest.TestCase):
 
     def test_health_reports_release_tags_whose_platform_images_were_deleted(self):
         present = {publish.REGISTRY + "@" + digest(n) for n in (1, 2)}
-        indexes = {publish.releases.published_role(RELEASE,v,r) for v in publish.VARIANTS for r in publish.active_roles()}
+        indexes = {publish.releases.published_role(RELEASE,v,r) for v in publish.VARIANTS
+                   for r in publish.releases.recorded_roles(RELEASE,v)}
         def raw(reference):
             if reference not in indexes:
                 if reference not in present:
@@ -311,16 +372,16 @@ class PublicationTests(unittest.TestCase):
             with mock.patch.object(publish, "run", side_effect=run), mock.patch.object(publish, "manifest", side_effect=manifest), \
                     mock.patch.object(publish, "raw_manifest", side_effect=raw), mock.patch.object(publish, "verify_image") as verify:
                 publish.promote(args)
-            self.assertEqual(verify.call_count, 30)
+            self.assertEqual(verify.call_count, 32)
             debian = publish.release_tag(UNAVAILABLE_RELEASE, "debian", "essential")
             self.assertEqual(len(observed[debian]), 1)
             self.assertNotIn(publish.release_tag(UNAVAILABLE_RELEASE, "debian", "essential", "arm64"), observed)
             saved = json.loads(args.output.read_text())
-            self.assertEqual((len(saved["platforms"]), len(saved["indexes"])), (30, 18))
+            self.assertEqual((len(saved["platforms"]), len(saved["indexes"])), (32, 19))
             with mock.patch.object(publish, "check_tags") as checked:
                 publish.health(SimpleNamespace(promotion=args.output))
             tags, architectures, identities = checked.call_args.args
-            self.assertEqual(len(tags), 18)
+            self.assertEqual(len(tags), 19)
             self.assertEqual(architectures[debian], ["amd64"])
             self.assertEqual(architectures[publish.release_tag(UNAVAILABLE_RELEASE, "ubuntu", "all")], ["amd64", "arm64"])
             self.assertEqual(identities[debian], {("linux", "amd64"): saved["images"]["debian"]["amd64"]["essential"]})

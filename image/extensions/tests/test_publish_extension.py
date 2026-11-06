@@ -312,7 +312,7 @@ class ExtensionPublicationTests(unittest.TestCase):
 sys.path.insert(0, sys.argv[1])
 from types import SimpleNamespace
 import publish
-indexes = {publish.releases.published_role(r,v,k) for r in publish.releases.published() for v in publish.VARIANTS for k in publish.active_roles()}
+indexes = {publish.releases.published_role(r,v,k) for r in publish.releases.published() for v in publish.VARIANTS for k in publish.releases.recorded_roles(r,v)}
 publish.raw_manifest = lambda reference: {"config": {}} if reference not in indexes else {"manifests": [
     {"platform": {"os": "linux", "architecture": a}, "digest": "sha256:" + "1" * 64} for a in ("amd64", "arm64")]}
 publish.health(SimpleNamespace(releases=publish.releases.published()))

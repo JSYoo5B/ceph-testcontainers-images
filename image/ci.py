@@ -46,22 +46,47 @@ def preflight(release, variant, architecture, probe=loader_levels):
             raise Ineligible(variant + ' ' + release + ' ' + architecture + ' requires an ' + level + ' CPU')
 
 
-def commands(release, variant, architecture, scope, output):
+# Single-cluster scenarios that exercise the baseline MGR modules (cluster
+# health, rbd_support and volumes) with the MGRs run from mgr-modules.
+MGR_MODULES_SCENARIOS = ('cluster-lifecycle', 'rbd', 'cephfs')
+
+
+def packaged_mgr_modules(output):
+    """The MGR module inventory of the built mgr-modules image, from its plan."""
+    plan = json.loads((output/'build'/'plan.json').read_text())
+    modules = plan['roles'].get('mgr-modules', {}).get('mgr_modules')
+    if not modules:
+        raise RuntimeError('The build recorded no mgr-modules inventory')
+    return modules
+
+
+def commands(release, variant, architecture, scope, output, modules=()):
     """The gate commands, which must succeed, and the functional commands by
-    name, which are only recorded."""
+    name, which are only recorded. modules is the packaged MGR inventory that
+    the requirement check of the mgr-modules image must require."""
     build = ['make', 'role-images', 'VARIANT='+variant, 'CEPH_RELEASE='+release,
              'PLATFORM=linux/'+architecture, 'ROLE_OUTPUT='+str(output/'build')]
     if scope != 'full':
         return [build], {}
-    tags = {role: f'ceph-testcontainers:{variant}-{release}-{role}' for role in releases.ROLES}
+    roles = releases.roles(variant)
+    tags = {role: f'ceph-testcontainers:{variant}-{release}-{role}' for role in roles}
     images = [item for role, reference in tags.items() for item in ('--image', role+'='+reference)]
+    requested = [item for module in modules for item in ('--mgr-module', module)]
     quick = [sys.executable, 'image/check.py', '--platform', 'linux/'+architecture,
-             '--output-dir', str(output/'quick')] + images
+             '--output-dir', str(output/'quick')] + images + requested
+    baseline = [item for role in releases.ROLES for item in ('--image', role+'='+tags[role])]
     functional = {
-        'full': [sys.executable, 'image/check.py', '--full', '--output-dir', str(output/'full')] + images,
+        'full': [sys.executable, 'image/check.py', '--full', '--output-dir', str(output/'full')] + baseline,
         'rgw-only': [sys.executable, 'image/check.py', '--full', '--scenario', 'rgw-multisite',
                      '--image', 'essential='+tags['essential'], '--image', 'rgw='+tags['rgw'],
                      '--output-dir', str(output/'rgw-only')]}
+    if 'mgr-modules' in tags:
+        functional['mgr-modules'] = [
+            sys.executable, 'image/check.py', '--full', '--topology', 'mgr-modules',
+            *[item for name in MGR_MODULES_SCENARIOS for item in ('--scenario', name)],
+            *[item for role in ('essential', 'client', 'cephfs', 'mgr-modules')
+              for item in ('--image', role+'='+tags[role])],
+            '--output-dir', str(output/'mgr-modules')]
     return [build, quick], functional
 
 
@@ -130,8 +155,13 @@ def main(argv=None, probe=loader_levels, execute=subprocess.run):
     record['status'] = 'passed'
     (args.output/'preflight.json').write_text(json.dumps(record, indent=2) + '\n')
     gate, functional = commands(args.release, args.variant, args.architecture, args.scope, args.output)
-    for command in gate:
-        execute(command, check=True)
+    execute(gate[0], check=True)
+    if len(gate) > 1:
+        # The requirement check needs the inventory that the build packaged.
+        modules = packaged_mgr_modules(args.output) if 'mgr-modules' in releases.roles(args.variant) else ()
+        gate, functional = commands(args.release, args.variant, args.architecture, args.scope, args.output, modules)
+        for command in gate[1:]:
+            execute(command, check=True)
     if functional:
         run_functional(functional, args.output, execute)
     return 0

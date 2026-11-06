@@ -21,8 +21,12 @@ import suite  # noqa: E402
 sys.path.insert(0, str(HERE / "roles"))
 import contract
 
-ROLES = contract.ROLES + ("all",)
+ROLES = contract.ROLES + tuple(contract.OPTIONAL_ROLES) + ("all",)
+# Functional topologies: the baseline roles, the aggregate image, and the
+# baseline roles with their MGRs run from the mgr-modules image instead.
+TOPOLOGIES = ("mixed", "all", "mgr-modules")
 VERSION = re.compile(r"ceph version (\S+) \(([^)]+)\)")
+MGR_MODULE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 
 
 class CheckError(Exception):
@@ -39,7 +43,8 @@ def positive_number(value):
 def arguments(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--image", action="append", required=True, metavar="ROLE=REF",
-                        help="Repeat for essential, client, cephfs, rbd-aux, rgw or all; extra daemons are allowed")
+                        help="Repeat for essential, client, cephfs, rbd-aux, rgw, mgr-modules or all; "
+                             "extra daemons are allowed")
     parser.add_argument("--platform", choices=("linux/arm64", "linux/amd64"),
                         help="Reject other platforms; otherwise record each local image's platform")
     parser.add_argument("--output-dir", type=Path, help="Fresh report/log directory (default: artifacts/image-check-UUID)")
@@ -47,10 +52,21 @@ def arguments(argv=None):
                         help="Full check: also run every functional scenario on real clusters")
     parser.add_argument("--scenario", action="append", choices=suite.SCENARIOS,
                         help="With --full, run only selected scenarios; records a scoped functional check")
+    parser.add_argument("--topology", action="append", choices=TOPOLOGIES,
+                        help="With --full, run only the selected topologies (default: every supplied one)")
+    parser.add_argument("--mgr-module", action="append", default=[], metavar="NAME",
+                        help="Require this MGR module and its dependencies in the mgr-modules image, "
+                             "in addition to the baseline; repeatable, any valid module name")
     parser.add_argument("--probe-timeout", type=positive_number, default=120, metavar="SECONDS")
     args = parser.parse_args(argv)
     if args.scenario and not args.full:
         parser.error("--scenario requires --full")
+    if args.topology and not args.full:
+        parser.error("--topology requires --full")
+    invalid = [name for name in args.mgr_module if not MGR_MODULE.fullmatch(name)]
+    if invalid:
+        parser.error("Invalid MGR module name: " + ", ".join(invalid))
+    args.mgr_module = sorted(set(args.mgr_module))
     return args
 
 
@@ -66,7 +82,7 @@ def image_arguments(values):
     return images
 
 
-def runtime_sets(images, scenarios=None):
+def runtime_sets(images, scenarios=None, topologies=None):
     result = {}
     roles = contract.ROLES
     mixed = contract.required(scenarios) if scenarios else set(roles)
@@ -74,8 +90,15 @@ def runtime_sets(images, scenarios=None):
         raise CheckError("Unknown image role")
     if mixed.issubset(images):
         result["mixed"] = {role: images[role] for role in roles if role in images}
+        if "mgr-modules" in images:
+            result["mgr-modules"] = dict(result["mixed"], **{"mgr-modules": images["mgr-modules"]})
     if "all" in images:
         result["all"] = {role: images["all"] for role in roles}
+    if topologies:
+        unavailable = sorted(set(topologies) - set(result))
+        if unavailable:
+            raise CheckError("Selected topologies lack their images: " + ", ".join(unavailable))
+        result = {name: value for name, value in result.items() if name in topologies}
     if not result:
         raise CheckError("--full requires all=REF or required roles: " + ",".join(sorted(mixed)))
     return result
@@ -154,13 +177,18 @@ def parse_probe(output):
 
 def probe_image(role, image, args, output):
     container = "ceph-image-check-" + uuid.uuid4().hex
+    # Only the mgr-modules role takes requested modules beyond its baseline.
+    requested = list(getattr(args, "mgr_module", [])) if role == "mgr-modules" else []
+    if role == "mgr-modules":
+        image["requested_mgr_modules"] = requested
     try:
         run(["docker", "create", "--name", container, "--pull=never", "--network=none", "--user=0:0", "--interactive",
              "--hostname=ceph-image-check", "--add-host=ceph-image-check:127.0.0.1",
-             "--platform", image["platform"], "--entrypoint=/bin/sh", image["image_id"], "-s", "--", role])
+             "--platform", image["platform"], "--entrypoint=/bin/sh", image["image_id"], "-s", "--", role]
+            + requested)
         result = subprocess.run(["docker", "start", "--attach", "--interactive", container],
                                 input=(HERE / "check-runtime.sh").read_text(), capture_output=True,
-                                text=True, timeout=args.probe_timeout)
+                                text=True, errors="backslashreplace", timeout=args.probe_timeout)
         log = output / (role + ".log")
         log.write_text(result.stdout + result.stderr)
         # Preserve all failed check names even if no binary could report a version.
@@ -220,7 +248,9 @@ def main(argv=None):
     allowed = ROLES
     if set(references) - set(allowed):
         raise CheckError("Image roles do not match selected contract")
-    sets = runtime_sets(references, args.scenario) if args.full else {}
+    if args.mgr_module and "mgr-modules" not in references:
+        raise CheckError("--mgr-module requires a mgr-modules=REF image")
+    sets = runtime_sets(references, args.scenario, args.topology) if args.full else {}
     if not shutil.which("docker"):
         raise CheckError("Docker CLI must be installed")
     output = (args.output_dir or Path("artifacts") / ("image-check-" + uuid.uuid4().hex)).resolve()
@@ -229,6 +259,8 @@ def main(argv=None):
         raise CheckError("Output directory must be empty: " + str(output))
     report = {"schema": 4, "level": ("functional-selected" if args.scenario else "full") if args.full else "quick",
               "requested_scenarios": args.scenario or (list(suite.SCENARIOS) if args.full else []),
+              "requested_topologies": sorted(sets),
+              "requested_mgr_modules": args.mgr_module,
               "started_at": datetime.now(timezone.utc).isoformat(), "status": "running",
               "preflight": "running", "scenarios": "pending" if sets else "not_requested",
               "images": {}, "functional": {}, "contract": "roles",

@@ -3,6 +3,8 @@
 # Python probes run only in roles that provide the interpreter. Run only in a disposable container as root.
 set -u
 role=${1:?role required}
+shift
+# The mgr-modules role takes the requested MGR module names after the role.
 failed=0
 work=/tmp/ceph-image-check-$$
 
@@ -83,13 +85,16 @@ osd=false
 rgw=false
 mds=false
 fstools=false
+mgr=false
+mgrbundle=false
 case "$role" in
-    essential) core=true; osd=true ;;
+    essential) core=true; osd=true; mgr=true ;;
+    mgr-modules) mgr=true; mgrbundle=true ;;
     client) client=true ;;
     cephfs) mds=true; fsmirror=true; fstools=true ;;
     rbd-aux) cache=true ;;
     rgw) rgw=true ;;
-    all) core=true; client=true; cache=true; fsmirror=true; osd=true; rgw=true; mds=true; fstools=true ;;
+    all) core=true; client=true; cache=true; fsmirror=true; osd=true; rgw=true; mds=true; fstools=true; mgr=true ;;
     *) exit 2 ;;
 esac
 # Alpine packages the CephFS recovery tools in ceph19-utils, which the
@@ -138,9 +143,10 @@ pgrep_inspection() {
         return 1
     fi
 }
-if "$core" || "$client" || "$cache" || "$fsmirror" || "$rgw"; then
+if "$core" || "$client" || "$cache" || "$fsmirror" || "$rgw" || "$mgrbundle"; then
     binaries="ceph"
     if "$core"; then binaries="$binaries ceph-mon ceph-mgr ceph-authtool monmaptool"; fi
+    if "$mgrbundle"; then binaries="$binaries ceph-mgr"; fi
     if "$client" || "$cache"; then binaries="$binaries rados rbd"; fi
     for binary in $binaries; do
         check "version:$binary" version "$binary"
@@ -163,7 +169,7 @@ with tempfile.TemporaryDirectory(dir=sys.argv[1]) as directory:
     root = Path(directory)
     osdmap, exported, text, compiled, restored = (root/name for name in ('osdmap', 'exported', 'crush.txt', 'compiled', 'restored'))
     def run(*args):
-        return subprocess.run(args, check=True, capture_output=True, text=True, timeout=30).stdout
+        return subprocess.run(args, check=True, capture_output=True, text=True, errors='backslashreplace', timeout=30).stdout
     run('osdmaptool', str(osdmap), '--createsimple', '2')
     printed = run('osdmaptool', str(osdmap), '--print')
     assert 'max_osd 2' in printed.splitlines(), 'synthetic OSD map lost its device limit: '+printed
@@ -242,7 +248,7 @@ for name, (fallback, symbols) in libraries.items():
 if sys.argv[1] in ('all','rbd-aux'):
     config_program = 'ceph-conf' if sys.argv[1] == 'rbd-aux' else 'ceph-mgr'
     plugin_dir = subprocess.run([config_program, '--show-config-value', 'plugin_dir'],
-                                capture_output=True, text=True).stdout.strip()
+                                capture_output=True, text=True, errors='backslashreplace').stdout.strip()
     plugin = os.path.join(plugin_dir, 'librbd', 'libceph_librbd_parent_cache.so')
     present = bool(plugin_dir) and os.path.isfile(plugin)
     result('library-present:rbd-parent-cache', present, 'missing_file')
@@ -267,7 +273,7 @@ if sys.argv[1] != 'rbd-aux':
         result('python-client-features', False, 'loading_failure')
     else:
         result('python-client-features', True, 'loading_failure')
-    help_output = subprocess.run(['rados', '--help'], capture_output=True, text=True)
+    help_output = subprocess.run(['rados', '--help'], capture_output=True, text=True, errors='backslashreplace')
     result('rados-striper-option', help_output.returncode == 0 and '--striper' in help_output.stdout,
            'unsupported_feature')
 sys.exit(1 if failed else 0)
@@ -278,24 +284,544 @@ PY
         check path:pgrep external_command pgrep
         check process-inspection:pgrep pgrep_inspection
     fi
-    mgr_modules() {
-        module_path=$(ceph-mgr --show-config-value mgr_module_path) || return 1
-        python3 - "$module_path" <<'PY'
-from pathlib import Path
-import sys
-root = Path(sys.argv[1])
-assert (root / "mgr_module.py").is_file(), "missing mgr_module.py"
-modules = ("volumes", "rbd_support", "mirroring", "snap_schedule")
-for name in modules:
-    assert (root / name / "module.py").is_file(), "missing MGR module: " + name
-PY
-    }
-    check mgr-modules mgr_modules
     check tmp-mode python3 -c 'import os, stat; assert stat.S_IMODE(os.stat("/tmp").st_mode) == 0o1777'
     check keyring ceph-authtool --create-keyring "$work/keyring" --gen-key -n client.admin
     check keyring-read /bin/sh -c 'ceph-authtool "$1" --print-key > /dev/null' check "$work/keyring"
     check monmap monmaptool --create --fsid 9df1f6ea-6047-4d0c-bb3d-408fbef094b4 \
         --addv a '[v2:127.0.0.1:3300,v1:127.0.0.1:6789]' "$work/monmap"
+    fi
+    if "$mgr"; then
+    # The release's always-on modules, volumes, rbd_support, mirroring and
+    # snap_schedule, and any requested module, each with its import closure.
+    # Modules are parsed, never imported: mgr_module needs the native bindings
+    # that only the embedded MGR interpreter provides.
+    mgr_module_path=$(ceph-mgr --show-config-value mgr_module_path 2>/dev/null)
+    mgr_release=$(ceph-mgr --version 2>/dev/null | awk '/^ceph version / {print $3; exit}')
+    python3 - "$mgr_module_path" "$mgr_release" "$@" <<'MGR' || failed=1
+import ast
+import json
+import operator
+import os
+from pathlib import Path
+import re
+import subprocess
+import sys
+import tempfile
+
+# Observed with `ceph mgr module ls` on a MON of each catalogued release
+# (Squid 19.2.5, Tentacle 20.2.4 and Umbrella 21.2.0), keyed by major release.
+ALWAYS_ON = dict.fromkeys(('19', '20', '21'), (
+    'balancer', 'crash', 'devicehealth', 'orchestrator', 'pg_autoscaler', 'progress',
+    'rbd_support', 'status', 'telemetry', 'volumes'))
+BASELINE = ('volumes', 'rbd_support', 'mirroring', 'snap_schedule')
+# Files a module needs besides Python, checked only when it is selected.
+ASSETS = {'dashboard': ('frontend/dist',)}
+# Provided by the embedded MGR interpreter, not by an importable file.
+EMBEDDED = {'ceph_module'}
+NAME = re.compile(r'[A-Za-z_][A-Za-z0-9_]*\Z')
+failed = False
+
+
+def result(name, passed, kind, detail=''):
+    global failed
+    if detail:
+        print(detail)
+    print('CHECK\t%s\t%s' % ('passed' if passed else 'failed', name))
+    if not passed:
+        failed = True
+        print('FAILURE\t%s\t%s' % (kind, name))
+
+
+# The exceptions a handler must name to catch a failed import: a missing
+# module raises ModuleNotFoundError, a missing name ImportError, and an error
+# while a found module runs only Exception and BaseException catch.
+CATCHES = {'ModuleNotFoundError': {'ModuleNotFoundError', 'ImportError', 'Exception', 'BaseException'},
+           'ImportError': {'ImportError', 'Exception', 'BaseException'},
+           'SystemExit': {'SystemExit', 'BaseException'}}
+TRY = tuple(t for t in (ast.Try, getattr(ast, 'TryStar', None)) if t)
+# Calls that end the interpreter: sys.exit raises SystemExit, and os._exit
+# and os.abort end the process, which the MGR import does not survive either.
+EXITS = {('sys', 'exit'), ('os', '_exit'), ('os', 'abort'), (None, 'exit'), (None, 'quit')}
+RERAISE = ''
+
+
+def catching(kind):
+    """The handler names that catch an exception of this name."""
+    return CATCHES.get(kind, {kind, 'Exception', 'BaseException'})
+
+
+def name_of(node):
+    if isinstance(node, ast.Call):
+        node = node.func
+    return getattr(node, 'id', getattr(node, 'attr', None))
+
+
+def raised(node, handler):
+    """The exception a statement unconditionally raises, RERAISE for the
+    exception being handled, or None when the statement can complete."""
+    if isinstance(node, ast.Raise):
+        if node.exc is None or (isinstance(node.exc, ast.Name) and node.exc.id == handler):
+            return RERAISE
+        return name_of(node.exc) or 'Exception'
+    if isinstance(node, ast.Assert):
+        # The MGR does not run optimized, so an assert always runs.
+        try:
+            return None if ast.literal_eval(node.test) else 'AssertionError'
+        except ValueError:
+            return None
+    if isinstance(node, ast.Expr) and isinstance(node.value, ast.Call):
+        func = node.value.func
+        owner = func.value.id if isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name) else None
+        return 'SystemExit' if (owner, name_of(func)) in EXITS else None
+    if isinstance(node, ast.If):
+        body, orelse = gated(node)
+        branches = [b for b, skipped in ((node.body, body), (node.orelse, orelse)) if not skipped]
+        kinds = [exits(branch, handler) for branch in branches]
+        return kinds[0] if kinds and None not in kinds else None
+    if isinstance(node, (ast.With, ast.AsyncWith)):
+        # A context manager may suppress the exception; contextlib.suppress does.
+        if any(name_of(item.context_expr) == 'suppress' for item in node.items):
+            return None
+        return exits(node.body, handler)
+    if isinstance(node, TRY):
+        final = exits(node.finalbody, handler)
+        if final is not None:
+            return final
+        kind = exits(node.body, handler)
+        if kind is None:
+            kind = exits(node.orelse, handler)
+        if kind is None:
+            return None
+        # A handler of the raised exception may complete instead.
+        for h in node.handlers:
+            if (kind == RERAISE or caught(h) & catching(kind)) and exits(h.body, h.name or handler) is None:
+                return None
+        return kind
+    # return, break and continue complete the import without an exception,
+    # and a loop, a match or a nested definition may complete.
+    return None
+
+
+def exits(nodes, handler=None):
+    """The exception a block unconditionally raises, as raised() names it,
+    or None when the block can complete normally: the first statement that
+    cannot complete ends the block."""
+    for node in nodes:
+        kind = raised(node, handler)
+        if kind is not None:
+            return kind
+    return None
+
+
+def caught(handler):
+    """The exception names a handler catches; a bare except catches any."""
+    if handler.type is None:
+        return {'BaseException'}
+    types = handler.type.elts if isinstance(handler.type, ast.Tuple) else [handler.type]
+    return {getattr(t, 'id', getattr(t, 'attr', '')) for t in types}
+
+
+def environ(node):
+    """Whether an expression reads the environment (os.environ, os.getenv, or
+    the names imported from os)."""
+    return any((isinstance(n, ast.Attribute) and n.attr in ('environ', 'getenv')
+                and isinstance(n.value, ast.Name) and n.value.id == 'os')
+               or (isinstance(n, ast.Name) and n.id in ('environ', 'getenv')) for n in ast.walk(node))
+
+
+COMPARE = {ast.Lt: operator.lt, ast.LtE: operator.le, ast.Gt: operator.gt, ast.GtE: operator.ge,
+           ast.Eq: operator.eq, ast.NotEq: operator.ne}
+
+
+def version_gate(test):
+    """The value of a `sys.version_info <op> (x, y)` test for this
+    interpreter, which is the MGR's, or None for any other test."""
+    if not (isinstance(test, ast.Compare) and len(test.ops) == 1 and type(test.ops[0]) in COMPARE):
+        return None
+    left = test.left
+    if not ((isinstance(left, ast.Attribute) and left.attr == 'version_info'
+             and isinstance(left.value, ast.Name) and left.value.id == 'sys')
+            or (isinstance(left, ast.Name) and left.id == 'version_info')):
+        return None
+    try:
+        bound = ast.literal_eval(test.comparators[0])
+    except ValueError:
+        return None
+    if not (isinstance(bound, tuple) and all(isinstance(part, int) for part in bound)):
+        return None
+    return COMPARE[type(test.ops[0])](tuple(sys.version_info), bound)
+
+
+def gated(node):
+    """Which branches of an if are type-checking or environment-gated hooks
+    (UNITTEST, COVERAGE_ENABLED), or Python-version branches this interpreter
+    never takes: (body, orelse)."""
+    test = node.test
+    taken = version_gate(test)
+    if taken is not None:
+        return not taken, taken
+    if (getattr(test, 'id', None) or getattr(test, 'attr', None)) == 'TYPE_CHECKING':
+        return True, False
+    if isinstance(test, ast.Compare) and len(test.ops) == 1 and environ(test.comparators[0]):
+        if isinstance(test.ops[0], ast.In):
+            return True, False
+        if isinstance(test.ops[0], ast.NotIn):
+            return False, True
+    if environ(test):
+        return True, False
+    return False, False
+
+
+def requirements(path):
+    """What a file needs to load, as a tree in statement order: an import
+    is an ('external', spec), ('internal', parts, name, shown) or
+    ('failure', exception name, report) leaf, a block is ('all', items),
+    and a try is ('try', body, handlers, orelse), each handler a
+    (caught names, block, ended) triple, ended saying how a handler that
+    cannot complete normally ends. finally always runs, so its imports join
+    the enclosing block."""
+    # The package a relative import starts from: the file's directory, as
+    # the MGR imports each module directory as a package.
+    package = path.relative_to(root).parts[:-1]
+
+    def ended(handler):
+        """How a handler that cannot complete ends, as (exception name or
+        RERAISE, report), or None."""
+        kind = exits(handler.body, handler.name)
+        if kind is None:
+            return None
+        where = '%s:%d' % (path.relative_to(root), handler.lineno)
+        return kind, where + (': the handler re-raises' if kind == RERAISE else ': the handler raises ' + kind)
+
+    def block(nodes):
+        items = []
+        for node in nodes:
+            visit(node, items)
+        return ('all', items)
+
+    def visit(node, out):
+        if isinstance(node, TRY):
+            out.append(('try', block(node.body),
+                        [(caught(h), block(h.body), ended(h)) for h in node.handlers], block(node.orelse)))
+            out.extend(block(node.finalbody)[1])
+            return
+        if isinstance(node, ast.If):
+            body, orelse = gated(node)
+            visit(node.test, out)
+            if not body:
+                out.extend(block(node.body)[1])
+            if not orelse:
+                out.extend(block(node.orelse)[1])
+            return
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                out.extend(dependency(alias.name, None, 'import ' + alias.name))
+        elif isinstance(node, ast.ImportFrom) and node.level == 0:
+            for alias in node.names:
+                out.extend(dependency(node.module, None if alias.name == '*' else alias.name,
+                                      shown(node.module, alias.name)))
+        elif isinstance(node, ast.ImportFrom):
+            for alias in node.names:
+                out.append(relative(package, node.level, node.module,
+                                    None if alias.name == '*' else alias.name))
+        for child in ast.iter_child_nodes(node):
+            visit(child, out)
+
+    return block(ast.parse(path.read_bytes(), str(path)).body)
+
+
+def sources(root, name):
+    """The Python files of an internal name; module test suites are not run."""
+    if (root / (name + '.py')).is_file():
+        return [root / (name + '.py')]
+    def test_file(path):
+        parts = path.relative_to(root / name).parts
+        return (any(part in ('tests', 'test') for part in parts[:-1])
+                or parts[-1].startswith('test_') or parts[-1] == 'conftest.py')
+    return sorted(p for p in (root / name).rglob('*.py') if not test_file(p))
+
+
+def spec(module, name):
+    """The probe argument and the reported form of an import."""
+    return module + ':' + name if name else module
+
+
+def internal(top):
+    return ((root / (top + '.py')).is_file() or (root / top / '__init__.py').is_file()
+            or (root / top / 'module.py').is_file())
+
+
+def located(parts):
+    """Whether an internal dotted path has a file. Internal files cannot be
+    imported outside the MGR, so the path is checked on disk (a directory is
+    a namespace package)."""
+    path = root.joinpath(*parts)
+    return (path.with_name(path.name + '.py').is_file() or path.is_dir()
+            or any(path.parent.glob(path.name + '.*.so')))
+
+
+def shown(module, name):
+    return 'from %s import %s' % (module, name) if name else 'import ' + module
+
+
+def relative(package, level, module, name):
+    """The leaf of `from .module import name` (level dots) in package,
+    resolved as the import statement does. Relative imports stay within
+    their top-level name, so the target is internal."""
+    written = shown('.' * level + (module or ''), name or '*')
+    if not package:
+        return ('failure', 'ImportError', '%s: relative import with no parent package' % written)
+    if level > len(package):
+        return ('failure', 'ImportError', '%s: relative import beyond the top-level package' % written)
+    parts = package[:len(package) - level + 1] + tuple(module.split('.') if module else ())
+    return ('internal', parts, name, written)
+
+
+# Names every module has without binding them.
+MODULE_NAMES = {'__name__', '__file__', '__doc__', '__package__', '__spec__', '__loader__',
+                '__path__', '__builtins__', '__cached__'}
+
+
+def bound(path, cache={}):
+    """The names a module file binds at module level, or None when it may
+    bind any name (a star import, a module __getattr__ or globals())."""
+    if path in cache:
+        return cache[path]
+    names = set(MODULE_NAMES)
+
+    def visit(node):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            names.add(node.name)
+            # Only a global statement binds module names from a nested scope.
+            for inner in ast.walk(node):
+                if isinstance(inner, ast.Global):
+                    names.update(inner.names)
+                elif isinstance(inner, ast.Name) and inner.id == 'globals':
+                    names.add(None)
+            return
+        if isinstance(node, ast.Lambda):
+            return
+        if isinstance(node, ast.Import):
+            names.update(alias.asname or alias.name.split('.')[0] for alias in node.names)
+        elif isinstance(node, ast.ImportFrom):
+            names.update(None if alias.name == '*' else alias.asname or alias.name for alias in node.names)
+        elif isinstance(node, ast.Name) and (isinstance(node.ctx, ast.Store) or node.id == 'globals'):
+            names.add(node.id if isinstance(node.ctx, ast.Store) else None)
+        elif isinstance(node, ast.ExceptHandler) and node.name:
+            names.add(node.name)
+        for child in ast.iter_child_nodes(node):
+            visit(child)
+
+    visit(ast.parse(path.read_bytes(), str(path)))
+    cache[path] = None if None in names or '__getattr__' in names else names
+    return cache[path]
+
+
+def provides(parts, name):
+    """Whether `from <parts> import name` finds name: a submodule, or a name
+    the module binds. A regular package is its __init__.py, a namespace
+    package has only submodules, and an extension module is not parsed."""
+    if located(parts + (name,)):
+        return True
+    path = root.joinpath(*parts)
+    if (path / '__init__.py').is_file():
+        names = bound(path / '__init__.py')
+    elif path.with_name(path.name + '.py').is_file():
+        names = bound(path.with_name(path.name + '.py'))
+    elif path.is_dir():
+        return False
+    else:
+        return True
+    return names is None or name in names
+
+
+def dependency(module, name, written):
+    """The leaves of `import module` or `from module import *` (name None)
+    or of `from module import name`, written as in the source.
+    Dotted imports keep their full path: a present parent package does not
+    stand in for a missing submodule."""
+    top = module.split('.')[0]
+    if top in EMBEDDED:
+        return []
+    if top in sys.builtin_module_names:
+        # A built-in module always loads; its names still count.
+        return [('external', spec(module, name))] if module != top or name else []
+    if internal(top):
+        return [('internal', tuple(module.split('.')), name, written)]
+    return [('external', spec(module, name))]
+
+
+def leaves(node):
+    if node[0] == 'all':
+        return [leaf for item in node[1] for leaf in leaves(item)]
+    if node[0] == 'try':
+        return leaves(node[1]) + [leaf for _, h, _ in node[2] for leaf in leaves(h)] + leaves(node[3])
+    return [node]
+
+
+def load(names):
+    """Import external dependencies in a clean interpreter, as the MGR does,
+    and return each failure by spec as (exception name, report), with the
+    report of a crashed probe. `from module import name` passes when name is
+    an attribute of module or an importable submodule, as the import
+    statement resolves it, and otherwise raises ImportError as it does.
+    Imported modules may print anything, in any encoding: the results come
+    back as JSON in a file of their own, the probe's stdout is discarded and
+    undecodable bytes of its stderr and of failure reports are escaped."""
+    if not names:
+        return {}, None
+    program = ('import importlib, json, os, sys\n'
+               'channel = os.fdopen(int(sys.argv[1]), "w")\n'
+               'failures = {}\n'
+               'for n in sys.argv[2:]:\n'
+               '    module, _, name = n.partition(":")\n'
+               '    try:\n'
+               '        loaded = importlib.import_module(module)\n'
+               '        if name and not hasattr(loaded, name):\n'
+               '            try:\n'
+               '                importlib.import_module(module + "." + name)\n'
+               '            except ModuleNotFoundError as e:\n'
+               '                if e.name != module + "." + name:\n'
+               '                    raise\n'
+               '                raise ImportError("cannot import name %r from %r" % (name, module)) from None\n'
+               '    except Exception as e:\n'
+               '        shown = "from %s import %s" % (module, name) if name else module\n'
+               '        report = "%s: %s: %s" % (shown, type(e).__name__, str(e).splitlines()[0] if str(e) else "")\n'
+               '        # A message may carry undecodable bytes of a file name.\n'
+               '        failures[n] = [type(e).__name__, report.encode("ascii", "backslashreplace").decode()]\n'
+               'json.dump({"failures": failures}, channel)\n'
+               'channel.close()\n')
+    with tempfile.TemporaryFile() as channel:
+        output = subprocess.run([sys.executable, '-I', '-c', program, str(channel.fileno())] + sorted(names),
+                                cwd='/', stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                stderr=subprocess.PIPE, text=True, errors='backslashreplace', timeout=120, pass_fds=(channel.fileno(),))
+        channel.seek(0)
+        written = channel.read()
+    try:
+        failures = {name: tuple(failure) for name, failure in json.loads(written)['failures'].items()}
+    except (ValueError, KeyError, TypeError, AttributeError):
+        failures = {}
+        if not output.returncode:
+            return failures, ('dependency probe exited 0 without a result: %s' % output.stderr.strip()[-500:])
+    crash = None
+    if output.returncode:
+        crash = 'dependency probe exited %d: %s' % (output.returncode, output.stderr.strip()[-500:])
+    return failures, crash
+
+
+def unique(items):
+    seen = set()
+    return [item for item in items if not (item in seen or seen.add(item))]
+
+
+class Closure:
+    """The load failures of internal names with their import closures,
+    each an ordered list of (exception name, report): the first is the one
+    the import raises. A try loads when its body loads and then its else,
+    or when the first handler that catches the body's failure loads and
+    completes, so a fallback needs one branch that loads, a handler that
+    only records a missing optional import needs nothing, and a handler that
+    re-raises, raises or exits does not recover the import."""
+
+    def __init__(self, names):
+        self.trees, todo, external = {}, list(names), set()
+        while todo:
+            top = todo.pop()
+            if top in self.trees:
+                continue
+            self.trees[top] = [requirements(path) for path in sources(root, top)]
+            for leaf in (leaf for tree in self.trees[top] for leaf in leaves(tree)):
+                if leaf[0] == 'external':
+                    external.add(leaf[1])
+                elif leaf[0] == 'internal':
+                    todo.append(leaf[1][0])
+        self.loaded, self.crash = load(external)
+        # Internal names import each other in cycles: iterate to a fixed point.
+        self.failures = dict.fromkeys(self.trees, [])
+        for _ in range(len(self.trees) + 1):
+            failures = {top: unique(problem for tree in trees for problem in self.evaluate(tree))
+                        for top, trees in self.trees.items()}
+            if failures == self.failures:
+                break
+            self.failures = failures
+
+    def evaluate(self, node):
+        if node[0] == 'all':
+            return [problem for item in node[1] for problem in self.evaluate(item)]
+        if node[0] == 'try':
+            _, body, handlers, orelse = node
+            failed = self.evaluate(body)
+            if not failed:
+                return self.evaluate(orelse)
+            for names, handler, ended in handlers:
+                if names & catching(failed[0][0]):
+                    fallback = self.evaluate(handler)
+                    if ended:
+                        # The handler propagates the failure, or raises its own
+                        # exception, which an enclosing try may still catch.
+                        kind, report = ended
+                        return fallback + [(failed[0][0] if kind == RERAISE else kind, report)] + failed
+                    return fallback + failed if fallback else []
+            return failed
+        if node[0] == 'external':
+            return [self.loaded[node[1]]] if node[1] in self.loaded else []
+        if node[0] == 'failure':
+            return [node[1:]]
+        _, parts, name, written = node
+        # The top-level internal name runs first, then its submodule is found.
+        problems = list(self.failures.get(parts[0], ()))
+        dotted = '.'.join(parts)
+        if not located(parts):
+            problems.append(('ModuleNotFoundError', '%s: internal module %s not found under %s'
+                             % (written, dotted, root)))
+        elif name and not provides(parts, name):
+            problems.append(('ImportError', '%s: internal name %s.%s not found under %s'
+                             % (written, dotted, name, root)))
+        return problems
+
+    def problems(self, name):
+        found = sorted(report for _, report in self.failures[name])
+        return found + [self.crash] if self.crash else found
+
+
+root, release, requested = Path(sys.argv[1]), sys.argv[2], sys.argv[3:]
+present = bool(sys.argv[1]) and (root / 'mgr_module.py').is_file()
+result('mgr-module-path', present, 'missing_file',
+       '' if present else 'mgr_module_path %r has no mgr_module.py' % sys.argv[1])
+always_on = ALWAYS_ON.get(release.split('.')[0], None)
+result('mgr-baseline-list', always_on is not None, 'quick_failure',
+       '' if always_on is not None else 'no recorded always-on MGR modules for release %r' % release)
+invalid = [name for name in requested if not NAME.match(name)]
+result('mgr-module-names', not invalid, 'quick_failure',
+       '' if not invalid else 'invalid MGR module names: ' + ', '.join(invalid))
+if present:
+    selected = sorted(set(always_on or ()) | set(BASELINE) | {n for n in requested if NAME.match(n)})
+    closure = Closure(['mgr_module'] + [name for name in selected if (root / name / 'module.py').is_file()])
+    problems = closure.problems('mgr_module')
+    result('mgr-module-load:mgr_module', not problems, 'loading_failure', '\n'.join(problems))
+    for name in selected:
+        exists = (root / name / 'module.py').is_file()
+        result('mgr-module:' + name, exists, 'missing_file',
+               '' if exists else 'MGR module %s has no %s' % (name, root / name / 'module.py'))
+        if not exists:
+            continue
+        problems = closure.problems(name)
+        result('mgr-module-load:' + name, not problems, 'loading_failure',
+               '\n'.join('MGR module %s dependency %s' % (name, line) for line in problems))
+        for asset in ASSETS.get(name, ()):
+            path = root / name / asset
+            ok = path.is_dir() and any(path.iterdir())
+            result('mgr-module-assets:' + name, ok, 'missing_file',
+                   '' if ok else 'MGR module %s has no %s' % (name, path))
+    if 'cephadm' in requested:
+        # The cephadm module reads the executable it deploys at load time.
+        option = subprocess.run(['ceph-mgr', '--show-config-value', 'cephadm_path'],
+                                capture_output=True, text=True, errors='backslashreplace').stdout.strip()
+        ok = bool(option) and os.path.isfile(option) and os.access(option, os.R_OK)
+        result('mgr-module-assets:cephadm', ok, 'missing_file',
+               '' if ok else 'cephadm_path %r is not a readable file' % option)
+sys.exit(1 if failed else 0)
+MGR
     fi
     binaries=""
     if "$cache"; then binaries="$binaries rbd-mirror ceph-immutable-object-cache"; fi

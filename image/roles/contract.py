@@ -1,7 +1,12 @@
 """Role capabilities. Package names are backend implementation details."""
 import os
 from pathlib import Path
+# The baseline roles. Their union is the aggregate all image.
 ROLES = ("essential", "client", "cephfs", "rbd-aux", "rgw")
+# Optional roles, built only from the package backends listed here and never
+# part of all. mgr-modules replaces only the MGR process image: the baseline
+# MGR of essential plus every MGR module the source ships, with dependencies.
+OPTIONAL_ROLES = {"mgr-modules": ("rpm",)}
 CORE_CLI = {"ceph", "ceph-conf"}
 EXECUTABLES = {
     "essential": CORE_CLI | {"ceph-mon", "ceph-mgr", "ceph-osd", "ceph-bluestore-tool", "ceph-authtool", "monmaptool", "crushtool"},
@@ -9,15 +14,25 @@ EXECUTABLES = {
     "cephfs": CORE_CLI | {"ceph-mds", "cephfs-mirror", "cephfs-journal-tool"},
     "rbd-aux": CORE_CLI | {"rados", "rbd", "rbd-mirror", "ceph-immutable-object-cache"},
     "rgw": CORE_CLI | {"radosgw", "radosgw-admin"},
+    "mgr-modules": CORE_CLI | {"ceph-mgr"},
 }
 # Diagnostic CLI shipped by supported RPM/deb ceph-common. Alpine's source
 # package omits it; do not invent an upstream capability for that experiment.
-OPTIONAL_EXECUTABLES = {"client": {"ceph-dencoder"}}
+# The cephadm MGR module reads the cephadm executable it would deploy
+# (its cephadm_path option), so the bundle keeps it when the source ships it.
+OPTIONAL_EXECUTABLES = {"client": {"ceph-dencoder"}, "mgr-modules": {"cephadm"}}
 
 # Executables a package backend's source does not ship. Alpine packages the
 # CephFS recovery tools in ceph19-utils, which the experiment does not install
 # (installing it would also add ceph-dencoder and its denc plugins).
 SOURCE_LACKS = {"apk": {"cephfs-journal-tool"}}
+
+def roles(backend):
+    """The packaging roles of one build: the baseline roles, then the optional
+    roles this backend builds. A build omits an optional role whose source
+    supplies no package roots for it (runtime.configure)."""
+    return ROLES + tuple(role for role, backends in OPTIONAL_ROLES.items() if backend in backends)
+
 
 def executables(role, available, backend=None):
     names = EXECUTABLES[role] | (OPTIONAL_EXECUTABLES.get(role, set()) & set(available))
