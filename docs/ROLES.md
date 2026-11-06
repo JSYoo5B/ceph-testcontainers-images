@@ -173,7 +173,25 @@ body's failure loads (`ModuleNotFoundError` for a missing module,
 `try: import A` with `except ImportError: import B` needs A or B, while a
 handler that only records a missing optional dependency
 (`except ImportError: A = None`) needs nothing, because the module itself
-then reports that it cannot run. The official Tentacle
+then reports that it cannot run.
+
+A handler recovers the import only when it can complete normally. A
+handler whose every path ends in `raise` (bare, `raise e` of the caught
+exception, `raise RuntimeError(...)` or `raise ... from e`), in
+`sys.exit`, `os._exit`, `os.abort`, `exit` or `quit`, or in an
+`assert` of a false constant (the MGR does not run optimized) propagates
+the failure, logging before it or not. Its exception is what an enclosing
+`try` sees: a re-raised or new `ImportError` can still be recovered there,
+a `RuntimeError` only by a handler that catches it. A raise in one branch
+of an `if` whose other branch completes, in a nested function, under
+`contextlib.suppress`, in a branch for another Python version or inside a
+nested `try` whose handler completes leaves the handler recoverable. So
+does `return`, `break` or `continue`, which ends the import without an
+exception. Loops and `match` statements are treated as able to complete,
+and exception subclasses are matched only by the names listed above, so
+`except LookupError` is not taken as catching `KeyError`.
+
+The official Tentacle
 20.2.4 image ships the influx module without the `influxdb` Python client,
 so in a running MGR influx reports "influxdb python module not found", and
 the project bundle keeps that parity with its source. The cluster-lifecycle
