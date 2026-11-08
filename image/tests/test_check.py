@@ -472,6 +472,8 @@ class ImmutableCacheToolProbeTests(unittest.TestCase):
                                               % real["find"]}, "immutable-cache:find"),
             "ln that replaces": ({"ln": 'test "$1" = -sT && exec %s -sfT "$2" "$3"\nexec %s "$@"\n'
                                         % (real["ln"], real["ln"])}, "immutable-cache:links"),
+            "flock on writable files only": ({"flock": 'test -d /proc/self/fd/9 && exit 1\n'
+                                                       'exec %s "$@"\n' % real["flock"]}, "immutable-cache:flock"),
             "mv that replaces": ({"mv": 'test "$1" = -nT && { rm -rf "$3"; exec %s -T "$2" "$3"; }\nexec %s "$@"\n'
                                         % (real["mv"], real["mv"])}, "immutable-cache:rename"),
             "integer-only sleep": ({"sleep": 'case "$1" in *.*) exit 1 ;; esac\nexec /bin/sleep "$@"\n'},

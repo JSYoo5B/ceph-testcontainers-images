@@ -167,22 +167,24 @@ cache_executed() {
     done
 }
 # Another holder makes flock -E 75 -w 1 -x give up with 75; once it exits,
-# the same lock is taken.
+# the same lock is taken. Like the lease, every contender locks a read-only
+# descriptor of a directory, not a file opened for writing.
 cache_flock() {
     cache_dir flock || return 1
     lock=$directory/lock
-    (exec 9>"$lock" && flock -x 9 && exec sleep 30) &
+    mkdir "$lock" || return 1
+    (exec 9<"$lock" && flock -x 9 && exec sleep 30) &
     holder=$!
     cache_executed "$holder" || { printf 'the lock holder did not start\n'; kill "$holder" 2>/dev/null; return 1; }
     status=0
-    (exec 9>"$lock" && flock -E 75 -w 1 -x 9) || status=$?
+    (exec 9<"$lock" && flock -E 75 -w 1 -x 9) || status=$?
     kill "$holder" 2>/dev/null
     wait "$holder" 2>/dev/null
     if test "$status" -ne 75; then
         printf 'flock -E 75 -w 1 -x exited %s while another process held the lock\n' "$status"
         return 1
     fi
-    (exec 9>"$lock" && flock -E 75 -w 1 -x 9) || {
+    (exec 9<"$lock" && flock -E 75 -w 1 -x 9) || {
         printf 'flock could not take the lock after its holder exited\n'
         return 1
     }
