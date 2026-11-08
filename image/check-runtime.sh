@@ -212,13 +212,18 @@ cache_find() {
         (cd -P "$directory/sub" && find . -mindepth 1 -delete) &&
         test -z "$(ls -A "$directory/sub")"
 }
-# Hard links, and symbolic links that refuse an existing name.
+# Hard links, and symbolic links that refuse an existing name. With -T an
+# existing directory is a name to refuse, never a place to link into.
 cache_links() {
-    cache_dir links && : > "$directory/file" || return 1
+    cache_dir links && : > "$directory/file" && mkdir "$directory/occupied" || return 1
     ln -T "$directory/file" "$directory/hard" && test "$directory/file" -ef "$directory/hard" &&
         ln -sT target "$directory/link" && test "$(readlink "$directory/link")" = target &&
         ! ln -sT other "$directory/link" 2>/dev/null && test "$(readlink "$directory/link")" = target &&
-        ! ln -T "$directory/file" "$directory/hard" 2>/dev/null
+        ! ln -T "$directory/file" "$directory/hard" 2>/dev/null &&
+        ! ln -T "$directory/file" "$directory/occupied" 2>/dev/null &&
+        ! ln -sT target "$directory/occupied" 2>/dev/null &&
+        test -d "$directory/occupied" && ! test -L "$directory/occupied" &&
+        test -z "$(ls -A "$directory/occupied")"
 }
 # mv -nT renames a directory and never replaces an existing one.
 cache_rename() {
