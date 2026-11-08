@@ -254,7 +254,7 @@ images that passed the requirement check.
 
 ## Requirements and validation
 
-R01–R28 refer in order to IMAGE_REQUIREMENTS.md's component-use table.
+R01–R32 refer in order to IMAGE_REQUIREMENTS.md's component-use table.
 
 | Requirements | Quick-check role | Functional coverage |
 | --- | --- | --- |
@@ -266,14 +266,15 @@ R01–R28 refer in order to IMAGE_REQUIREMENTS.md's component-use table.
 | R12 CephFS clients | client | cephfs; consumer pin/clone metadata tests |
 | R13 Python probes | Actual probe runtime | HTTP/S3 and native client probes |
 | R14 parent cache | rbd-aux, effective plugin directory without MGR | Consumer native cache/lease tests; quick loading alone is insufficient |
-| R15 process inspection | essential/client; other runtime only where required | Native command cancellation and process-observer tests |
-| R16–R19 MGR modules | essential; mgr-modules with its requested modules | HEALTH_OK, volumes/tasks/mirroring; the mgr-modules topology; consumer scheduling/quiesce tests |
-| R20 RBD mirror | rbd-aux; setup in client | rbd-snapshot-mirror; consumer journal/failover/later-daemon tests |
-| R21 CephFS mirror | cephfs; MGR module in essential | cephfs-snapshot-mirror; consumer peer/MGR topology tests |
-| R22 RGW multisite administration | rgw setup runtime | rgw-multisite, independently with no generic client image |
-| R23–R24 OSD/classes/plugins | essential | cluster-lifecycle, hello/lock; consumer compressor/EC operations |
-| R25–R27 RGW/admin/listeners | rgw | rgw-s3; consumer TLS/Swift/STS/admin/host-listener tests |
-| R28 MDS | cephfs | cephfs; consumer standby/replacement/failover tests |
+| R15 immutable cache lease tools | rbd-aux: tool presence and the forms the lease uses | Consumer native immutable cache lease tests |
+| R16 process inspection | essential/client; other runtime only where required | Native command cancellation and process-observer tests |
+| R17–R21 MGR modules | essential; mgr-modules with its requested modules | HEALTH_OK, volumes/tasks/mirroring; the mgr-modules topology; consumer scheduling/quiesce tests |
+| R22 RBD mirror | rbd-aux; setup in client | rbd-snapshot-mirror; consumer journal/failover/later-daemon tests |
+| R23 CephFS mirror | cephfs; MGR module in essential | cephfs-snapshot-mirror; consumer peer/MGR topology tests |
+| R24 RGW multisite administration | rgw setup runtime | rgw-multisite, independently with no generic client image |
+| R25–R27 OSD/classes/plugins and BlueStore tool | essential | cluster-lifecycle, hello/lock; consumer compressor/EC operations |
+| R28–R30 RGW/admin/listeners | rgw | rgw-s3; consumer TLS/Swift/STS/admin/host-listener tests |
+| R31–R32 MDS and journal tool | cephfs | cephfs; consumer standby/replacement/failover tests |
 
 With `--full`, a supplied mgr-modules image adds the `mgr-modules` topology:
 the mixed roles with every MGR started from mgr-modules. `--topology` selects
