@@ -21,6 +21,12 @@ EXECUTABLES = {
 # The cephadm MGR module reads the cephadm executable it would deploy
 # (its cephadm_path option), so the bundle keeps it when the source ships it.
 OPTIONAL_EXECUTABLES = {"client": {"ceph-dencoder"}, "mgr-modules": {"cephadm"}}
+# Non-Ceph utilities a role must keep as its own required paths, beyond the
+# shell basics every role keeps. The Go library's RBD immutable object cache
+# lease runs these in the rbd-aux client container; check-runtime.sh lists the
+# same set (cache_utilities) and checks the forms the lease uses.
+UTILITIES = {"rbd-aux": {"flock", "realpath", "stat", "sha256sum", "readlink", "ln", "mv", "dirname",
+                         "cut", "head", "tail", "touch", "rmdir", "ls", "tr", "find", "grep"}}
 
 # Executables a package backend's source does not ship. Alpine packages the
 # CephFS recovery tools in ceph19-utils, which the experiment does not install
