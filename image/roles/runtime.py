@@ -43,6 +43,17 @@ def required_entrypoint_aliases(required):
     return aliases
 
 
+def contract_utility_paths(role):
+    """The source paths of the role's contract utilities; validated like its executables."""
+    paths = []
+    for name in sorted(contract.UTILITIES.get(role, ())):
+        path = shutil.which(name)
+        if path is None:
+            raise RuntimeError('Role %s requires utility %s, which the source does not provide' % (role, name))
+        paths.append(path)
+    return paths
+
+
 def configure(kind):
     supplement = None
     release = os.environ.get('RESTORE_CEPH_LICENSE')
@@ -70,6 +81,10 @@ def configure(kind):
     # Resolve executable paths in the source rather than impose a distro layout.
     packaging.REQUIRED_EXECUTABLES = {
         role: tuple(shutil.which(Path(p).name) or p for p in paths)
+        for role,paths in packaging.REQUIRED_EXECUTABLES.items()
+    }
+    packaging.REQUIRED_EXECUTABLES = {
+        role: tuple(sorted(set(paths) | set(contract_utility_paths(role))))
         for role,paths in packaging.REQUIRED_EXECUTABLES.items()
     }
     ceph_bins = {Path(p).name for name,pkg in inventory.items() if any(x in name for x in ('ceph','rados','rbd'))
