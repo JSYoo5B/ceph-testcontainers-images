@@ -154,10 +154,13 @@ cache_dir() {
 }
 # A signal sent before a background child has executed its command can be
 # taken by the shell code still running in that child. Signal only a process
-# whose /proc command line, which the lease also reads, is already the command.
+# whose /proc command line, which the lease also reads, is no longer this
+# shell's. It need not read "sleep 30": coreutils-single runs sleep through
+# a shebang wrapper of the multi-call binary.
 cache_executed() {
     tries=0
-    while test "$(tr '\0' ' ' < "/proc/$1/cmdline" 2>/dev/null)" != "sleep 30 "; do
+    shell=$(tr '\0' ' ' < /proc/$$/cmdline) || return 1
+    while seen=$(tr '\0' ' ' < "/proc/$1/cmdline" 2>/dev/null); test -z "$seen" || test "$seen" = "$shell"; do
         test "$tries" -lt 10 || return 1
         sleep 1
         tries=$((tries + 1))

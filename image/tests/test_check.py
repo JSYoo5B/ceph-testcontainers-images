@@ -444,6 +444,16 @@ class ImmutableCacheToolProbeTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual({name: state for name, state in checks.items() if state != "passed"}, {})
 
+    def test_a_wrapped_sleep_passes(self):
+        # coreutils-single runs sleep through a shebang wrapper of the
+        # multi-call binary, so the child's command line is not "sleep 30".
+        self.require_gnu_host()
+        sleep = shutil.which("sleep")
+        result, checks = self.run_checks(stubs={"sleep": 'exec %s "$@"\n' % sleep})
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(checks.get("immutable-cache:flock"), "passed")
+        self.assertEqual(checks.get("immutable-cache:kill"), "passed")
+
     def test_each_missing_or_wrong_form_fails(self):
         self.require_gnu_host()
         real = {name: shutil.which(name) for name in ("flock", "realpath", "stat", "find", "mv", "ln", "sha256sum")}
