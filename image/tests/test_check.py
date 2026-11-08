@@ -378,3 +378,113 @@ class BlueStoreToolQuickCheckTests(unittest.TestCase):
             self.assertIn("version:ceph-bluestore-tool", self.checks(role), role)
         for role in ("client", "cephfs", "rbd-aux", "rgw"):
             self.assertNotIn("version:ceph-bluestore-tool", self.checks(role), role)
+
+
+class ImmutableCacheToolProbeTests(unittest.TestCase):
+    """Runs the immutable cache tool checks of the quick check on this host's
+    tools and on stubs that drop one form the Go library's lease uses."""
+
+    FORMS = ("flock", "renameat2", "realpath", "stat", "find", "links", "rename", "text",
+             "directories", "kill", "sleep", "mountinfo")
+
+    @classmethod
+    def setUpClass(cls):
+        script = (check.HERE / "check-runtime.sh").read_text()
+        definitions = script[script.index("check() {"):script.index("for utility in sh mkdir")]
+        functions = script[script.index("cache_utilities="):script.index(
+            'if "$core" || "$client" || "$cache" || "$fsmirror"')]
+        start = script.index('    if "$cache"; then\n    for utility in $cache_utilities')
+        block = script[start:script.index("\n    fi\n", start) + 8]
+        gating = script[script.index("core=false\n"):script.index("version() {")]
+        cls.program = ("set -u\nrole=$1\nfailed=0\nwork=$2\n" + definitions + gating + functions +
+                       'if "$cache"; then\n' + block + "fi\nexit $failed\n")
+
+    def run_checks(self, role="rbd-aux", stubs=None):
+        with tempfile.TemporaryDirectory() as temporary:
+            work = Path(temporary) / "work"
+            work.mkdir()
+            bin_dir = Path(temporary) / "bin"
+            bin_dir.mkdir()
+            for name, body in (stubs or {}).items():
+                stub = bin_dir / name
+                stub.write_text("#!/bin/sh\n" + body)
+                stub.chmod(0o755)
+            environment = dict(os.environ, PATH=str(bin_dir) + os.pathsep + os.environ["PATH"])
+            result = subprocess.run(["/bin/sh", "-c", self.program, "sh", role, str(work)],
+                                    env=environment, capture_output=True, text=True, timeout=120)
+        checks = {}
+        for line in result.stdout.splitlines():
+            fields = line.split("\t")
+            if fields[0] == "CHECK":
+                checks[fields[2]] = fields[1]
+        return result, checks
+
+    def require_gnu_host(self):
+        if not sys.platform.startswith("linux"):
+            self.skipTest("the forms are GNU coreutils/findutils/util-linux forms")
+        for name in ("flock", "realpath", "find"):
+            if shutil.which(name) is None:
+                self.skipTest("the host has no " + name)
+
+    def test_cache_roles_check_every_utility_and_form(self):
+        for role in ("rbd-aux", "all"):
+            with self.subTest(role):
+                _, checks = self.run_checks(role)
+                expected = {"immutable-cache:" + form for form in self.FORMS}
+                expected |= {"path:" + name for name in ("flock", "realpath", "stat", "sha256sum", "find", "grep")}
+                self.assertLessEqual(expected, set(checks))
+        for role in ("essential", "client", "cephfs", "rgw"):
+            with self.subTest(role):
+                _, checks = self.run_checks(role)
+                self.assertFalse([name for name in checks if name.startswith("immutable-cache:")])
+
+    def test_host_gnu_tools_pass(self):
+        self.require_gnu_host()
+        result, checks = self.run_checks()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual({name: state for name, state in checks.items() if state != "passed"}, {})
+
+    def test_each_missing_or_wrong_form_fails(self):
+        self.require_gnu_host()
+        real = {name: shutil.which(name) for name in ("flock", "realpath", "stat", "find", "mv", "ln", "sha256sum")}
+        cases = {
+            "flock that never waits": ({"flock": "exit 0\n"}, "immutable-cache:flock"),
+            "flock that ignores -E": ({"flock": 'test "$1" = -E && shift 2\nexec %s "$@"\n' % real["flock"]},
+                                      "immutable-cache:flock"),
+            "missing flock": ({"flock": "exit 127\n"}, "immutable-cache:flock"),
+            "no renameat2 in libc": ({"python3": "exit 1\n"}, "immutable-cache:renameat2"),
+            "realpath without -m": ({"realpath": 'test "$1" = -m && exit 1\nexec %s "$@"\n' % real["realpath"]},
+                                    "immutable-cache:realpath"),
+            "stat without birth": ({"stat": 'test "$2" = "%%d:%%i:%%w:%%f" && { echo 1:2; exit 0; }\nexec %s "$@"\n'
+                                            % real["stat"]}, "immutable-cache:stat"),
+            "wrong sha256sum": ({"sha256sum": "cat > /dev/null\necho '0  -'\n"}, "immutable-cache:stat"),
+            "find without -printf": ({"find": 'for a; do test "$a" = -printf && exit 1; done\nexec %s "$@"\n'
+                                              % real["find"]}, "immutable-cache:find"),
+            "ln that replaces": ({"ln": 'test "$1" = -sT && exec %s -sfT "$2" "$3"\nexec %s "$@"\n'
+                                        % (real["ln"], real["ln"])}, "immutable-cache:links"),
+            "mv that replaces": ({"mv": 'test "$1" = -nT && { rm -rf "$3"; exec %s -T "$2" "$3"; }\nexec %s "$@"\n'
+                                        % (real["mv"], real["mv"])}, "immutable-cache:rename"),
+            "integer-only sleep": ({"sleep": 'case "$1" in *.*) exit 1 ;; esac\nexec /bin/sleep "$@"\n'},
+                                   "immutable-cache:sleep"),
+        }
+        for name, (stubs, failed) in cases.items():
+            with self.subTest(name):
+                result, checks = self.run_checks(stubs=stubs)
+                self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertEqual(checks.get(failed), "failed", result.stdout + result.stderr)
+
+    def test_a_missing_utility_is_a_missing_file(self):
+        self.require_gnu_host()
+        with tempfile.TemporaryDirectory() as temporary:
+            shadow = Path(temporary)
+            for directory in os.environ["PATH"].split(os.pathsep):
+                for entry in Path(directory).glob("*") if Path(directory).is_dir() else ():
+                    target = shadow / entry.name
+                    if entry.name != "sha256sum" and not target.exists() and os.access(entry, os.X_OK):
+                        target.symlink_to(entry)
+            script = self.program
+            result = subprocess.run(["/bin/sh", "-c", script, "sh", "rbd-aux", temporary + "/work"],
+                                    env=dict(os.environ, PATH=str(shadow)), capture_output=True, text=True,
+                                    timeout=120, cwd=temporary)
+        self.assertIn("FAILURE\tmissing_file\tpath:sha256sum", result.stdout, result.stdout + result.stderr)
+        self.assertNotEqual(result.returncode, 0)

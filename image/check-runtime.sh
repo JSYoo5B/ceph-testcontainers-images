@@ -143,6 +143,114 @@ pgrep_inspection() {
         return 1
     fi
 }
+# The Go library's RBD immutable object cache lease (rbd.StartImmutableObjectCache)
+# runs a shell state machine in the rbd-aux client container. These are the
+# tools it runs beyond the basics above, and the GNU forms it relies on. The
+# library itself probes RENAME_NOREPLACE on the cache filesystem at Start.
+cache_utilities="flock realpath stat sha256sum readlink ln mv dirname cut head tail touch rmdir ls tr find grep"
+cache_dir() {
+    directory=$work/cache-$1
+    rm -rf "$directory" && mkdir "$directory"
+}
+# A signal sent before a background child has executed its command can be
+# taken by the shell code still running in that child. Signal only a process
+# whose /proc command line, which the lease also reads, is already the command.
+cache_executed() {
+    tries=0
+    while test "$(tr '\0' ' ' < "/proc/$1/cmdline" 2>/dev/null)" != "sleep 30 "; do
+        test "$tries" -lt 10 || return 1
+        sleep 1
+        tries=$((tries + 1))
+    done
+}
+# Another holder makes flock -E 75 -w 1 -x give up with 75; once it exits,
+# the same lock is taken.
+cache_flock() {
+    cache_dir flock || return 1
+    lock=$directory/lock
+    (exec 9>"$lock" && flock -x 9 && exec sleep 30) &
+    holder=$!
+    cache_executed "$holder" || { printf 'the lock holder did not start\n'; kill "$holder" 2>/dev/null; return 1; }
+    status=0
+    (exec 9>"$lock" && flock -E 75 -w 1 -x 9) || status=$?
+    kill "$holder" 2>/dev/null
+    wait "$holder" 2>/dev/null
+    if test "$status" -ne 75; then
+        printf 'flock -E 75 -w 1 -x exited %s while another process held the lock\n' "$status"
+        return 1
+    fi
+    (exec 9>"$lock" && flock -E 75 -w 1 -x 9) || {
+        printf 'flock could not take the lock after its holder exited\n'
+        return 1
+    }
+}
+cache_realpath() {
+    cache_dir realpath || return 1
+    test "$(realpath -m -- "$directory/missing/child")" = "$(cd -P "$directory" && pwd)/missing/child"
+}
+# Identities are device:inode:birth:mode, compared across invocations.
+cache_stat() {
+    cache_dir stat && : > "$directory/file" || return 1
+    short=$(stat -c '%d:%i' "$directory/file") && full=$(stat -c '%d:%i:%w:%f' "$directory/file") || return 1
+    case "$full" in "$short":?*:*) ;; *) printf 'stat -c printed [%s]\n' "$full"; return 1 ;; esac
+    printf '%s\n' "${full##*:}" | grep -Eqx '[0-9a-f]+' &&
+        test "$(stat -c '%d:%i:%w:%f' "$directory/file")" = "$full" &&
+        printf '%s' "$full" | sha256sum | grep -Eqx '[0-9a-f]{64}  -' &&
+        test "$(printf x | sha256sum)" = '2d711642b726b04401627ca9fbac32f5c8530fb1903cc4db02258717921a4881  -'
+}
+cache_find() {
+    cache_dir find && printf 'ab\n' > "$directory/file" && mkdir "$directory/sub" && : > "$directory/sub/a" || return 1
+    test "$(find "$directory" -mindepth 1 -maxdepth 1 -type f -printf '%s\n')" = 3 &&
+        test "$(find "$directory" -mindepth 1 ! -name file -print -quit)" != "" &&
+        test -z "$(find "$directory/sub" -mindepth 1 ! -name a -print -quit)" &&
+        test "$(find "$directory/sub" -mindepth 1 -maxdepth 1 -printf x -quit)" = x &&
+        (cd -P "$directory/sub" && find . -mindepth 1 -delete) &&
+        test -z "$(ls -A "$directory/sub")"
+}
+# Hard links, and symbolic links that refuse an existing name.
+cache_links() {
+    cache_dir links && : > "$directory/file" || return 1
+    ln -T "$directory/file" "$directory/hard" && test "$directory/file" -ef "$directory/hard" &&
+        ln -sT target "$directory/link" && test "$(readlink "$directory/link")" = target &&
+        ! ln -sT other "$directory/link" 2>/dev/null && test "$(readlink "$directory/link")" = target &&
+        ! ln -T "$directory/file" "$directory/hard" 2>/dev/null
+}
+# mv -nT renames a directory and never replaces an existing one.
+cache_rename() {
+    cache_dir rename && mkdir "$directory/a" "$directory/b" "$directory/b/inside" || return 1
+    mv -nT "$directory/a" "$directory/c" && test -d "$directory/c" && ! test -e "$directory/a" || return 1
+    mv -nT "$directory/b" "$directory/c" 2>/dev/null || :
+    test -d "$directory/b/inside" && ! test -e "$directory/c/inside" && ! test -e "$directory/c/b"
+}
+cache_text() {
+    cache_dir text && printf '4242:1:2\nmiddle\ndrained\n' > "$directory/file" || return 1
+    test "$(head -n 1 "$directory/file" | cut -d: -f1)" = 4242 &&
+        test "$(tail -n 1 "$directory/file")" = drained &&
+        grep -qx drained "$directory/file" && ! grep -qx drain "$directory/file" &&
+        test "$(printf 'a\nb\n' | tr -d '\n')" = ab &&
+        test "$(printf 'a\000b' | tr '\0' '\n' | tail -n 1)" = b &&
+        test "$(dirname "$directory/file")" = "$directory"
+}
+cache_directories() {
+    cache_dir directories && touch "$directory/file" && test -f "$directory/file" || return 1
+    mkdir "$directory/empty" && test -z "$(ls -A "$directory/empty")" &&
+        rmdir "$directory/empty" && ! test -e "$directory/empty" &&
+        ! rmdir "$directory" 2>/dev/null
+}
+cache_kill() {
+    sleep 30 &
+    child=$!
+    cache_executed "$child" || { kill "$child" 2>/dev/null; return 1; }
+    kill -s TERM "$child" || return 1
+    wait "$child"
+    test "$?" -gt 128
+}
+cache_sleep() {
+    sleep 0.2
+}
+cache_mountinfo() {
+    test -r /proc/self/mountinfo && awk 'NF >= 10 { n++ } END { exit !n }' /proc/self/mountinfo
+}
 if "$core" || "$client" || "$cache" || "$fsmirror" || "$rgw" || "$mgrbundle"; then
     binaries="ceph"
     if "$core"; then binaries="$binaries ceph-mon ceph-mgr ceph-authtool monmaptool"; fi
@@ -829,6 +937,16 @@ MGR
     for binary in $binaries; do
         check "version:$binary" version "$binary"
     done
+    if "$cache"; then
+    for utility in $cache_utilities; do
+        check "path:$utility" external_command "$utility"
+    done
+    check immutable-cache:flock cache_flock
+    check immutable-cache:renameat2 python3 -c 'import ctypes; ctypes.CDLL(None).renameat2'
+    for form in realpath stat find links rename text directories kill sleep mountinfo; do
+        check "immutable-cache:$form" "cache_$form"
+    done
+    fi
 fi
 
 plugins() {
