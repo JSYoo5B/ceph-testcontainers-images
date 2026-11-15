@@ -25,6 +25,16 @@ def write(path, text=""):
     path.write_text(textwrap.dedent(text))
 
 
+# What the MGR needs to load a module: a package that binds a MgrModule subclass.
+MODULE_CLASS = "\nfrom mgr_module import MgrModule as _MgrModule\nclass Module(_MgrModule):\n    pass\n"
+
+
+def package(root, name, body):
+    """A requested module: its module.py body, then the class the MGR loads."""
+    write(root / name / "__init__.py", "from .module import Module\n")
+    write(root / name / "module.py", textwrap.dedent(body) + MODULE_CLASS)
+
+
 def module_tree(root):
     """A release-shaped module path: the shared files and the baseline modules."""
     write(root / "mgr_module.py", """
@@ -111,7 +121,7 @@ class MGRModuleProbeTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
             module_tree(root)
-            write(root / "tc_consumer" / "module.py", """
+            package(root, "tc_consumer", """
                 import json
                 import tc_shared_helper
                 from mgr_module import MgrModule
@@ -146,7 +156,7 @@ class MGRModuleProbeTests(unittest.TestCase):
                                       "mgr-module:absent_module": "missing_file"})
 
     def dotted_probe(self, root, body):
-        write(root / "tc_dotted" / "module.py", body)
+        package(root, "tc_dotted", body)
         result, checks, kinds = self.run_probe(root, requested=["tc_dotted"])
         return result, checks["mgr-module-load:tc_dotted"]
 
@@ -261,7 +271,7 @@ class MGRModuleProbeTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
             module_tree(root)
-            write(root / "tc_hooks" / "module.py", """
+            package(root, "tc_hooks", """
                 import os
                 if 'COVERAGE_ENABLED' in os.environ:
                     import tc_absent_coverage
@@ -284,7 +294,7 @@ class MGRModuleProbeTests(unittest.TestCase):
             result, checks, _ = self.run_probe(root, requested=["tc_hooks"])
             self.assertEqual(result.returncode, 0, result.stdout)
             # The required branch of a negated environment test stays required.
-            write(root / "tc_hooks" / "module.py", """
+            package(root, "tc_hooks", """
                 import os
                 if 'UNITTEST' not in os.environ:
                     import tc_absent_runtime_dependency
@@ -419,7 +429,7 @@ class MGRModuleProbeTests(unittest.TestCase):
                 self.assertIn("MGR module tc_dotted dependency " + shown, result.stdout, body)
 
     def relative_probe(self, root, body):
-        write(root / "tc_rel" / "module.py", body + "class Module:\n    pass\n")
+        write(root / "tc_rel" / "module.py", body + MODULE_CLASS)
         result, checks, kinds = self.run_probe(root, requested=["tc_rel"])
         return result, checks["mgr-module-load:tc_rel"]
 
@@ -494,7 +504,7 @@ class MGRModuleProbeTests(unittest.TestCase):
         # system builds it from bytes that are not UTF-8.
         write(site / "tc_noisy_undecodable" / "__init__.py", self.NOISE +
               "raise ImportError('cannot open ' + b'lib\\xff.so'.decode('utf-8', 'surrogateescape'))\n")
-        write(root / "tc_noisy" / "module.py", body)
+        package(root, "tc_noisy", body)
         return self.run_probe(root, requested=["tc_noisy"], python=python)
 
     def test_a_noisy_import_that_loads_passes(self):
@@ -550,7 +560,7 @@ class MGRModuleProbeTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
             module_tree(root)
-            write(root / "dashboard" / "module.py", "import json\n")
+            package(root, "dashboard", "import json\n")
             result, checks, kinds = self.run_probe(root, requested=["dashboard"])
             self.assertEqual(kinds["mgr-module-assets:dashboard"], "missing_file")
             write(root / "dashboard" / "frontend" / "dist" / "index.html", "<html></html>\n")
@@ -560,6 +570,91 @@ class MGRModuleProbeTests(unittest.TestCase):
             self.assertNotIn("mgr-module-assets:dashboard", self.run_probe(root)[1])
             result, checks, _ = self.run_probe(root, requested=["../etc"])
             self.assertEqual((result.returncode, checks["mgr-module-names"]), (1, "failed"))
+
+    # The release influx module: its client import is optional, so the import
+    # closure loads, and can_run() reports the missing client.
+    INFLUX = """
+        from typing import Tuple
+        try:
+            from influxdb import InfluxDBClient
+        except ImportError:
+            InfluxDBClient = None
+        from mgr_module import MgrModule
+        class Module(MgrModule):
+            @staticmethod
+            def can_run() -> Tuple[bool, str]:
+                if InfluxDBClient is not None:
+                    return True, ""
+                else:
+                    return False, "influxdb python module not found"
+        """
+
+    def test_a_module_that_cannot_run_fails_with_its_own_reason(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            module_tree(root)
+            write(root / "influx" / "__init__.py", "from .module import Module\n")
+            write(root / "influx" / "module.py", self.INFLUX)
+            result, checks, kinds = self.run_probe(root, requested=["influx"])
+            self.assertEqual(result.returncode, 1, result.stdout)
+            self.assertEqual(checks["mgr-module-load:influx"], "passed")
+            self.assertEqual((checks["mgr-module-run:influx"], kinds["mgr-module-run:influx"]),
+                             ("failed", "loading_failure"))
+            self.assertIn("MGR module influx cannot run: influxdb python module not found", result.stdout)
+            self.assertEqual(checks["mgr-module-run:volumes"], "passed")
+            # The same tree runs once the client is importable.
+            write(root / "influxdb.py", "class InfluxDBClient:\n    pass\n")
+            result, checks, _ = self.run_probe(root, requested=["influx"])
+            self.assertEqual((result.returncode, checks["mgr-module-run:influx"]), (0, "passed"), result.stdout)
+            # The probe imports modules without writing bytecode into the image.
+            self.assertEqual(list(root.rglob("__pycache__")), [])
+
+    def test_a_module_runs_only_as_the_mgr_loads_it(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            module_tree(root)
+            # The MGR loads the first MgrModule subclass the package binds;
+            # the embedded module's names exist only as empty classes.
+            write(root / "tc_order" / "__init__.py", "from .module import First, Second\n")
+            write(root / "tc_order" / "module.py", """
+                import ceph_module
+                from mgr_module import MgrModule
+                NATIVE = ceph_module.BasePyOSDMap
+                class First(MgrModule):
+                    @classmethod
+                    def can_run(cls):
+                        return False, "first class refuses"
+                class Second(MgrModule):
+                    pass
+                """)
+            # A package that binds no MgrModule subclass is not a module.
+            write(root / "tc_no_class" / "__init__.py", "")
+            write(root / "tc_no_class" / "module.py", "import json\n")
+            # Errors at import time and in can_run() are the module's failure.
+            package(root, "tc_raises", "raise RuntimeError('cannot start here')\n")
+            write(root / "tc_can_run_raises" / "__init__.py", "from .module import Module\n")
+            write(root / "tc_can_run_raises" / "module.py", """
+                from mgr_module import MgrModule
+                class Module(MgrModule):
+                    @staticmethod
+                    def can_run():
+                        raise KeyError('mgr/tc/option')
+                """)
+            result, checks, kinds = self.run_probe(
+                root, requested=["tc_order", "tc_no_class", "tc_raises", "tc_can_run_raises"])
+            self.assertEqual(result.returncode, 1)
+            for name, reason in (("tc_order", "first class refuses"),
+                                 ("tc_no_class", "no MgrModule subclass in package tc_no_class"),
+                                 ("tc_raises", "RuntimeError: cannot start here"),
+                                 ("tc_can_run_raises", "KeyError: 'mgr/tc/option'")):
+                self.assertEqual((checks["mgr-module-load:" + name], checks["mgr-module-run:" + name]),
+                                 ("passed", "failed"), name)
+                self.assertIn("MGR module %s cannot run: %s" % (name, reason), result.stdout)
+            # A module whose import closure fails is reported once, by that check.
+            package(root, "tc_broken", "import tc_absent_dependency_package\n")
+            result, checks, _ = self.run_probe(root, requested=["tc_broken"])
+            self.assertEqual(checks["mgr-module-load:tc_broken"], "failed")
+            self.assertNotIn("mgr-module-run:tc_broken", checks)
 
 
 if __name__ == "__main__":

@@ -417,6 +417,7 @@ PY
     mgr_release=$(ceph-mgr --version 2>/dev/null | awk '/^ceph version / {print $3; exit}')
     python3 - "$mgr_module_path" "$mgr_release" "$@" <<'MGR' || failed=1
 import ast
+import concurrent.futures
 import json
 import operator
 import os
@@ -902,6 +903,54 @@ class Closure:
         return found + [self.crash] if self.crash else found
 
 
+# Loads one module as the MGR does: import its package, take the first
+# MgrModule subclass it binds, and call that class's can_run(). The embedded
+# ceph_module is replaced by a module whose every name is an empty class, so
+# only the MGR's native methods are missing; the module is never instantiated.
+CAN_RUN = r'''
+import importlib, json, os, sys, types
+channel = os.fdopen(int(sys.argv[1]), "w")
+root, name = sys.argv[2], sys.argv[3]
+native = types.ModuleType("ceph_module")
+native.__getattr__ = lambda attribute: type(attribute, (), {})
+sys.modules["ceph_module"] = native
+sys.path.insert(0, root)
+try:
+    base = importlib.import_module("mgr_module").MgrModule
+    package = importlib.import_module(name)
+    found = [v for v in vars(package).values() if isinstance(v, type) and issubclass(v, base) and v is not base]
+    if not found:
+        error = "no MgrModule subclass in package %s" % name
+    else:
+        runs, reason = found[0].can_run() if hasattr(found[0], "can_run") else (True, "")
+        error = None if runs else str(reason) or "can_run() returned false"
+except BaseException as e:
+    error = "%s: %s" % (type(e).__name__, str(e).splitlines()[0] if str(e) else "")
+json.dump({"error": None if error is None else error.encode("ascii", "backslashreplace").decode()}, channel)
+channel.close()
+'''
+
+
+def can_run(name):
+    """None when the module loads and can run, otherwise the reason. Each
+    module loads in a clean interpreter of its own, as each MGR module runs in
+    its own sub-interpreter, and writes no bytecode into the image."""
+    with tempfile.TemporaryFile() as channel:
+        try:
+            output = subprocess.run([sys.executable, '-I', '-B', '-c', CAN_RUN, str(channel.fileno()), str(root), name],
+                                    cwd='/', stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                    stderr=subprocess.PIPE, text=True, errors='backslashreplace', timeout=120,
+                                    pass_fds=(channel.fileno(),))
+        except subprocess.TimeoutExpired:
+            return 'loading the module timed out'
+        channel.seek(0)
+        written = channel.read()
+    try:
+        return json.loads(written)['error']
+    except (ValueError, KeyError, TypeError):
+        return 'module probe exited %d without a result: %s' % (output.returncode, output.stderr.strip()[-500:])
+
+
 root, release, requested = Path(sys.argv[1]), sys.argv[2], sys.argv[3:]
 present = bool(sys.argv[1]) and (root / 'mgr_module.py').is_file()
 result('mgr-module-path', present, 'missing_file',
@@ -917,6 +966,12 @@ if present:
     closure = Closure(['mgr_module'] + [name for name in selected if (root / name / 'module.py').is_file()])
     problems = closure.problems('mgr_module')
     result('mgr-module-load:mgr_module', not problems, 'loading_failure', '\n'.join(problems))
+    # A module whose imports load can still refuse to run: an import it
+    # treats as optional fails and its can_run() reports the gap.
+    loadable = [name for name in selected if (root / name / 'module.py').is_file()
+                and not problems and not closure.problems(name)]
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, min(8, os.cpu_count() or 1))) as pool:
+        runs = dict(zip(loadable, pool.map(can_run, loadable)))
     for name in selected:
         exists = (root / name / 'module.py').is_file()
         result('mgr-module:' + name, exists, 'missing_file',
@@ -931,6 +986,10 @@ if present:
             ok = path.is_dir() and any(path.iterdir())
             result('mgr-module-assets:' + name, ok, 'missing_file',
                    '' if ok else 'MGR module %s has no %s' % (name, path))
+        if name in runs:
+            error = runs[name]
+            result('mgr-module-run:' + name, error is None, 'loading_failure',
+                   '' if error is None else 'MGR module %s cannot run: %s' % (name, error))
     if 'cephadm' in requested:
         # The cephadm module reads the executable it deploys at load time.
         option = subprocess.run(['ceph-mgr', '--show-config-value', 'cephadm_path'],
