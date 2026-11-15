@@ -1,6 +1,6 @@
 # Role images
 
-This default production contract follows the execution/dependency analysis in issue #3.
+Each role supplies the following runtime capabilities.
 
 | Role | Required capability |
 | --- | --- |
@@ -12,7 +12,7 @@ This default production contract follows the execution/dependency analysis in is
 | all | Union of the five responsibilities |
 | mgr-modules | Optional replacement MGR process image: the baseline MGR of essential plus additional MGR modules; see [The mgr-modules role](#the-mgr-modules-role) |
 
-Common requirements in IMAGE_REQUIREMENTS.md continue to apply. MGR modules
+The [common requirements](IMAGE_REQUIREMENTS.md#common-requirements) apply to each role. MGR modules
 and OSD classes stay inside their host daemon; the optional mgr-modules image
 carries the MGR daemon with its modules. Libraries can be shared across
 roles. Ordinary RBD needs essential + client, not rbd-aux. The cache daemon,

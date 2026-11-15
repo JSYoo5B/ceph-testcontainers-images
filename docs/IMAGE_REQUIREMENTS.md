@@ -25,23 +25,12 @@ The testcontainers module supplies all cluster setup at run time: configuration,
 
 ## Roles
 
-A role describes runtime contents, not container count. MON, MGR and OSD
-run in separate containers from essential. Optional features select their
-explicit role; only an explicit all selection supplies every role.
-
-| Role | Required capability |
-| --- | --- |
-| essential | MON, MGR, OSD and the offline BlueStore tool `ceph-bluestore-tool`; ceph CLI, keyring/monmap bootstrap, process inspection, release always-on MGR modules and volumes/rbd_support/mirroring/snap_schedule with dependencies; BlueStore, rbd/rgw/cephfs/hello/lock classes, compressor and erasure-code plugins |
-| client | ceph/rados/rbd and offline CRUSH/OSD map diagnostics (`crushtool`, `osdmaptool`); Python rados/rbd/cephfs, ceph_argparse/ceph_daemon; libradosstriper, librbd LUKS1/LUKS2, libcryptsetup and cryptsetup executable; command/process utilities |
-| cephfs | MDS, cephfs-mirror and the offline journal tool `cephfs-journal-tool`, their libraries and local ceph CLI |
-| rbd-aux | rbd-mirror and cache-capable client runtime: rados/rbd CLI/bindings, ceph-immutable-object-cache and the librbd parent_cache plugin, local ceph CLI |
-| rgw | RGW Beast/TLS, radosgw-admin and readlink; ceph/Python runtime for independently invoked per-zone setup containers |
-| all | Union of the five responsibilities |
-| mgr-modules | Optional MGR process image: `ceph-mgr` and the local CLI, the baseline MGR modules of essential and each additionally requested module, with dependencies |
-
-mgr-modules replaces only the MGR process image; MON and OSD stay on
-essential. It is not part of all. Its baseline, the project bundle and the
-requested-module rules are in [Roles](ROLES.md#the-mgr-modules-role).
+The [role capability table](ROLES.md#role-images) defines what the checker
+expects for each role. An explicit `all` image must satisfy the five baseline
+roles: essential, client, cephfs, rbd-aux and rgw. MON, MGR and OSD still run
+in separate containers. To check additional MGR modules, supply an optional
+[mgr-modules image](ROLES.md#the-mgr-modules-role) for the MGR process.
+MON and OSD continue to use essential.
 
 ## Common requirements
 
