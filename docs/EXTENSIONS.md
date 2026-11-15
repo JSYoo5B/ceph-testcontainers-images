@@ -319,7 +319,7 @@ make extension-check                      # check it against the default release
 
 python3 image/extension_check.py --extension netem --image my-registry/netem-helper:dev
 python3 image/extension_check.py --extension netem --image my-registry/netem-helper:dev \
-  --functional --target quay.io/ceph/ceph:v20.2.4 --target my-registry/ceph-osd:dev
+  --functional --target quay.io/ceph/ceph:v20.2.4 --target my-registry/ceph-essential:dev
 ```
 
 | Level | Verifies |
