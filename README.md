@@ -8,7 +8,9 @@ Ceph testcontainers modules use the pruned role runtime by default. Published
 role indexes are pinned in [.github/ceph-role-images.json](.github/ceph-role-images.json).
 The upstream official image remains an unmodified compatibility reference.
 
-This repository builds, checks and publishes images for every Ceph release in [the release catalogue](image/releases.json): Squid 19.2.0 to 19.2.7, Tentacle 20.2.0 to 20.2.4 (20.2.4 is the default) and Umbrella 21.2.0. The catalogue pins every release-specific input: the official image index and its native children, the distribution base image digests, the download.ceph.com suite, the exact package versions and the APT metadata behind them. It also lists the few variant/architecture cohorts that have no usable input, with the reason. [Releases](docs/RELEASES.md) describes the inputs, the unavailable cohorts and the known release defects.
+The [release catalogue](image/releases.json) defines which releases can be built.
+[Releases](docs/RELEASES.md) documents the pinned inputs, unavailable cohorts
+and known release defects.
 
 The official images on quay.io work for every feature, so role images are not
 required. They exist because the official image is over 2 GB, and a test that
@@ -21,7 +23,7 @@ call for a different image:
 Extension images are different: a fault-injection feature that needs one
 (see [Extension images](#extension-images)) cannot run without it.
 
-With size in mind, the requirements are split by dependency: `essential`, `client`, `cephfs`, `rbd-aux` and `rgw`, so each container pulls only what it runs. An image that holds every component (`all`) is also allowed, and it can still be much lighter than the official image as long as it meets the requirements. The optional `mgr-modules` role replaces only the MGR process image when a test needs MGR modules beyond essential's baseline, such as the dashboard.
+With size in mind, the requirements are split by dependency: `essential`, `client`, `cephfs`, `rbd-aux` and `rgw`, so each container pulls only what it runs. An aggregate image of those five baseline roles (`all`) is also allowed, and it can still be much lighter than the official image as long as it meets the requirements. A passing `all` check establishes the five baseline roles only, not MGR modules beyond essential's baseline. The optional `mgr-modules` role replaces only the MGR process image when a test needs MGR modules beyond essential's baseline, such as the dashboard.
 
 The requirements keep the components that tests depend on and leave out those that only operations need, such as the dashboard. How a custom image is built is up to its owner; this repository defines the requirements and checks images against them. For the size need alone, role images can be extracted directly from the official image.
 
@@ -65,7 +67,7 @@ Build with `make role-images VARIANT=official` (or debian, ubuntu, alpine).
 
 ## Checking an image
 
-Requires Python 3.9 or later and a Docker engine with API 1.49 or later. The checker never builds or pulls images; prepare them locally first.
+Requires Python 3.9 or later and a Docker engine with API 1.49 or later. The checker never builds or pulls images; prepare them locally first. What each role must provide is in [the role capability table](docs/ROLES.md#role-images).
 
 | Level | Verifies |
 | --- | --- |
@@ -154,7 +156,13 @@ The netem helper is published as `ghcr.io/jsyoo5b/ceph-testcontainers-images:ext
 
 ## Published images
 
-Images of every catalogued release use
+Run `python3 image/releases.py list` for buildable releases and
+`python3 image/releases.py published` for releases with recorded role indexes.
+A recorded index is not the only pullable tag: a release outside the
+recorded set can still have a tag in the registry. To check one tag, inspect
+its manifest, for example
+`docker buildx imagetools inspect ghcr.io/jsyoo5b/ceph-testcontainers-images:official-20.2.4-essential`.
+Published tags use
 `ghcr.io/jsyoo5b/ceph-testcontainers-images:<variant>-<release>-<role>`
 for `linux/amd64` and `linux/arm64`, except the cohorts that
 [the catalogue](docs/RELEASES.md#unavailable-cohorts) marks unavailable.

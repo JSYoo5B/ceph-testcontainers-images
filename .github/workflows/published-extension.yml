@@ -3,7 +3,7 @@ name: published extension
 # Checks a published extension helper by digest, as consumers pull it
 # (docs/EXTENSIONS.md). The netem helper: the contract, the kernel feature, a
 # delay, every selector profile, the bandwidth profile and the packet-fault
-# profile inside a container of every published release's official and OSD
+# profile inside a container of every published release's official and essential
 # role image. The capture helper: the contract and every capture and negative
 # control in the namespace of a container of every published release's
 # official image.

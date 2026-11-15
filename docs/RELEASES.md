@@ -1,9 +1,11 @@
 # Releases
 
-Every Ceph release this repository builds, checks and publishes is listed in
-[the release catalogue](../image/releases.json), which
-[image/releases.py](../image/releases.py) loads and validates. Each catalogued
-release is built and checked the same way and published under the same names:
+[The release catalogue](../image/releases.json) defines the inputs for
+building each release. Being catalogued, having a recorded promotion and
+having a pullable registry tag are separate facts: `releases.py list` gives
+the first, `releases.py published` the second, and only the registry
+manifest the third. A successful promotion publishes its selected release
+under these tags:
 
 ```text
 ghcr.io/jsyoo5b/ceph-testcontainers-images:<variant>-<release>-<role>
@@ -38,8 +40,8 @@ For every release it pins:
   architecture, the reason (and, where relevant, the evidence) why not.
 
 `python3 image/releases.py` prints what other tools need: `list` (every
-catalogued release, default first), `published` (the releases with role
-indexes in [the digest inventory](../.github/ceph-role-images.json)),
+catalogued release, default first), `published` (the releases whose promotion
+recorded role indexes in [the digest inventory](../.github/ceph-role-images.json)),
 `official <release> [<architecture>]` (the index or its pinned native child),
 `build-args <release> <distribution>`, `role <release> <variant> <role>` (an
 immutable published role reference) and `plan --releases all|<list>` (the
