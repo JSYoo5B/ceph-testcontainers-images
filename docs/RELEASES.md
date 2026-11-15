@@ -1,9 +1,8 @@
 # Releases
 
-Every Ceph release this repository builds, checks and publishes is listed in
-[the release catalogue](../image/releases.json), which
-[image/releases.py](../image/releases.py) loads and validates. Each catalogued
-release is built and checked the same way and published under the same names:
+[The release catalogue](../image/releases.json) defines the inputs for
+building each release. A successful promotion publishes its selected release
+under these tags:
 
 ```text
 ghcr.io/jsyoo5b/ceph-testcontainers-images:<variant>-<release>-<role>
