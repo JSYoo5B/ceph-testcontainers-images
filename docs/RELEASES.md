@@ -1,7 +1,10 @@
 # Releases
 
 [The release catalogue](../image/releases.json) defines the inputs for
-building each release. A successful promotion publishes its selected release
+building each release. Being catalogued, having a recorded promotion and
+having a pullable registry tag are separate facts: `releases.py list` gives
+the first, `releases.py published` the second, and only the registry
+manifest the third. A successful promotion publishes its selected release
 under these tags:
 
 ```text
@@ -37,8 +40,8 @@ For every release it pins:
   architecture, the reason (and, where relevant, the evidence) why not.
 
 `python3 image/releases.py` prints what other tools need: `list` (every
-catalogued release, default first), `published` (the releases with role
-indexes in [the digest inventory](../.github/ceph-role-images.json)),
+catalogued release, default first), `published` (the releases whose promotion
+recorded role indexes in [the digest inventory](../.github/ceph-role-images.json)),
 `official <release> [<architecture>]` (the index or its pinned native child),
 `build-args <release> <distribution>`, `role <release> <variant> <role>` (an
 immutable published role reference) and `plan --releases all|<list>` (the

@@ -158,7 +158,10 @@ The netem helper is published as `ghcr.io/jsyoo5b/ceph-testcontainers-images:ext
 
 Run `python3 image/releases.py list` for buildable releases and
 `python3 image/releases.py published` for releases with recorded role indexes.
-To check whether a particular tag is available, inspect its registry manifest.
+A recorded index is not the only pullable tag: a release outside the
+recorded set can still have a tag in the registry. To check one tag, inspect
+its manifest, for example
+`docker buildx imagetools inspect ghcr.io/jsyoo5b/ceph-testcontainers-images:official-20.2.4-essential`.
 Published tags use
 `ghcr.io/jsyoo5b/ceph-testcontainers-images:<variant>-<release>-<role>`
 for `linux/amd64` and `linux/arm64`, except the cohorts that

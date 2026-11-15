@@ -176,7 +176,7 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
     commands.add_parser("list", help="Print every catalogued release, default first")
-    commands.add_parser("published", help="Print every release with published role images, default first")
+    commands.add_parser("published", help="Print every release with recorded role indexes, default first")
     official_parser = commands.add_parser("official", help="Print the official source image of a release")
     official_parser.add_argument("release")
     official_parser.add_argument("architecture", nargs="?", choices=ARCHITECTURES,
