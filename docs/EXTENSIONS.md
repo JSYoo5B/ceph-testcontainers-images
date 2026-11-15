@@ -423,7 +423,7 @@ The rate scenario uses a private dual-stack bridge network with the target, peer
 
 Every transfer must carry exactly its bytes with the same SHA-256, and must use the family of its path: the sender's socket family, and the address that the peer saw, which must be the target's own address of that family. The report keeps the configured rate, limit, delay and the child's counters of each phase apart from the throughput that the transfers measured, and each scenario directory keeps the filter dump and every transfer.
 
-The bandwidth bounds are wide on purpose: they tell a rate apart from no rate and from a rate that is not shared, not the precision of netem. On a native Linux Docker Engine (amd64), the published `extension-netem-v1` helper passed every stage with 16 Mbit/s against the official images of 20.2.4 and 19.2.5. Each selected transfer reached 1.89 to 1.91 MB/s (94% to 96% of the rate), two at once 1.90 MB/s together, the unselected peer and the restored paths stayed near 1 GB/s, a 50 ms delay with the rate took 1.74 MB/s, and a queue of 5 packets dropped 36 to 48 packets while TCP still delivered every byte.
+The bandwidth bounds are wide on purpose: they tell a rate apart from no rate and from a rate that is not shared, not the precision of netem.
 
 ### Packet-fault profile
 
@@ -478,7 +478,6 @@ Every transfer, with or without a fault, must carry exactly its bytes with the s
 
 The receiver's counters show that the selected packets were reordered, duplicated or corrupted on the wire and that TCP recovered. They do not show that a changed Ceph Messenger frame reached Ceph's parser.
 
-On a native Linux Docker Engine (amd64, checksum, scatter-gather, TSO and GSO on and GRO off on both ends), the published `extension-netem-v1` helper passed every stage against the official images of 20.2.4 and 19.2.5. In two runs, every selected transfer of 8 MB raised its effect's counter by 113 or more over IPv4 and IPv6: reorder 241 to 315, duplicate 113 to 140, corrupt 332 to 987, and composed 1796 to 1969 D-SACKs with 1039 to 1269 checksum errors. Baseline, unselected and restored transfers raised a counter by at most 5, and every transfer kept its exact bytes and SHA-256. tc reported every requested probability and correlation, gap 1 with the reorder, and kept the duplicate's correlation only with the delay encoding: `netem duplicate 3% 10%` installed a correlation of 0. A test image whose `tc` rejects `corrupt` (`What is "corrupt"?`) failed the profile at the parser stage with `image_unsupported`, while its baseline delay scenario and bandwidth profile still passed.
 
 ## Published helpers
 
@@ -501,7 +500,6 @@ ghcr.io/jsyoo5b/ceph-testcontainers-images:extension-netem-v1
 | Engine | Platforms | Evidence |
 | --- | --- | --- |
 | Docker Engine on GitHub-hosted Ubuntu 24.04 runners | `amd64`, `arm64` | Functional check with every selector profile, the bandwidth profile and the packet-fault profile before every publication and on the published digests |
-| Native Linux Docker Engine | `amd64` | Functional check with every selector profile, the bandwidth profile and the packet-fault profile, with the official 20.2.4 and 19.2.5 images |
 | Docker Desktop | `arm64` | Functional check with every selector profile, `tcp-sport-u32` and `tcp-setup-u32` included, with the official 20.2.4 and 19.2.5 images; the bandwidth and packet-fault profiles are not verified |
 
 Other engines, rootless Docker, Podman and Docker Desktop's Enhanced Container Isolation are not covered. Run the functional check on them before relying on the helper.
