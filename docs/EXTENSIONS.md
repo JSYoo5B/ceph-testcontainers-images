@@ -478,7 +478,6 @@ Every transfer, with or without a fault, must carry exactly its bytes with the s
 
 The receiver's counters show that the selected packets were reordered, duplicated or corrupted on the wire and that TCP recovered. They do not show that a changed Ceph Messenger frame reached Ceph's parser.
 
-
 ## Published helpers
 
 Each helper tag lists `linux/amd64` and `linux/arm64`; `<tag>-linux-<architecture>` selects one platform. The contract version is part of the tag, so a later incompatible contract gets a new tag. Each helper is staged, promoted and checked again on its own: a failure of one helper never blocks the other, and neither blocks the release images.
