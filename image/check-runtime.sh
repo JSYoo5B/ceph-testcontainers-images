@@ -417,6 +417,7 @@ PY
     mgr_release=$(ceph-mgr --version 2>/dev/null | awk '/^ceph version / {print $3; exit}')
     python3 - "$mgr_module_path" "$mgr_release" "$@" <<'MGR' || failed=1
 import ast
+import concurrent.futures
 import json
 import operator
 import os
@@ -902,6 +903,96 @@ class Closure:
         return found + [self.crash] if self.crash else found
 
 
+# Loads one module as the MGR does: import its package, take the first
+# MgrModule subclass it binds, and call that class's can_run(). The embedded
+# ceph_module is replaced by a module whose every name is an empty class, so
+# only the MGR's native methods are missing; the module is never instantiated.
+# A completed load reports the module it loaded and one outcome: "runs",
+# "refuses" (can_run() returned false, with the module's reason) or "fails"
+# (an error at import or in can_run(), or no MgrModule subclass). An
+# interrupt is not caught, so an interrupted load reports nothing.
+CAN_RUN = r"""
+import importlib, json, os, sys, types
+channel = os.fdopen(int(sys.argv[1]), "w")
+root, name = sys.argv[2], sys.argv[3]
+native = types.ModuleType("ceph_module")
+native.__getattr__ = lambda attribute: type(attribute, (), {})
+sys.modules["ceph_module"] = native
+sys.path.insert(0, root)
+try:
+    base = importlib.import_module("mgr_module").MgrModule
+    package = importlib.import_module(name)
+    found = [v for v in vars(package).values() if isinstance(v, type) and issubclass(v, base) and v is not base]
+    if not found:
+        outcome, reason = "fails", "no MgrModule subclass in package %s" % name
+    else:
+        runs, reason = found[0].can_run() if hasattr(found[0], "can_run") else (True, "")
+        outcome, reason = ("runs", "") if runs else ("refuses", str(reason) or "can_run() returned false")
+except (Exception, SystemExit) as e:
+    outcome, reason = "fails", "%s: %s" % (type(e).__name__, str(e).splitlines()[0] if str(e) else "")
+json.dump({"module": name, "outcome": outcome, "reason": reason}, channel)
+channel.close()
+"""
+# The longest a single module may take to load before its probe is
+# inconclusive; a slow builder makes the check fail, never pass or exempt.
+RUN_TIMEOUT = 120
+
+
+def one_line(text):
+    """A reason as one printable ASCII line, so no module can forge a line
+    of the report."""
+    return text.encode('unicode_escape').decode('ascii')
+
+
+def can_run(name):
+    """(outcome, reason) of loading one module. The outcome is the completed
+    load's "runs", "refuses" or "fails", or "timeout" or "inconclusive" when
+    the load did not complete with a report for this module: a timeout, an
+    abnormal exit or a signal, or a missing, malformed or foreign report.
+    Each module loads in a clean interpreter of its own, as each MGR module
+    runs in its own sub-interpreter, and writes no bytecode into the image."""
+    with tempfile.TemporaryFile() as channel:
+        try:
+            output = subprocess.run([sys.executable, '-I', '-B', '-c', CAN_RUN, str(channel.fileno()), str(root), name],
+                                    cwd='/', stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                    stderr=subprocess.PIPE, text=True, errors='backslashreplace',
+                                    timeout=RUN_TIMEOUT, pass_fds=(channel.fileno(),))
+        except subprocess.TimeoutExpired:
+            return 'timeout', 'loading the module took more than %d seconds' % RUN_TIMEOUT
+        channel.seek(0)
+        written = channel.read()
+    stderr = output.stderr.strip()[-500:]
+    if output.returncode != 0:
+        return 'inconclusive', 'the module probe exited %d: %s' % (output.returncode, stderr)
+    try:
+        report = json.loads(written)
+    except ValueError:
+        report = None
+    if not isinstance(report, dict) or set(report) != {'module', 'outcome', 'reason'} \
+            or not isinstance(report['reason'], str):
+        return 'inconclusive', 'the module probe wrote no valid report: %r' % written[:200]
+    if report['module'] != name:
+        return 'inconclusive', 'the module probe reported %r, not this module' % (report['module'],)
+    outcome = report['outcome']
+    if outcome == 'runs' and not report['reason']:
+        return outcome, ''
+    if outcome in ('refuses', 'fails') and report['reason']:
+        return outcome, report['reason']
+    return 'inconclusive', 'the module probe reported an invalid outcome: %r' % (report,)
+
+
+# How each outcome of a load is reported: whether the check passes, its
+# failure kind and its detail. Only "refuses" is the module's own refusal;
+# timeout and inconclusive say nothing about the module.
+RUN_REPORTS = {
+    'runs': (True, 'loading_failure', ''),
+    'refuses': (False, 'loading_failure', 'MGR module %s cannot run: %s'),
+    'fails': (False, 'loading_failure', 'MGR module %s failed to load: %s'),
+    'timeout': (False, 'timeout', 'MGR module %s run probe was inconclusive: %s'),
+    'inconclusive': (False, 'checker_failure', 'MGR module %s run probe was inconclusive: %s'),
+}
+
+
 root, release, requested = Path(sys.argv[1]), sys.argv[2], sys.argv[3:]
 present = bool(sys.argv[1]) and (root / 'mgr_module.py').is_file()
 result('mgr-module-path', present, 'missing_file',
@@ -917,6 +1008,12 @@ if present:
     closure = Closure(['mgr_module'] + [name for name in selected if (root / name / 'module.py').is_file()])
     problems = closure.problems('mgr_module')
     result('mgr-module-load:mgr_module', not problems, 'loading_failure', '\n'.join(problems))
+    # A module whose imports load can still refuse to run: an import it
+    # treats as optional fails and its can_run() reports the gap.
+    loadable = [name for name in selected if (root / name / 'module.py').is_file()
+                and not problems and not closure.problems(name)]
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, min(8, os.cpu_count() or 1))) as pool:
+        runs = dict(zip(loadable, pool.map(can_run, loadable)))
     for name in selected:
         exists = (root / name / 'module.py').is_file()
         result('mgr-module:' + name, exists, 'missing_file',
@@ -931,6 +1028,10 @@ if present:
             ok = path.is_dir() and any(path.iterdir())
             result('mgr-module-assets:' + name, ok, 'missing_file',
                    '' if ok else 'MGR module %s has no %s' % (name, path))
+        if name in runs:
+            outcome, reason = runs[name]
+            passed, kind, detail = RUN_REPORTS[outcome]
+            result('mgr-module-run:' + name, passed, kind, detail and detail % (name, one_line(reason)))
     if 'cephadm' in requested:
         # The cephadm module reads the executable it deploys at load time.
         option = subprocess.run(['ceph-mgr', '--show-config-value', 'cephadm_path'],

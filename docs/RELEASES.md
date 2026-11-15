@@ -116,6 +116,20 @@ start. The `rgw-multisite` functional scenario is therefore expected to fail for
 19.2.6. That result is recorded as auxiliary evidence and does not block the
 publication of its cohorts.
 
+The influx MGR module cannot run in the official image of any catalogued
+release. It imports the InfluxDB 1.x Python client (`influxdb`) as optional,
+and its `can_run()` refuses with `influxdb python module not found`. Ceph's
+packages list `python3-influxdb` only as a weak dependency (`ceph-mgr` on
+Squid and Tentacle, `ceph-mgr-influx` on Umbrella), and the official images
+do not install it. EPEL 9 packages it for the CentOS Stream 9 images of Squid
+and Tentacle; none of the repositories configured in the Rocky Linux 10 image
+of Umbrella provides it. On
+Squid 19.2.5, Tentacle 20.2.4 and Umbrella 21.2.0 a running MGR reports influx,
+and only influx, with `can_run` false, from the official image and from the
+mgr-modules role alike. The role reproduces the official image, so influx is
+recorded as a module that cannot run in the source and its check does not
+require it ([Roles](ROLES.md#project-bundle)).
+
 ## Building, checking and publishing
 
 `make role-images VARIANT=<variant> CEPH_RELEASE=<release> PLATFORM=linux/<architecture>`

@@ -106,7 +106,8 @@ class FunctionalAuxiliaryTests(unittest.TestCase):
             if name=='build' and not no_plan:
                 build=Path(next(item for item in command if item.startswith('ROLE_OUTPUT=')).split('=',1)[1])
                 build.mkdir(parents=True)
-                (build/'plan.json').write_text(json.dumps({'roles':{'mgr-modules':{'mgr_modules':['dashboard','volumes']}}}))
+                (build/'plan.json').write_text(json.dumps({'roles':{'mgr-modules':{'mgr_modules':['dashboard','influx','volumes'],
+                    'mgr_modules_source_cannot_run':{'influx':'influxdb python module not found'}}}}))
             if output and '--full' in command:
                 output.mkdir(parents=True)
                 status='failed' if name in failing else 'passed'
@@ -128,7 +129,9 @@ class FunctionalAuxiliaryTests(unittest.TestCase):
         self.assertEqual(code,0)
         self.assertEqual([check for _,check in calls],[True,True,False,False,False])
         quick=calls[1][0]
+        # A packaged module that cannot run in the source either is not required.
         self.assertEqual(quick[-4:],['--mgr-module','dashboard','--mgr-module','volumes'])
+        self.assertNotIn('influx',quick)
         self.assertEqual(summary['runs']['mgr-modules']['outcome'],'passed')
         self.assertEqual((summary['status'],summary['gating']),('failed',False))
         rgw=summary['runs']['rgw-only']
