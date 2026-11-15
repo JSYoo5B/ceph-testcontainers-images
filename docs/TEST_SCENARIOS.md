@@ -71,7 +71,7 @@ same prerequisites, immutable identities and report format.
 ## Quick checks
 
 Quick checks run one disposable container per role, with no network or
-volumes. `all` runs the checks of all five roles. Configuration queries
+volumes, against [the role capability table](ROLES.md#role-images). `all` runs the checks of all five roles. Configuration queries
 select MGR module, OSD class and plugin directories, so the checks follow
 the image's effective paths rather than a distribution's fixed layout.
 

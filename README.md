@@ -23,7 +23,7 @@ call for a different image:
 Extension images are different: a fault-injection feature that needs one
 (see [Extension images](#extension-images)) cannot run without it.
 
-With size in mind, the requirements are split by dependency: `essential`, `client`, `cephfs`, `rbd-aux` and `rgw`, so each container pulls only what it runs. An image that holds every component (`all`) is also allowed, and it can still be much lighter than the official image as long as it meets the requirements. The optional `mgr-modules` role replaces only the MGR process image when a test needs MGR modules beyond essential's baseline, such as the dashboard.
+With size in mind, the requirements are split by dependency: `essential`, `client`, `cephfs`, `rbd-aux` and `rgw`, so each container pulls only what it runs. An aggregate image of those five baseline roles (`all`) is also allowed, and it can still be much lighter than the official image as long as it meets the requirements. A passing `all` check establishes the five baseline roles only, not MGR modules beyond essential's baseline. The optional `mgr-modules` role replaces only the MGR process image when a test needs MGR modules beyond essential's baseline, such as the dashboard.
 
 The requirements keep the components that tests depend on and leave out those that only operations need, such as the dashboard. How a custom image is built is up to its owner; this repository defines the requirements and checks images against them. For the size need alone, role images can be extracted directly from the official image.
 
@@ -67,7 +67,7 @@ Build with `make role-images VARIANT=official` (or debian, ubuntu, alpine).
 
 ## Checking an image
 
-Requires Python 3.9 or later and a Docker engine with API 1.49 or later. The checker never builds or pulls images; prepare them locally first.
+Requires Python 3.9 or later and a Docker engine with API 1.49 or later. The checker never builds or pulls images; prepare them locally first. What each role must provide is in [the role capability table](docs/ROLES.md#role-images).
 
 | Level | Verifies |
 | --- | --- |
