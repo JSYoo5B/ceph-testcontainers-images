@@ -112,7 +112,16 @@ image with every packaged module requested. Every check must pass there
 except `mgr-module-run` of a module that cannot run in the source, and each
 such module is recorded with the source's reason in the build plan and
 report (`mgr_modules_source_cannot_run`) and in the
-`io.ceph-testcontainers.mgr-modules-source-cannot-run` label. Its files and
+`io.ceph-testcontainers.mgr-modules-source-cannot-run` label. A module is
+recorded only when its load in the source completed and its own `can_run()`
+returned false. A module that failed to load (an import error, an error in
+`can_run()`, no `MgrModule` subclass) fails the build, and so does an
+inconclusive probe: a load that timed out, exited abnormally or was killed,
+or left no valid report naming that module, and a source probe that timed
+out, did not finish, or exited other than 0 or 1. A slow or interrupted
+builder therefore stops the build instead of exempting a module. Only the
+build writes this record; the CI gate, publication and the published-image
+check read it. Its files and
 import closure stay in the bundle as the release ships them. The role check
 then requires every packaged module that runs in the source, and
 publication requires that check. Package versions, source packages
@@ -140,9 +149,10 @@ request. It need not carry Dashboard or the project bundle's module list.
 `image/check.py --image mgr-modules=REF --mgr-module NAME` requires each
 named module in addition to the baseline. Any valid module name is accepted,
 including modules unknown to this repository; there is no allowlist. A
-requested module that is absent, whose dependency closure cannot import, or
-whose `can_run()` refuses, fails the check with that module's name and
-reason, and the check never substitutes another image. The project bundle is
+requested module that is absent, whose dependency closure cannot import, that
+fails to load, or whose `can_run()` refuses, fails the check with that
+module's name and reason; a load that does not complete fails it as
+`timeout` or `checker_failure`. The check never substitutes another image. The project bundle is
 checked with every recorded module that runs in its source, and publication
 requires that check. A test that needs a module the official image cannot
 run, such as influx, supplies its own mgr-modules image with the missing
