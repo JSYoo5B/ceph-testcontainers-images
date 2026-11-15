@@ -18,7 +18,8 @@ ALL_COHORTS = {(v, a) for v in publish.VARIANTS for a in publish.ARCHITECTURES}
 # Every published role name, longest first, to recognize a role in a tag.
 ROLE_NAMES = sorted(set(publish.releases.roles("official")), key=len, reverse=True)
 BASELINE = [r for r in publish.releases.ROLES if r != "all"]
-MGR_LABEL = {"io.ceph-testcontainers.mgr-modules": "dashboard volumes"}
+MGR_LABEL = {"io.ceph-testcontainers.mgr-modules": "dashboard influx volumes",
+             "io.ceph-testcontainers.mgr-modules-source-cannot-run": "influx"}
 
 
 def digest(number):
@@ -175,7 +176,21 @@ class PublicationTests(unittest.TestCase):
                     self.stage(root, value, None)
             value = report(); publish.save(root / "check.json", value)
             with mock.patch.dict(MGR_LABEL, {"io.ceph-testcontainers.mgr-modules": ""}), \
-                    self.assertRaisesRegex(publish.PublishError, "packaged MGR module"):
+                    self.assertRaisesRegex(publish.PublishError, "packaged modules"):
+                self.stage(root, value, None)
+            # Only a recorded packaged module that cannot run in the source is exempt.
+            cannot_run = "io.ceph-testcontainers.mgr-modules-source-cannot-run"
+            for cannot in ("influx absent", "dashboard influx volumes"):
+                with self.subTest(cannot=cannot), mock.patch.dict(MGR_LABEL, {cannot_run: cannot}), \
+                        self.assertRaisesRegex(publish.PublishError, "must be packaged modules, and not all"):
+                    self.stage(root, value, None)
+            # Without the exemption the unchecked influx blocks publication.
+            with mock.patch.dict(MGR_LABEL, {cannot_run: ""}), \
+                    self.assertRaisesRegex(publish.PublishError, "packaged MGR module that can run"):
+                self.stage(root, value, None)
+            without = {k: v for k, v in MGR_LABEL.items() if k != cannot_run}
+            with mock.patch.dict(MGR_LABEL, without, clear=True), \
+                    self.assertRaisesRegex(publish.PublishError, "records no source cannot-run"):
                 self.stage(root, value, None)
 
     def test_distributions_publish_no_mgr_modules_role(self):

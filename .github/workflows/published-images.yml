@@ -94,11 +94,16 @@ jobs:
               subprocess.run(['docker', 'pull', '--platform', platform, reference], check=True)
               command.extend(['--image', role + '=' + reference])
               if role == 'mgr-modules':
-                  # Require the MGR module inventory the published image declares.
+                  # Require the MGR module inventory the published image declares,
+                  # except the modules it records as unable to run in its source.
                   labels = json.loads(subprocess.run(['docker', 'image', 'inspect', '--format', '{{json .Config.Labels}}',
-                                                      reference], check=True, capture_output=True, text=True).stdout)
-                  for module in (labels or {}).get('io.ceph-testcontainers.mgr-modules', '').split():
-                      command.extend(['--mgr-module', module])
+                                                      reference], check=True, capture_output=True, text=True).stdout) or {}
+                  cannot = labels.get('io.ceph-testcontainers.mgr-modules-source-cannot-run')
+                  if cannot is None:
+                      raise ValueError('The mgr-modules image records no source cannot-run MGR modules; republish it')
+                  for module in labels.get('io.ceph-testcontainers.mgr-modules', '').split():
+                      if module not in cannot.split():
+                          command.extend(['--mgr-module', module])
           subprocess.run(command, check=True)
           PY
       - uses: actions/upload-artifact@v4

@@ -27,6 +27,7 @@ def active_roles(variant):
     return releases.roles(variant)
 
 MGR_MODULES_LABEL = "io.ceph-testcontainers.mgr-modules"
+MGR_MODULES_CANNOT_RUN_LABEL = "io.ceph-testcontainers.mgr-modules-source-cannot-run"
 
 DIGEST = re.compile(r"sha256:[0-9a-f]{64}")
 
@@ -161,10 +162,16 @@ def stage(args):
         require(labels.get("io.ceph-testcontainers.role") == role,
                 "Local image role differs from the checked role")
         if role == "mgr-modules":
-            # Every module the image says it carries must have been checked.
+            # Every module the image says it carries must have been checked,
+            # except a recorded one that cannot run in the source image either.
             packaged = labels.get(MGR_MODULES_LABEL, "").split()
-            require(packaged and set(packaged) <= set(checked.get("requested_mgr_modules") or []),
-                    "The check did not require every packaged MGR module")
+            cannot = labels.get(MGR_MODULES_CANNOT_RUN_LABEL)
+            require(cannot is not None, "The image records no source cannot-run MGR modules")
+            cannot = cannot.split()
+            require(set(cannot) <= set(packaged) and set(packaged) - set(cannot),
+                    "The source cannot-run MGR modules must be packaged modules, and not all of them")
+            require(packaged and set(packaged) - set(cannot) <= set(checked.get("requested_mgr_modules") or []),
+                    "The check did not require every packaged MGR module that can run in the source")
         config_digest = local.get("Descriptor", {}).get("annotations", {}).get("config.digest", local["Id"])
         require(DIGEST.fullmatch(config_digest) is not None, "Missing tested image config digest")
         prepared[role] = {"role": role, "architecture": args.architecture,

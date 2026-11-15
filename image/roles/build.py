@@ -23,6 +23,9 @@ import ceph_license
 
 ROLES = contract.ROLES + ("all",)
 MGR_MODULES_LABEL = "io.ceph-testcontainers.mgr-modules"
+# The packaged modules that cannot run in the source image either.
+MGR_MODULES_CANNOT_RUN_LABEL = "io.ceph-testcontainers.mgr-modules-source-cannot-run"
+MGR_MODULE_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 HERE = Path(__file__).resolve().parent
 PROJECT_URL = "https://github.com/JSYoo5B/ceph-testcontainers-images"
 NOTICE = "/usr/share/ceph-testcontainers/SOURCES.txt"
@@ -170,9 +173,65 @@ def mgr_modules(plan, role):
     modules = plan["roles"][role].get("mgr_modules")
     if modules is None:
         return None
-    if not modules or any(not isinstance(m, str) or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", m) for m in modules):
+    if not modules or any(not isinstance(m, str) or not MGR_MODULE_NAME.fullmatch(m) for m in modules):
         raise BuildError("Invalid MGR module inventory for role " + role)
     return sorted(modules)
+
+
+def source_cannot_run(plan, role):
+    """The packaged modules of a role that cannot run in the source image, by
+    the reason the source gives; None for a role without an inventory."""
+    modules = mgr_modules(plan, role)
+    if modules is None:
+        return None
+    cannot = plan["roles"][role].get("mgr_modules_source_cannot_run")
+    if not isinstance(cannot, dict) or not set(cannot) <= set(modules) or set(cannot) == set(modules) \
+            or any(not isinstance(reason, str) or not reason for reason in cannot.values()):
+        raise BuildError("Invalid source cannot-run MGR modules for role " + role)
+    return dict(sorted(cannot.items()))
+
+
+def checked_mgr_modules(plan, role):
+    """The packaged modules the requirement check of a role must require: every
+    module that can run in the source image."""
+    cannot = source_cannot_run(plan, role)
+    return None if cannot is None else [m for m in mgr_modules(plan, role) if m not in cannot]
+
+
+def probe_source_mgr_modules(image, platform, modules, log):
+    """Run the requirement probe of the mgr-modules role in the source image
+    with every packaged module requested, and return {module: reason} for the
+    modules that cannot run there. The extraction keeps a module as the
+    source ships it, so a module that cannot run in the source is recorded,
+    not checked; every other check, including each such module's files and
+    import closure, must pass in the source."""
+    container = "ceph-roles-source-probe-" + uuid.uuid4().hex
+    command = ["docker", "run", "--rm", "--name", container, "--pull=never", "--network=none",
+               "--user=0:0", "--interactive", "--hostname=ceph-image-check",
+               "--add-host=ceph-image-check:127.0.0.1", "--platform", platform,
+               "--entrypoint=/bin/sh", image, "-s", "--", "mgr-modules", *modules]
+    try:
+        result = subprocess.run(command, input=(PROJECT / "image" / "check-runtime.sh").read_text(),
+                                capture_output=True, text=True, errors="backslashreplace", timeout=1800)
+    except subprocess.TimeoutExpired as error:
+        subprocess.run(["docker", "rm", "--force", container], capture_output=True)
+        raise BuildError("The source MGR module probe timed out") from error
+    log.write_text(result.stdout + result.stderr)
+    lines = result.stdout.splitlines()
+    if "COMPLETE\tmgr-modules" not in lines:
+        raise BuildError("The source MGR module probe did not finish; log: " + str(log))
+    reasons = {}
+    for line in lines:
+        match = re.fullmatch(r"MGR module (\S+) cannot run: (.+)", line)
+        if match:
+            reasons[match[1]] = match[2]
+    failed = [line.split("\t")[2] for line in lines if line.startswith("CHECK\tfailed\t")]
+    cannot = {name.split(":", 1)[1] for name in failed if name.startswith("mgr-module-run:")}
+    other = sorted(name for name in failed if not name.startswith("mgr-module-run:"))
+    if other or not cannot <= set(modules) or not cannot <= set(reasons) or bool(cannot) != bool(result.returncode):
+        raise BuildError("The source image fails the mgr-modules requirement check beyond modules that "
+                         "cannot run: " + ", ".join(other or sorted(cannot)) + "; log: " + str(log))
+    return {name: reasons[name] for name in sorted(cannot)}
 
 
 def dockerfile(plan, runtime_env=None):
@@ -217,6 +276,10 @@ def dockerfile(plan, runtime_env=None):
             # The packaged inventory, which the publication gate requires the
             # image requirement check to have requested.
             lines.append("LABEL " + MGR_MODULES_LABEL + "=" + json.dumps(" ".join(modules)))
+            # The packaged modules that the check does not require because
+            # they cannot run in the source image either.
+            lines.append("LABEL " + MGR_MODULES_CANNOT_RUN_LABEL + "=" +
+                         json.dumps(" ".join(source_cannot_run(plan, role))))
     return "\n".join(lines) + "\n"
 
 
@@ -272,7 +335,7 @@ def arguments(argv=None):
 
 def check_command(tags, level, output, modules=()):
     """image/check.py invocation for the built roles and all image, requiring
-    the packaged MGR module inventory of the mgr-modules image."""
+    the checked MGR module inventory of the mgr-modules image."""
     command = [sys.executable, str(PROJECT / "image" / "check.py"), "--output-dir", str(output)]
     for role in tags:
         command += ["--image", role + "=" + tags[role]]
@@ -368,6 +431,14 @@ def main():
                 run(["docker", "cp", container_id + ":/role-output/" + archive, str(target)])
             run(["docker", "rm", container_id])
             container_id = None
+            modules = mgr_modules(plan, "mgr-modules") if "mgr-modules" in plan["roles"] else None
+            if modules is not None:
+                print("Probing the packaged MGR modules in the source image...", flush=True)
+                cannot = probe_source_mgr_modules(immutable, platform, modules, output / "source-mgr-modules.log")
+                plan["roles"]["mgr-modules"]["mgr_modules_source_cannot_run"] = cannot
+                report["mgr_modules_source_cannot_run"] = cannot
+                save_json(output / "plan.json", plan)
+                save_json(output / "build-report.json", report)
             if args.source_runtime_env:
                 for entry in source.get("Config", {}).get("Env", []):
                     name, sep, value = entry.partition("=")
@@ -410,7 +481,7 @@ def main():
             print("Running the " + args.check + " image check...", flush=True)
             report["checks"]["image_check"] = "running"
             save_json(output / "build-report.json", report)
-            modules = mgr_modules(plan, "mgr-modules") if "mgr-modules" in plan["roles"] else None
+            modules = checked_mgr_modules(plan, "mgr-modules") if "mgr-modules" in plan["roles"] else None
             run(check_command(tags, args.check, output / "image-check", modules or ()),
                 log=output / "image-check.log")
             report["checks"]["image_check"] = "passed"

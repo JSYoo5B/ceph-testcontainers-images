@@ -51,18 +51,23 @@ def preflight(release, variant, architecture, probe=loader_levels):
 MGR_MODULES_SCENARIOS = ('cluster-lifecycle', 'rbd', 'cephfs')
 
 
-def packaged_mgr_modules(output):
-    """The MGR module inventory of the built mgr-modules image, from its plan."""
-    plan = json.loads((output/'build'/'plan.json').read_text())
-    modules = plan['roles'].get('mgr-modules', {}).get('mgr_modules')
-    if not modules:
+def checked_mgr_modules(output):
+    """The MGR modules the requirement check of the built mgr-modules image
+    must require, from its plan: every packaged module except those that
+    cannot run in the source image either."""
+    role = json.loads((output/'build'/'plan.json').read_text())['roles'].get('mgr-modules', {})
+    modules, cannot = role.get('mgr_modules'), role.get('mgr_modules_source_cannot_run')
+    if not modules or not isinstance(cannot, dict) or not set(cannot) <= set(modules):
         raise RuntimeError('The build recorded no mgr-modules inventory')
-    return modules
+    checked = [module for module in modules if module not in cannot]
+    if not checked:
+        raise RuntimeError('No packaged MGR module can run in the source image')
+    return checked
 
 
 def commands(release, variant, architecture, scope, output, modules=()):
     """The gate commands, which must succeed, and the functional commands by
-    name, which are only recorded. modules is the packaged MGR inventory that
+    name, which are only recorded. modules is the checked MGR inventory that
     the requirement check of the mgr-modules image must require."""
     build = ['make', 'role-images', 'VARIANT='+variant, 'CEPH_RELEASE='+release,
              'PLATFORM=linux/'+architecture, 'ROLE_OUTPUT='+str(output/'build')]
@@ -158,7 +163,7 @@ def main(argv=None, probe=loader_levels, execute=subprocess.run):
     execute(gate[0], check=True)
     if len(gate) > 1:
         # The requirement check needs the inventory that the build packaged.
-        modules = packaged_mgr_modules(args.output) if 'mgr-modules' in releases.roles(args.variant) else ()
+        modules = checked_mgr_modules(args.output) if 'mgr-modules' in releases.roles(args.variant) else ()
         gate, functional = commands(args.release, args.variant, args.architecture, args.scope, args.output, modules)
         for command in gate[1:]:
             execute(command, check=True)
