@@ -204,7 +204,15 @@ def probe_source_mgr_modules(image, platform, modules, log):
     modules that cannot run there. The extraction keeps a module as the
     source ships it, so a module that cannot run in the source is recorded,
     not checked; every other check, including each such module's files and
-    import closure, must pass in the source."""
+    import closure, must pass in the source.
+
+    A module is recorded only when the completed probe reports its own
+    can_run() refusal: its mgr-module-run check failed as a loading_failure
+    with exactly one "cannot run" reason. Every other outcome fails the build:
+    a probe that timed out, exited other than 0 or 1, or did not finish; a
+    module without a run result; a run check that timed out or was
+    inconclusive (timeout, checker_failure); a module that failed to load;
+    and a reason that does not match its check."""
     container = "ceph-roles-source-probe-" + uuid.uuid4().hex
     command = ["docker", "run", "--rm", "--name", container, "--pull=never", "--network=none",
                "--user=0:0", "--interactive", "--hostname=ceph-image-check",
@@ -218,20 +226,37 @@ def probe_source_mgr_modules(image, platform, modules, log):
         raise BuildError("The source MGR module probe timed out") from error
     log.write_text(result.stdout + result.stderr)
     lines = result.stdout.splitlines()
-    if "COMPLETE\tmgr-modules" not in lines:
-        raise BuildError("The source MGR module probe did not finish; log: " + str(log))
-    reasons = {}
+    if result.returncode not in (0, 1) or "COMPLETE\tmgr-modules" not in lines:
+        raise BuildError("The source MGR module probe did not finish (exit %d); log: %s"
+                         % (result.returncode, log))
+    checks, kinds, reasons = {}, {}, {}
     for line in lines:
+        fields = line.split("\t")
+        if len(fields) == 3 and fields[0] == "CHECK":
+            checks[fields[2]] = fields[1]
+        elif len(fields) == 3 and fields[0] == "FAILURE":
+            kinds[fields[2]] = fields[1]
         match = re.fullmatch(r"MGR module (\S+) cannot run: (.+)", line)
         if match:
-            reasons[match[1]] = match[2]
-    failed = [line.split("\t")[2] for line in lines if line.startswith("CHECK\tfailed\t")]
+            reasons.setdefault(match[1], []).append(match[2])
+    # The probe runs a module only after its files and import closure pass.
+    unreported = sorted(m for m in modules if checks.get("mgr-module-run:" + m) not in ("passed", "failed")
+                        and checks.get("mgr-module:" + m) == "passed" and checks.get("mgr-module-load:" + m) == "passed")
+    inconclusive = sorted(name for name, status in checks.items() if status == "failed" and
+                          name.startswith("mgr-module-run:") and kinds.get(name) != "loading_failure")
+    if unreported or inconclusive:
+        raise BuildError("The source MGR module probe is inconclusive for " +
+                         ", ".join(["no run result: " + m for m in unreported] + inconclusive) + "; log: " + str(log))
+    failed = sorted(name for name, status in checks.items() if status != "passed")
     cannot = {name.split(":", 1)[1] for name in failed if name.startswith("mgr-module-run:")}
-    other = sorted(name for name in failed if not name.startswith("mgr-module-run:"))
-    if other or not cannot <= set(modules) or not cannot <= set(reasons) or bool(cannot) != bool(result.returncode):
+    refused = {m for m in cannot if m in modules and len(reasons.get(m, ())) == 1}
+    other = sorted(name for name in failed if name.split(":", 1)[-1] not in refused or
+                   not name.startswith("mgr-module-run:"))
+    if other or set(reasons) != refused or bool(failed) != bool(result.returncode):
         raise BuildError("The source image fails the mgr-modules requirement check beyond modules that "
-                         "cannot run: " + ", ".join(other or sorted(cannot)) + "; log: " + str(log))
-    return {name: reasons[name] for name in sorted(cannot)}
+                         "refuse to run: " + (", ".join(other) or "the reported reasons and exit status "
+                         "disagree with the checks") + "; log: " + str(log))
+    return {name: reasons[name][0] for name in sorted(refused)}
 
 
 def dockerfile(plan, runtime_env=None):
