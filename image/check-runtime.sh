@@ -261,6 +261,23 @@ cache_sleep() {
 cache_mountinfo() {
     test -r /proc/self/mountinfo && awk 'NF >= 10 { n++ } END { exit !n }' /proc/self/mountinfo
 }
+# The command supervisor must observe an exited child while it still owns
+# the child's process group. A signal-zero call checks group access without
+# sending a signal. The context manager reaps the child after the probe.
+if "$cache" || "$rgw"; then
+    check python-supervisor python3 - <<'PYTHON'
+import os
+import subprocess
+import sys
+
+with subprocess.Popen([sys.executable, "-c", "pass"], start_new_session=True) as child:
+    state = os.waitid(os.P_PID, child.pid, os.WEXITED | os.WNOWAIT)
+    if (state.si_code != os.CLD_EXITED or state.si_status != 0
+            or os.getpgid(child.pid) != child.pid):
+        raise RuntimeError("exited child did not retain its own process group")
+    os.killpg(child.pid, 0)
+PYTHON
+fi
 if "$core" || "$client" || "$cache" || "$fsmirror" || "$rgw" || "$mgrbundle"; then
     binaries="ceph"
     if "$core"; then binaries="$binaries ceph-mon ceph-mgr ceph-authtool monmaptool"; fi
