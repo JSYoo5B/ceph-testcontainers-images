@@ -1116,7 +1116,7 @@ class CapturePublicationTests(unittest.TestCase):
                 "environment": {"OperatingSystem": "Ubuntu 24.04"}, "targets": targets}
 
     def test_the_capture_helper_is_published(self):
-        self.assertEqual(extension_check.PUBLISHED, ("netem", "capture"))
+        self.assertIn("capture", extension_check.PUBLISHED)
         import publish
         self.assertEqual(publish.extension_tag("capture"), publish.REGISTRY + ":extension-capture-v1")
         self.assertEqual(publish.extension_tag("capture", "arm64"),
@@ -1204,7 +1204,8 @@ class CapturePublicationTests(unittest.TestCase):
 
     def test_raw_captures_are_refused_before_any_artifact_upload(self):
         job = section((WORKFLOWS / "test.yml").read_text(), "  capture-extension:", "  promote-extension:")
-        published = section((WORKFLOWS / "published-extension.yml").read_text(), "  published-capture-extension:")
+        published = section((WORKFLOWS / "published-extension.yml").read_text(), "  published-capture-extension:",
+                            "  published-blockio-extension:")
         for name, steps, directory in ((("test.yml", job.split("      - "), "$RUNNER_TEMP/capture/")),
                                        ("published-extension.yml", published.split("      - "),
                                         "$RUNNER_TEMP/published-extension/")):
@@ -1234,7 +1235,7 @@ class CapturePublicationTests(unittest.TestCase):
         self.assertIn("needs: capture-extension\n", promote)
         self.assertIn("pattern: extension-candidate-capture-*\n", promote)
         self.assertIn("promote-extension --extension capture", promote)
-        verify = section(workflow, "  verify-published-capture-extension:")
+        verify = section(workflow, "  verify-published-capture-extension:", "  promote-blockio-extension:")
         self.assertIn("if: " + PUBLISH_GATE + "\n", verify)
         self.assertIn("needs: promote-capture-extension\n", verify)
         self.assertIn("extension: capture\n", verify)
@@ -1247,7 +1248,7 @@ class CapturePublicationTests(unittest.TestCase):
     def test_the_published_capture_helper_is_checked_by_digest_as_in_ci(self):
         published = (WORKFLOWS / "published-extension.yml").read_text()
         netem = section(published, "  published-extension:", "  published-capture-extension:")
-        capture = section(published, "  published-capture-extension:")
+        capture = section(published, "  published-capture-extension:", "  published-blockio-extension:")
         self.assertIn("if: inputs.extension == 'netem'", netem)
         self.assertIn("if: inputs.extension == 'capture'", capture)
         self.assertIn("published-reference --extension \"$IMAGE_EXTENSION\"", capture)

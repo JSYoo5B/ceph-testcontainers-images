@@ -26,9 +26,10 @@ flow, a stop by SIGTERM with the file flushed and the statistics, a valid
 empty capture, the packet bound, and that an invalid filter, a missing
 interface and a missing NET_RAW are refused, each with its own kind.
 
-The blockio helper also has only a quick check: root, no capabilities or
-network, and user-space help/version and Python supervision checks only.
-It never opens host devices or queries the kernel device-mapper targets.
+The blockio helper has only a quick check, which is also its publication
+gate: root, no capabilities or network, and user-space help/version and Python
+supervision checks only. It never opens host devices or queries the kernel
+device-mapper targets.
 
 The clock-probe helper has only the quick check so far: its probe runs as root
 without capabilities or network and checks the compiler, the build manifest of
@@ -62,16 +63,19 @@ HERE = Path(__file__).resolve().parent
 # none; the capture helper as the unprivileged user of its image with
 # NET_RAW, which its tcpdump needs to start at all; the clock-probe helper runs
 # as root with none; the blockio helper also runs as root with none.
+# A published helper names the check level that gates its publication: the
+# functional check for netem and capture, the quick check for blockio, whose
+# contract is the presence of the executables and options its consumer runs.
 EXTENSIONS = {"netem": {"contract": "1", "probe": HERE / "extensions" / "netem" / "check-netem.sh", "user": "0:0",
-                        "caps": (), "published": True},
+                        "caps": (), "published": True, "gate": "functional"},
               "capture": {"contract": "1", "probe": HERE / "extensions" / "capture" / "check-capture.sh",
-                          "user": None, "caps": ("NET_RAW",), "published": True},
+                          "user": None, "caps": ("NET_RAW",), "published": True, "gate": "functional"},
               "blockio": {"contract": "1", "probe": HERE / "extensions" / "blockio" / "check-blockio.sh",
-                          "user": "0:0", "caps": (), "published": False},
+                          "user": "0:0", "caps": (), "published": True, "gate": "quick"},
               "clock-probe": {"contract": "1", "probe": HERE / "extensions" / "clock-probe" / "check-clock-probe.sh",
                               "user": "0:0", "caps": (), "published": False}}
-# The helpers that image/publish.py publishes, each gated by its own
-# functional check on both architectures.
+# The helpers that image/publish.py publishes, each gated by its own check on
+# both architectures.
 PUBLISHED = tuple(name for name, spec in EXTENSIONS.items() if spec["published"])
 # The checks that exist only for the netem helper.
 NETEM_ONLY = ("selector", "rate", "packet_faults")

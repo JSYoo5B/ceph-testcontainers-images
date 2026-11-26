@@ -291,7 +291,10 @@ def extension_targets(extension):
     """The targets every published helper must pass. The netem helper: the
     official image and the published essential role image, by its tag, of
     every published release. The capture helper: the official image of every
-    published release, which is what its CI job checks."""
+    published release, which is what its CI job checks. The blockio helper has
+    no target: its quick check is its whole gate."""
+    if extension == "blockio":
+        return set()
     if extension == "capture":
         return {releases.official(release) for release in releases.published()}
     return {reference for release in releases.published()
@@ -302,8 +305,9 @@ def validate_extension_report(report, extension, architecture):
     extension_check = extensions()
     require(extension in extension_check.PUBLISHED, "Unknown or unpublished extension " + repr(extension))
     contract = extension_check.EXTENSIONS[extension]["contract"]
-    require(report.get("status") == "passed" and report.get("level") == "functional",
-            "Publishing an extension requires a passing functional check")
+    gate = extension_check.EXTENSIONS[extension]["gate"]
+    require(report.get("status") == "passed" and report.get("level") == gate,
+            "Publishing the " + extension + " helper requires a passing " + gate + " check")
     require(report.get("extension") == extension and report.get("contract") == contract,
             "The report checked a different extension or contract")
     require(report.get("checker_sha256") == extension_check.checker_sha256(),
@@ -322,7 +326,8 @@ def validate_extension_report(report, extension, architecture):
     for result in targets.values():
         require(result.get("status") == "passed" and result.get("cleanup", {}).get("status") == "passed"
                 and not result["cleanup"].get("leftovers"), "Every target scenario must pass and clean up")
-    {"netem": validate_netem_report, "capture": validate_capture_report}[extension](report, architecture)
+    {"netem": validate_netem_report, "capture": validate_capture_report,
+     "blockio": validate_blockio_report}[extension](report, architecture)
 
 
 def validate_netem_report(report, architecture):
@@ -378,6 +383,16 @@ def validate_capture_report(report, architecture):
                         for name, expected in extension_check.CAPTURE_REFUSALS.items()
                         for control in (controls[name],)),
                 "Every negative control must be recorded and fail as required: " + reference)
+
+
+def validate_blockio_report(report, architecture):
+    """The blockio helper publishes what its quick check showed on this
+    platform: every executable and option of its contract, recorded as passed
+    checks of a complete probe, and no target scenario."""
+    require(not report.get("targets"), "The blockio helper has no target scenario")
+    checks = report["image"].get("checks") or []
+    require(checks and all(entry.get("status") == "passed" for entry in checks),
+            "Every blockio contract check must be recorded and pass")
 
 
 # The leading bytes of classic pcap (both byte orders, micro- and nanosecond)
@@ -450,6 +465,7 @@ def stage_extension(args):
         result.update(selectors=sorted(report["selectors"]), kernel=report["kernel"].get("kernel"))
     else:
         result["versions"] = checked.get("versions")
+    result["gate"] = extensions().EXTENSIONS[args.extension]["gate"]
     save(args.output, result)
     tag = REGISTRY + ":ci-" + args.run_id + "-" + extension_tag(args.extension, args.architecture).split(":", 1)[1]
     run(["docker", "tag", entry["image_id"], tag])
@@ -610,7 +626,7 @@ def main():
         command.add_argument("--revision", required=True)
         command.add_argument("--run-id", required=True)
         command.add_argument("--output", type=Path, required=True)
-    stage_helper = commands.add_parser("stage-extension", help="Upload a functionally checked extension helper")
+    stage_helper = commands.add_parser("stage-extension", help="Upload an extension helper that passed its gate")
     stage_helper.add_argument("--report", type=Path, required=True)
     stage_helper.add_argument("--extension", required=True)
     stage_helper.add_argument("--architecture", choices=ARCHITECTURES, required=True)

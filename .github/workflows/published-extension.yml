@@ -1,12 +1,13 @@
 name: published extension
 
-# Checks a published extension helper by digest, as consumers pull it
-# (docs/EXTENSIONS.md). The netem helper: the contract, the kernel feature, a
-# delay, every selector profile, the bandwidth profile and the packet-fault
-# profile inside a container of every published release's official and essential
-# role image. The capture helper: the contract and every capture and negative
-# control in the namespace of a container of every published release's
-# official image.
+# Checks the platform images that a publishing run promoted, by the digests
+# that run recorded (docs/EXTENSIONS.md). The netem helper: the contract, the
+# kernel feature, a delay, every selector profile, the bandwidth profile and the
+# packet-fault profile inside a container of every published release's official
+# image and published essential role image. The capture helper: the contract
+# and every capture and negative control in the namespace of a container of
+# every published release's official image. The blockio helper: its quick
+# check, which is its publication gate.
 on:
   workflow_call:
     inputs:
@@ -22,7 +23,7 @@ on:
         description: The published helper to check
         required: true
         type: choice
-        options: [netem, capture]
+        options: [netem, capture, blockio]
       images:
         description: 'JSON digest map: extension -> architecture -> sha256 digest'
         required: true
@@ -134,6 +135,48 @@ jobs:
         if: always() && steps.raw-captures.outcome == 'success'
         with:
           name: published-capture-extension-${{ matrix.architecture }}-check
+          retention-days: 30
+          path: |
+            ${{ runner.temp }}/published-extension-digests.json
+            ${{ runner.temp }}/published-extension/
+          if-no-files-found: warn
+
+  published-blockio-extension:
+    if: inputs.extension == 'blockio'
+    strategy:
+      fail-fast: false
+      matrix:
+        architecture: [amd64, arm64]
+        include:
+          - architecture: amd64
+            runner: ubuntu-24.04
+          - architecture: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.9'
+      - run: make extension-test
+      - name: Pull the published digest and check the blockio contract
+        env:
+          PUBLISHED_IMAGES: ${{ inputs.images }}
+          IMAGE_EXTENSION: ${{ inputs.extension }}
+          IMAGE_ARCHITECTURE: ${{ matrix.architecture }}
+        run: |
+          reference="$(python3 image/publish.py published-reference --extension "$IMAGE_EXTENSION" \
+            --architecture "$IMAGE_ARCHITECTURE" --images "$PUBLISHED_IMAGES")"
+          platform="linux/$IMAGE_ARCHITECTURE"
+          docker pull --platform "$platform" "$reference"
+          echo "$PUBLISHED_IMAGES" > "$RUNNER_TEMP/published-extension-digests.json"
+          python3 image/extension_check.py --extension blockio --image "$reference" --platform "$platform" \
+            --output-dir "$RUNNER_TEMP/published-extension"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: published-blockio-extension-${{ matrix.architecture }}-check
           retention-days: 30
           path: |
             ${{ runner.temp }}/published-extension-digests.json

@@ -8,7 +8,7 @@ on:
   workflow_dispatch:
     inputs:
       publish:
-        description: Publish the checked extension helpers (capture only from the default branch)
+        description: Publish the checked extension helpers (capture and blockio only from the default branch)
         type: boolean
         default: false
 permissions:
@@ -213,8 +213,12 @@ jobs:
           if-no-files-found: warn
 
   blockio-extension:
-    # The blockio helper has only its quick check so far; it is built and
-    # checked here on both architectures and never published.
+    # The blockio helper is built and quick-checked on both architectures; the
+    # quick check is its publication gate. A manual run with publish on the
+    # default branch stages the checked image of each architecture.
+    permissions:
+      contents: read
+      packages: write
     strategy:
       fail-fast: false
       matrix:
@@ -231,20 +235,42 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.9'
+      - run: make extension-test
       - uses: docker/setup-buildx-action@v4
         with:
           driver: docker-container
+      - name: Log in for image publication
+        uses: docker/login-action@v3
+        if: inputs.publish && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
       - name: Build the helper
         run: make blockio-image PLATFORM="linux/${{ matrix.architecture }}" IMAGE_REPOSITORY=ceph-check
       - name: Check the blockio contract
         run: |
           python3 image/extension_check.py --extension blockio --image ceph-check:extension-blockio \
             --platform "linux/${{ matrix.architecture }}" --output-dir "$RUNNER_TEMP/blockio"
+      - name: Upload the exact tested helper
+        if: inputs.publish && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+        run: |
+          python3 image/publish.py stage-extension --report "$RUNNER_TEMP/blockio/extension-report.json" \
+            --extension blockio --architecture ${{ matrix.architecture }} \
+            --revision "$GITHUB_SHA" --run-id "$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" \
+            --output "$RUNNER_TEMP/blockio-candidate/extension-candidate.json"
+      - uses: actions/upload-artifact@v4
+        if: inputs.publish && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+        with:
+          name: extension-candidate-blockio-${{ matrix.architecture }}
+          retention-days: 30
+          path: ${{ runner.temp }}/blockio-candidate/extension-candidate.json
+          if-no-files-found: error
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: extension-blockio-${{ matrix.architecture }}-check
-          retention-days: ${{ job.status == 'failure' && 14 || 7 }}
+          retention-days: ${{ inputs.publish && 30 || job.status == 'failure' && 14 || 7 }}
           path: ${{ runner.temp }}/blockio/
           if-no-files-found: warn
 
@@ -341,3 +367,51 @@ jobs:
     with:
       extension: capture
       images: ${{ needs.promote-capture-extension.outputs.images }}
+
+  promote-blockio-extension:
+    # Both architectures' blockio jobs must have passed and uploaded their own
+    # tested helper; a failed platform uploads nothing and blocks promotion.
+    if: inputs.publish && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    needs: blockio-extension
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      images: ${{ steps.promote.outputs.images }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: extension-candidate-blockio-*
+          path: ${{ runner.temp }}/blockio-candidates
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Overwrite the helper tags with the tested digests
+        id: promote
+        run: |
+          python3 image/publish.py promote-extension --extension blockio --candidates "$RUNNER_TEMP/blockio-candidates" \
+            --revision "$GITHUB_SHA" --run-id "$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" \
+            --output "$RUNNER_TEMP/blockio-promotion/promotion.json" --github-output "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: extension-blockio-promotion
+          retention-days: 30
+          path: ${{ runner.temp }}/blockio-promotion/
+          if-no-files-found: warn
+
+  verify-published-blockio-extension:
+    if: inputs.publish && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    needs: promote-blockio-extension
+    permissions:
+      contents: read
+      packages: read
+    uses: ./.github/workflows/published-extension.yml
+    with:
+      extension: blockio
+      images: ${{ needs.promote-blockio-extension.outputs.images }}
