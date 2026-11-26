@@ -320,6 +320,7 @@ def validate_extension_report(report, extension, architecture):
     require(labels.get("io.ceph-testcontainers.extension") == extension and
             labels.get("io.ceph-testcontainers.extension.contract") == contract,
             "A published helper must declare its extension and contract")
+    require_quick_checks(image, extension)
     targets = report.get("targets", {})
     require(extension_targets(extension) <= set(targets),
             "Every release target of the " + extension + " helper must be a checked target")
@@ -385,14 +386,23 @@ def validate_capture_report(report, architecture):
                 "Every negative control must be recorded and fail as required: " + reference)
 
 
+def require_quick_checks(image, extension):
+    """Every quick check of the helper's contract, recorded exactly once and
+    passed, and every other recorded check passed."""
+    checks = image.get("checks") or []
+    names = [entry.get("name") for entry in checks]
+    missing = [name for name in extensions().QUICK_CHECKS[extension] if names.count(name) != 1]
+    require(not missing, "Every quick check of the " + extension + " contract must be recorded once: "
+            + ", ".join(missing))
+    require(all(entry.get("status") == "passed" for entry in checks),
+            "Every quick check of the " + extension + " contract must pass")
+
+
 def validate_blockio_report(report, architecture):
     """The blockio helper publishes what its quick check showed on this
-    platform: every executable and option of its contract, recorded as passed
-    checks of a complete probe, and no target scenario."""
+    platform: every executable and option of its contract, checked by
+    require_quick_checks, and no target scenario."""
     require(not report.get("targets"), "The blockio helper has no target scenario")
-    checks = report["image"].get("checks") or []
-    require(checks and all(entry.get("status") == "passed" for entry in checks),
-            "Every blockio contract check must be recorded and pass")
 
 
 # The leading bytes of classic pcap (both byte orders, micro- and nanosecond)

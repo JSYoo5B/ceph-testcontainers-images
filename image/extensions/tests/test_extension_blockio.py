@@ -13,7 +13,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 import extension_check
 
 PROBE = extension_check.EXTENSIONS["blockio"]["probe"]
-OUTPUT = "CHECK\tpassed\tcli:dmsetup\nCOMPLETE\tblockio\n"
+OUTPUT = "".join("CHECK\tpassed\t%s\n" % name for name in extension_check.QUICK_CHECKS["blockio"]) + "COMPLETE\tblockio\n"
 
 
 class BlockioCheckTests(unittest.TestCase):

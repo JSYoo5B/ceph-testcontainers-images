@@ -1,6 +1,7 @@
 import copy
 import json
 from pathlib import Path
+import re
 import subprocess
 import sys
 import tempfile
@@ -16,13 +17,17 @@ def digest(number):
     return "sha256:" + ("%064x" % number)
 
 
+def quick_checks(extension):
+    return [{"name": name, "status": "passed"} for name in publish.extensions().QUICK_CHECKS[extension]]
+
+
 def extension_report(architecture="arm64"):
     targets = {reference: {"status": "passed", "cleanup": {"status": "passed", "leftovers": []}}
                for reference in publish.extension_targets("netem")}
     return {"status": "passed", "level": "functional", "extension": "netem", "contract": "1",
             "checker_sha256": publish.extensions().checker_sha256(),
             "image": {"image_id": digest(50), "status": "passed", "platform": "linux/" + architecture,
-                      "cleanup": {"status": "passed"},
+                      "cleanup": {"status": "passed"}, "checks": quick_checks("netem"),
                       "labels": {"io.ceph-testcontainers.extension": "netem",
                                  "io.ceph-testcontainers.extension.contract": "1"}},
             "kernel": {"status": "passed", "kernel": "6.8.0", "cleanup": {"status": "passed"}},
@@ -47,8 +52,7 @@ def blockio_report(architecture="amd64"):
             "checker_sha256": publish.extensions().checker_sha256(), "targets": {},
             "image": {"image_id": digest(50), "status": "passed", "platform": "linux/" + architecture,
                       "cleanup": {"status": "passed"},
-                      "checks": [{"name": "path:dmsetup", "status": "passed"},
-                                 {"name": "cli:losetup", "status": "passed"}],
+                      "checks": quick_checks("blockio"),
                       "versions": {"python3": "Python 3.11.2"},
                       "labels": {"io.ceph-testcontainers.extension": "blockio",
                                  "io.ceph-testcontainers.extension.contract": "1"}}}
@@ -109,6 +113,33 @@ class BlockioPublicationTests(unittest.TestCase):
             value["image"]["labels"]["io.ceph-testcontainers.extension"] = extension
             with self.subTest(extension=extension), self.assertRaises(publish.PublishError):
                 publish.validate_extension_report(value, extension, "amd64")
+
+    def test_every_published_gate_requires_each_contract_check_once(self):
+        reports = {"blockio": (blockio_report(), "amd64"), "netem": (extension_report(), "arm64")}
+        for extension, (good, architecture) in reports.items():
+            publish.validate_extension_report(good, extension, architecture)
+            names = publish.extensions().QUICK_CHECKS[extension]
+            for dropped in names:
+                value = copy.deepcopy(good)
+                value["image"]["checks"] = [entry for entry in value["image"]["checks"] if entry["name"] != dropped]
+                with self.subTest(extension=extension, dropped=dropped), \
+                        self.assertRaisesRegex(publish.PublishError, "recorded once: " + re.escape(dropped) + "$"):
+                    publish.validate_extension_report(value, extension, architecture)
+            value = copy.deepcopy(good); value["image"]["checks"].append({"name": names[0], "status": "passed"})
+            with self.subTest(extension=extension, repeated=names[0]), self.assertRaises(publish.PublishError):
+                publish.validate_extension_report(value, extension, architecture)
+
+    def test_stage_extension_refuses_a_blockio_report_without_one_contract_check(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary); value = blockio_report()
+            value["image"]["checks"] = [entry for entry in value["image"]["checks"] if entry["name"] != "cli:dmsetup"]
+            publish.save(root / "report.json", value)
+            args = SimpleNamespace(report=root / "report.json", extension="blockio", architecture="amd64",
+                                   revision="a" * 40, run_id="123-1", output=root / "candidate.json")
+            with mock.patch.object(publish, "run") as run, \
+                    self.assertRaisesRegex(publish.PublishError, "cli:dmsetup"):
+                publish.stage_extension(args)
+            run.assert_not_called()
 
     def test_stage_extension_uploads_the_quick_checked_blockio_helper(self):
         with tempfile.TemporaryDirectory() as temporary:

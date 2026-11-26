@@ -1105,8 +1105,8 @@ class CapturePublicationTests(unittest.TestCase):
         for reference in sorted(publish.extension_targets("capture")):
             targets[reference] = json.loads(json.dumps(result))
             targets[reference]["reference"] = reference
-        checks = [{"name": "path:tcpdump", "status": "passed"},
-                  {"name": "refused-without-net_raw", "status": "passed", "cleanup": {"status": "passed"}}]
+        checks = [{"name": name, "status": "passed"} for name in extension_check.QUICK_CHECKS["capture"]]
+        checks.append({"name": "refused-without-net_raw", "status": "passed", "cleanup": {"status": "passed"}})
         image = dict(HELPER, status="passed", checks=checks, cleanup={"status": "passed"},
                      versions={"tcpdump": "tcpdump version 4.99.3 libpcap version 1.10.3"},
                      labels={"io.ceph-testcontainers.extension": "capture",
@@ -1153,9 +1153,9 @@ class CapturePublicationTests(unittest.TestCase):
             "quick check level": change(lambda r: r.update(level="quick")),
             "another checker": change(lambda r: r.update(checker_sha256="0" * 64)),
             "no labels": change(lambda r: r["image"].update(labels={})),
-            "no quick refusal": change(lambda r: r["image"].update(checks=r["image"]["checks"][:1])),
-            "failed quick refusal": change(lambda r: r["image"]["checks"][1].update(status="failed")),
-            "quick refusal cleanup": change(lambda r: r["image"]["checks"][1]["cleanup"].update(status="failed")),
+            "no quick refusal": change(lambda r: r["image"].update(checks=r["image"]["checks"][:-1])),
+            "failed quick refusal": change(lambda r: r["image"]["checks"][-1].update(status="failed")),
+            "quick refusal cleanup": change(lambda r: r["image"]["checks"][-1]["cleanup"].update(status="failed")),
             "missing release target": change(lambda r: r["targets"].pop(official)),
             "failed target": change(lambda r: r["targets"][official].update(status="failed")),
             "target leftovers": change(lambda r: r["targets"][official]["cleanup"].update(leftovers=["x"])),

@@ -105,7 +105,9 @@ class CaptureQualificationTests(unittest.TestCase):
                 "image": {"status": "passed", "reference": "synthetic-helper", "image_id": image_id, "platform": "linux/" + arch,
                           "labels": {"io.ceph-testcontainers.extension": "capture", "io.ceph-testcontainers.extension.contract": "1"},
                           "cleanup": {"status": "passed"},
-                          "checks": [{"name": "refused-without-net_raw", "status": "passed", "cleanup": {"status": "passed"}}]}}
+                          "checks": [{"name": name, "status": "passed"}
+                                     for name in q.publish.extensions().QUICK_CHECKS["capture"]]
+                                    + [{"name": "refused-without-net_raw", "status": "passed", "cleanup": {"status": "passed"}}]}}
 
     def artifact(self, name, files, job):
         number = len(self.artifacts) + 1

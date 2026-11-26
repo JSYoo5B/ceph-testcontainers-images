@@ -3,6 +3,7 @@ import io
 import itertools
 import json
 from pathlib import Path
+import re
 import sys
 import tempfile
 import unittest
@@ -345,15 +346,47 @@ class ExtensionCheckTests(unittest.TestCase):
         self.assertEqual(extension_check.classify("Cannot find device \"eth9\""), "runtime_failure")
 
     def test_probe_output_keeps_failures_and_versions(self):
-        output = ("CHECK\tpassed\tpath:sh\nCHECK\tfailed\tpath:tc\nFAILURE\tmissing_executable\tpath:tc\n"
+        rows = ["CHECK\t%s\t%s\n" % ("failed" if name == "path:tc" else "passed", name)
+                for name in extension_check.QUICK_CHECKS["netem"]]
+        output = ("".join(rows) + "FAILURE\tmissing_executable\tpath:tc\n"
                   "VERSION\tip\tip utility, iproute2-6.1.0\nCOMPLETE\tnetem\n")
         checks, versions, complete = extension_check.parse_probe(output, "netem")
         self.assertTrue(complete)
         self.assertEqual(versions, {"ip": "ip utility, iproute2-6.1.0"})
-        self.assertEqual(checks[1]["failure_kind"], "missing_executable")
+        failed = next(item for item in checks if item["name"] == "path:tc")
+        self.assertEqual(failed["failure_kind"], "missing_executable")
         self.assertFalse(extension_check.parse_probe("CHECK\tpassed\tpath:sh\n", "netem")[2])
         with self.assertRaises(extension_check.CheckError):
             extension_check.parse_probe("garbage\n", "netem")
+
+    def test_a_probe_that_skips_or_repeats_a_contract_check_is_incomplete(self):
+        for extension, names in extension_check.QUICK_CHECKS.items():
+            complete = "".join("CHECK\tpassed\t%s\n" % name for name in names)
+            done = "COMPLETE\t" + extension + "\n"
+            self.assertTrue(extension_check.parse_probe(complete + done, extension)[2], extension)
+            for dropped in names:
+                output = "".join("CHECK\tpassed\t%s\n" % name for name in names if name != dropped) + done
+                with self.subTest(extension=extension, dropped=dropped):
+                    self.assertFalse(extension_check.parse_probe(output, extension)[2])
+                    self.assertEqual(extension_check.probe_gaps(extension_check.parse_probe(output, extension)[0],
+                                                                extension), [dropped])
+            with self.subTest(extension=extension, repeated=names[0]):
+                repeated = complete + "CHECK\tpassed\t%s\n" % names[0] + done
+                self.assertFalse(extension_check.parse_probe(repeated, extension)[2])
+
+    def test_each_probe_reports_exactly_its_contract_checks(self):
+        # The probe scripts and QUICK_CHECKS must name the same checks, so that
+        # a probe edit that drops a check also has to change the contract list.
+        for extension, spec in extension_check.EXTENSIONS.items():
+            script = Path(spec["probe"]).read_text()
+            loops = re.findall(r'^for utility in ([^;]+); do\n\s+check "path:\$utility"', script, re.M)
+            names = ["path:" + utility for loop in loops for utility in loop.split()]
+            direct = re.findall(r"^check (\S+) ", script, re.M)
+            names += direct
+            with self.subTest(extension=extension):
+                self.assertEqual(names, list(extension_check.QUICK_CHECKS[extension]))
+                # No check call hides from the extraction above.
+                self.assertEqual(len(re.findall(r"^\s*check ", script, re.M)), len(loops) + len(direct))
 
     def test_arguments_require_targets_only_with_functional(self):
         stderr = io.StringIO()
