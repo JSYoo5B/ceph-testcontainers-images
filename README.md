@@ -160,7 +160,7 @@ Three helpers are published for `linux/amd64` and `linux/arm64`:
 | `ghcr.io/jsyoo5b/ceph-testcontainers-images:extension-capture-v1` | Packet capture with `tcpdump` | Functional check |
 | `ghcr.io/jsyoo5b/ceph-testcontainers-images:extension-blockio-v1` | Device-mapper and loop-device user-space tools | Quick check |
 
-Each helper is checked and published apart from the others and from the release images below, and none blocks another. The capture and blockio helpers are published only from the default branch. The clock-probe helper (a compiler and two pinned libfaketime builds for clock scratch work) has only its quick check and is not published.
+Each helper is checked and published apart from the others and from the release images below, and none blocks another. The capture and blockio helpers are published only from the default branch. The clock-probe helper (a compiler and two pinned libfaketime builds) is kept as the reproducible environment of the clock-fault research and is not published, because no module feature selects it; see [the clock-probe helper](docs/EXTENSIONS.md#clock-probe-helper-contract-1-retained-research-helper).
 
 ## Published images
 

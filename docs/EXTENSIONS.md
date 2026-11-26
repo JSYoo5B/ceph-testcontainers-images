@@ -9,7 +9,7 @@ Every baseline module feature works with the unmodified official Ceph image, and
 - A missing tool, a denied permission and an unsupported kernel are distinct errors. Nothing is installed at run time, and there is no fallback to another mechanism.
 - How an extension image is built is up to its owner. The contract names executables and behavior, not packages, labels or file paths. [image/extension_check.py](../image/extension_check.py) checks any local image against it.
 
-This repository defines the contracts, checks images against them and publishes a reference helper for each extension that a module feature selects: the netem, packet-capture and blockio helpers (see [Published helpers](#published-helpers)). The clock-probe helper has only its quick check and is not published. The modules decide when an extension is used and own everything the feature does with it.
+This repository defines the contracts, checks images against them and publishes a reference helper for each extension that a module feature selects: the netem, packet-capture and blockio helpers (see [Published helpers](#published-helpers)). The clock-probe helper is a retained research helper and is not published, because no module feature selects it. The modules decide when an extension is used and own everything the feature does with it.
 
 ## netem helper (contract 1)
 
@@ -265,11 +265,25 @@ none of those properties. Functional block-I/O qualification (loop devices,
 device-mapper delay and error tables, recovery) belongs to the consumer's native
 tests and is not part of this helper's publication.
 
-## clock-probe helper (contract 1, quick check only)
+## clock-probe helper (contract 1, retained research helper)
 
-The clock-probe helper is the placement for the clock-skew and time-jump scratch work in [ceph-testcontainers-go#66](https://github.com/JSYoo5B/ceph-testcontainers-go/issues/66). That research needs a C compiler and a pinned libfaketime interposer inside an isolated scratch container, and the essential role images carry neither. The helper provides them, so that a fixture needs no toolchain on the runner, no matching of the image's libc and no network at test time. The helper contains no Ceph component. Nothing in it applies an offset to a Ceph daemon, decides what a clock fault means or qualifies a clock-fault backend: a module starts the helper as a scratch container of its own and runs its own probe in it.
+The clock-probe helper is the reproducible environment of the clock-fault research in ceph-testcontainers-go: per-process wall-clock offsets of Ceph daemons through a libfaketime interposer. It carries a C compiler and two pinned libfaketime builds (`default` and `intercept-syscall`) with a build manifest, which the essential role images do not, so a research fixture needs no toolchain on the runner, no matching of the image's libc and no network at test time. The helper contains no Ceph component, and nothing in it decides what a clock fault means or qualifies a clock-fault backend: a fixture starts the helper as a scratch container of its own and runs its own probe in it.
 
-This section defines contract 1 and its quick check, which [image/extension_check.py](../image/extension_check.py) runs today. No helper image is published, no functional check exists and no engine support is claimed.
+This section defines contract 1 and its quick check, which [image/extension_check.py](../image/extension_check.py) runs. Contract 1 has no functional check, and no engine support is claimed.
+
+### What the research has established with it
+
+These are observations of the research that used the helper, not checks of this repository and not a support claim for any engine:
+
+- Per-process wall-clock offsets through `LD_PRELOAD` and a live timestamp file that the caller owns, measured for each clock route and for each interposer variant.
+- On Tentacle 20.2.4, natively on `arm64`, an offset of ±2 s in the process of a follower or of the leader MON raised `MON_CLOCK_SKEW`, which cleared after the offset was restored in the same process.
+- The interposer built on Debian's glibc 2.36 also loaded into the official-derived essential role images, which are based on CentOS Stream 9.
+
+What it does not cover: the vDSO symbol and raw syscall routes, monotonic time, and daemon instrumentation on `amd64`, which the Go repository qualifies natively with this helper next, together with a MON timecheck round that the research did not exercise.
+
+### Why it is not published
+
+No module feature selects the helper, so no consumer needs a published tag; CI builds it and runs its quick check on native runners of both architectures so that the research can rebuild exactly this environment. A clock-fault feature would place the interposer into Ceph daemon containers. Its helper would carry the interposer and its manifest but no compiler, so its contract would differ from this research contract, and it would be published under a contract of its own when that feature exists.
 
 ### Image contract
 
@@ -303,14 +317,13 @@ The load check uses a static file. It does not update a file while a process run
 
 [image/extensions/clock-probe](../image/extensions/clock-probe) builds on the pinned `debian:bookworm-slim` base of the Debian role images with Debian's `build-essential`, `binutils` and `python3`. [build-libfaketime.sh](../image/extensions/clock-probe/build-libfaketime.sh) fetches libfaketime `v0.9.12` once during the image build as the single pinned commit `3ccdd344aadf1e317156fa5fb7c881f2c4404778`, fails the build when the fetched commit differs, builds `libfaketime.so.1` without and with `-DINTERCEPT_SYSCALL`, writes the manifest, and removes the source tree and its fetch tools. The image carries libfaketime's license (GPL-2.0) at `/usr/share/doc/libfaketime/copyright`, and `/usr/share/ceph-testcontainers/SOURCES.txt` points to the commit and, for the Debian packages, to their source packages. CI builds it and runs the quick check on native runners of both architectures; it is not published.
 
-### What the helper does not cover
+### What the quick check does not cover
 
-- Whether the four clock routes of the scratch probe (public `clock_gettime`, libc `syscall`, the vDSO and a raw syscall) shift or bypass the interposer. The quick check measures the public realtime path of one process only.
-- A probe binary, the decoder of its output, or any native scenario of the issue. Those belong to the module and to the later steps of the issue.
+- Whether the clock routes other than the public `clock_gettime(CLOCK_REALTIME)` (libc `syscall`, the vDSO and a raw syscall) follow or bypass the interposer. The quick check measures the public realtime path of one process only.
 - A live update of the offset file, update latency, restoration or disposal of an instrumented process.
 - Any Ceph daemon or client, a time namespace, a virtual machine or a kernel clock fault.
-- A functional check, publication and engine support. They need their own decision and change.
-- The interposer is built for glibc on Debian. A different libc needs its own helper or a changed build, and a build on another base can change the ABI that the module sees.
+- A functional check and engine support.
+- The interposer is built for glibc on Debian. A different libc can need its own helper or a changed build, and a build on another base can change the ABI that the module sees.
 
 ## Checking an extension image
 

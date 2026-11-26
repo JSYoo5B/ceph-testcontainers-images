@@ -31,10 +31,11 @@ gate: root, no capabilities or network, and user-space help/version and Python
 supervision checks only. It never opens host devices or queries the kernel
 device-mapper targets.
 
-The clock-probe helper has only the quick check so far: its probe runs as root
-without capabilities or network and checks the compiler, the build manifest of
-the two pinned libfaketime builds, and that each build loads and shifts one
-clock path of one process.
+The clock-probe helper, a retained research helper that is not published,
+has only the quick check: its probe runs as root without capabilities or
+network and checks the compiler, the build manifest of the two pinned
+libfaketime builds, and that each build loads and shifts one clock path of one
+process.
 """
 import argparse
 import base64
@@ -519,7 +520,7 @@ def arguments(argv=None):
     if args.selector and not args.functional:
         parser.error("--selector requires --functional")
     if args.extension in ("clock-probe", "blockio") and (args.functional or args.target):
-        parser.error("--extension " + args.extension + " has only the quick check so far; --functional and --target belong to "
+        parser.error("--extension " + args.extension + " has only the quick check; --functional and --target belong to "
                      "netem and capture")
     if args.extension != "netem" and any(getattr(args, option) for option in NETEM_ONLY):
         parser.error("--extension " + args.extension + " has no --selector, --rate or --packet-faults; "
