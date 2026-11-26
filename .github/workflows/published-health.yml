@@ -24,7 +24,7 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - name: Every pinned role index still resolves to its catalogued platform images
+      - name: Every published role tag still resolves to its catalogued platform images
         run: python3 image/publish.py health
       - name: Every extension helper tag still resolves to both platform images
         if: always()

@@ -13,12 +13,14 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 import extension_check
 
 PROBE = extension_check.EXTENSIONS["blockio"]["probe"]
-OUTPUT = "CHECK\tpassed\tcli:dmsetup\nCOMPLETE\tblockio\n"
+OUTPUT = "".join("CHECK\tpassed\t%s\n" % name for name in extension_check.QUICK_CHECKS["blockio"]) + "COMPLETE\tblockio\n"
 
 
 class BlockioCheckTests(unittest.TestCase):
-    def test_quick_only_contract_cannot_enter_published_or_functional_checks(self):
-        self.assertNotIn("blockio", extension_check.PUBLISHED)
+    def test_published_quick_only_contract_cannot_enter_functional_checks(self):
+        # The quick check is the whole publication gate of contract 1.
+        self.assertIn("blockio", extension_check.PUBLISHED)
+        self.assertEqual(extension_check.EXTENSIONS["blockio"]["gate"], "quick")
         self.assertEqual(extension_check.EXTENSIONS["blockio"]["contract"], "1")
         self.assertEqual(extension_check.arguments(["--extension", "blockio", "--image", "helper"]).extension,
                          "blockio")

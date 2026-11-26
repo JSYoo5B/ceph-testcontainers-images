@@ -1105,8 +1105,8 @@ class CapturePublicationTests(unittest.TestCase):
         for reference in sorted(publish.extension_targets("capture")):
             targets[reference] = json.loads(json.dumps(result))
             targets[reference]["reference"] = reference
-        checks = [{"name": "path:tcpdump", "status": "passed"},
-                  {"name": "refused-without-net_raw", "status": "passed", "cleanup": {"status": "passed"}}]
+        checks = [{"name": name, "status": "passed"} for name in extension_check.QUICK_CHECKS["capture"]]
+        checks.append({"name": "refused-without-net_raw", "status": "passed", "cleanup": {"status": "passed"}})
         image = dict(HELPER, status="passed", checks=checks, cleanup={"status": "passed"},
                      versions={"tcpdump": "tcpdump version 4.99.3 libpcap version 1.10.3"},
                      labels={"io.ceph-testcontainers.extension": "capture",
@@ -1116,7 +1116,7 @@ class CapturePublicationTests(unittest.TestCase):
                 "environment": {"OperatingSystem": "Ubuntu 24.04"}, "targets": targets}
 
     def test_the_capture_helper_is_published(self):
-        self.assertEqual(extension_check.PUBLISHED, ("netem", "capture"))
+        self.assertIn("capture", extension_check.PUBLISHED)
         import publish
         self.assertEqual(publish.extension_tag("capture"), publish.REGISTRY + ":extension-capture-v1")
         self.assertEqual(publish.extension_tag("capture", "arm64"),
@@ -1153,9 +1153,9 @@ class CapturePublicationTests(unittest.TestCase):
             "quick check level": change(lambda r: r.update(level="quick")),
             "another checker": change(lambda r: r.update(checker_sha256="0" * 64)),
             "no labels": change(lambda r: r["image"].update(labels={})),
-            "no quick refusal": change(lambda r: r["image"].update(checks=r["image"]["checks"][:1])),
-            "failed quick refusal": change(lambda r: r["image"]["checks"][1].update(status="failed")),
-            "quick refusal cleanup": change(lambda r: r["image"]["checks"][1]["cleanup"].update(status="failed")),
+            "no quick refusal": change(lambda r: r["image"].update(checks=r["image"]["checks"][:-1])),
+            "failed quick refusal": change(lambda r: r["image"]["checks"][-1].update(status="failed")),
+            "quick refusal cleanup": change(lambda r: r["image"]["checks"][-1]["cleanup"].update(status="failed")),
             "missing release target": change(lambda r: r["targets"].pop(official)),
             "failed target": change(lambda r: r["targets"][official].update(status="failed")),
             "target leftovers": change(lambda r: r["targets"][official]["cleanup"].update(leftovers=["x"])),
@@ -1204,7 +1204,8 @@ class CapturePublicationTests(unittest.TestCase):
 
     def test_raw_captures_are_refused_before_any_artifact_upload(self):
         job = section((WORKFLOWS / "test.yml").read_text(), "  capture-extension:", "  promote-extension:")
-        published = section((WORKFLOWS / "published-extension.yml").read_text(), "  published-capture-extension:")
+        published = section((WORKFLOWS / "published-extension.yml").read_text(), "  published-capture-extension:",
+                            "  published-blockio-extension:")
         for name, steps, directory in ((("test.yml", job.split("      - "), "$RUNNER_TEMP/capture/")),
                                        ("published-extension.yml", published.split("      - "),
                                         "$RUNNER_TEMP/published-extension/")):
@@ -1234,7 +1235,7 @@ class CapturePublicationTests(unittest.TestCase):
         self.assertIn("needs: capture-extension\n", promote)
         self.assertIn("pattern: extension-candidate-capture-*\n", promote)
         self.assertIn("promote-extension --extension capture", promote)
-        verify = section(workflow, "  verify-published-capture-extension:")
+        verify = section(workflow, "  verify-published-capture-extension:", "  promote-blockio-extension:")
         self.assertIn("if: " + PUBLISH_GATE + "\n", verify)
         self.assertIn("needs: promote-capture-extension\n", verify)
         self.assertIn("extension: capture\n", verify)
@@ -1247,7 +1248,7 @@ class CapturePublicationTests(unittest.TestCase):
     def test_the_published_capture_helper_is_checked_by_digest_as_in_ci(self):
         published = (WORKFLOWS / "published-extension.yml").read_text()
         netem = section(published, "  published-extension:", "  published-capture-extension:")
-        capture = section(published, "  published-capture-extension:")
+        capture = section(published, "  published-capture-extension:", "  published-blockio-extension:")
         self.assertIn("if: inputs.extension == 'netem'", netem)
         self.assertIn("if: inputs.extension == 'capture'", capture)
         self.assertIn("published-reference --extension \"$IMAGE_EXTENSION\"", capture)

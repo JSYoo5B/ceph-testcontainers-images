@@ -9,7 +9,7 @@ Every baseline module feature works with the unmodified official Ceph image, and
 - A missing tool, a denied permission and an unsupported kernel are distinct errors. Nothing is installed at run time, and there is no fallback to another mechanism.
 - How an extension image is built is up to its owner. The contract names executables and behavior, not packages, labels or file paths. [image/extension_check.py](../image/extension_check.py) checks any local image against it.
 
-This repository defines the contracts, checks images against them and publishes one image per extension. The modules decide when an extension is used and own everything the feature does with it.
+This repository defines the contracts, checks images against them and publishes a reference helper for each extension that a module feature selects: the netem, packet-capture and blockio helpers (see [Published helpers](#published-helpers)). The clock-probe helper is a retained research helper and is not published, because no module feature selects it. The modules decide when an extension is used and own everything the feature does with it.
 
 ## netem helper (contract 1)
 
@@ -200,14 +200,15 @@ The reference sources behind the design (research references, not the identity o
 
 Not done: the native orchestration (establishing the prefix with the selected traffic, choosing a limit of prefix plus 5 or 17 bytes, further traffic, `SIGTERM`), the loopback diagnostic for a tcpdump that keeps running, and any native result on either architecture. The Docker-free tests use fakes, synthetic pcap files whose last record header or body is cut, and synthetic supervisor outputs; they run no real file-size limit.
 
-## blockio helper (contract 1, quick check only)
+## blockio helper (contract 1)
 
 The blockio helper supplies user-space tools for bounded block-I/O fixtures.
 It contains no Ceph component. The module creates and owns its scratch storage,
 loop devices and device-mapper mappings; the image never installs packages or
-configures the engine at run time. The reference helper has a quick image check
-and is not published. No kernel or privileged-runtime support is implied by
-passing that check.
+configures the engine at run time. Contract 1 has a quick check only, and that
+check is its publication gate: the reference helper is published as
+`extension-blockio-v1` (see [Published helpers](#blockio-helper)). No kernel or
+privileged-runtime support is implied by passing that check.
 
 ### Image contract
 
@@ -251,7 +252,8 @@ and `util-linux` packages. In bookworm, `mount` supplies `losetup`, and
 `util-linux` supplies `blockdev`. Package licenses and corresponding-source
 pointers remain in the image with `/usr/share/ceph-testcontainers/SOURCES.txt`.
 CI builds and checks the image on native amd64 and arm64 runners independently
-of Ceph releases and published extensions.
+of Ceph releases and of the other helpers, and publishes exactly the image that
+passed (see [Published helpers](#blockio-helper)).
 
 Privileged root execution, access to the engine host's `/dev`, a private bounded
 tmpfs and already registered device-mapper linear/error/delay targets belong to
@@ -259,14 +261,29 @@ the module's runtime admission. An absent target must be rejected before any
 attempt to use it; module loading and automatic target loading are outside the
 contract. The caller must own and clean up every loop device and mapping, and
 must refuse unrelated or still-open devices. This image-only check establishes
-none of those properties. A functional qualification and publication need
-separate checks; existing publication gates remain unchanged.
+none of those properties. Functional block-I/O qualification (loop devices,
+device-mapper delay and error tables, recovery) belongs to the consumer's native
+tests and is not part of this helper's publication.
 
-## clock-probe helper (contract 1, quick check only)
+## clock-probe helper (contract 1, retained research helper)
 
-The clock-probe helper is the placement for the clock-skew and time-jump scratch work in [ceph-testcontainers-go#66](https://github.com/JSYoo5B/ceph-testcontainers-go/issues/66). That research needs a C compiler and a pinned libfaketime interposer inside an isolated scratch container, and the essential role images carry neither. The helper provides them, so that a fixture needs no toolchain on the runner, no matching of the image's libc and no network at test time. The helper contains no Ceph component. Nothing in it applies an offset to a Ceph daemon, decides what a clock fault means or qualifies a clock-fault backend: a module starts the helper as a scratch container of its own and runs its own probe in it.
+The clock-probe helper is the reproducible environment of the clock-fault research in ceph-testcontainers-go: per-process wall-clock offsets of Ceph daemons through a libfaketime interposer. It carries a C compiler and two pinned libfaketime builds (`default` and `intercept-syscall`) with a build manifest, which the essential role images do not, so a research fixture needs no toolchain on the runner, no matching of the image's libc and no network at test time. The helper contains no Ceph component, and nothing in it decides what a clock fault means or qualifies a clock-fault backend: a fixture starts the helper as a scratch container of its own and runs its own probe in it.
 
-This section defines contract 1 and its quick check, which [image/extension_check.py](../image/extension_check.py) runs today. No helper image is published, no functional check exists and no engine support is claimed.
+This section defines contract 1 and its quick check, which [image/extension_check.py](../image/extension_check.py) runs. Contract 1 has no functional check, and no engine support is claimed.
+
+### What the research has established with it
+
+These are observations of the research that used the helper, not checks of this repository and not a support claim for any engine:
+
+- Per-process wall-clock offsets through `LD_PRELOAD` and a live timestamp file that the caller owns, measured for each clock route and for each interposer variant.
+- On Tentacle 20.2.4, natively on `arm64`, an offset of ±2 s in the process of a follower or of the leader MON raised `MON_CLOCK_SKEW`, which cleared after the offset was restored in the same process.
+- The interposer built on Debian's glibc 2.36 also loaded into the official-derived essential role images, which are based on CentOS Stream 9.
+
+What it does not cover: the vDSO symbol and raw syscall routes, monotonic time, and daemon instrumentation on `amd64`, which the Go repository qualifies natively with this helper next, together with a MON timecheck round that the research did not exercise.
+
+### Why it is not published
+
+No module feature selects the helper, so no consumer needs a published tag; CI builds it and runs its quick check on native runners of both architectures so that the research can rebuild exactly this environment. A clock-fault feature would place the interposer into Ceph daemon containers. Its helper would carry the interposer and its manifest but no compiler, so its contract would differ from this research contract, and it would be published under a contract of its own when that feature exists.
 
 ### Image contract
 
@@ -300,14 +317,13 @@ The load check uses a static file. It does not update a file while a process run
 
 [image/extensions/clock-probe](../image/extensions/clock-probe) builds on the pinned `debian:bookworm-slim` base of the Debian role images with Debian's `build-essential`, `binutils` and `python3`. [build-libfaketime.sh](../image/extensions/clock-probe/build-libfaketime.sh) fetches libfaketime `v0.9.12` once during the image build as the single pinned commit `3ccdd344aadf1e317156fa5fb7c881f2c4404778`, fails the build when the fetched commit differs, builds `libfaketime.so.1` without and with `-DINTERCEPT_SYSCALL`, writes the manifest, and removes the source tree and its fetch tools. The image carries libfaketime's license (GPL-2.0) at `/usr/share/doc/libfaketime/copyright`, and `/usr/share/ceph-testcontainers/SOURCES.txt` points to the commit and, for the Debian packages, to their source packages. CI builds it and runs the quick check on native runners of both architectures; it is not published.
 
-### What the helper does not cover
+### What the quick check does not cover
 
-- Whether the four clock routes of the scratch probe (public `clock_gettime`, libc `syscall`, the vDSO and a raw syscall) shift or bypass the interposer. The quick check measures the public realtime path of one process only.
-- A probe binary, the decoder of its output, or any native scenario of the issue. Those belong to the module and to the later steps of the issue.
+- Whether the clock routes other than the public `clock_gettime(CLOCK_REALTIME)` (libc `syscall`, the vDSO and a raw syscall) follow or bypass the interposer. The quick check measures the public realtime path of one process only.
 - A live update of the offset file, update latency, restoration or disposal of an instrumented process.
 - Any Ceph daemon or client, a time namespace, a virtual machine or a kernel clock fault.
-- A functional check, publication and engine support. They need their own decision and change.
-- The interposer is built for glibc on Debian. A different libc needs its own helper or a changed build, and a build on another base can change the ABI that the module sees.
+- A functional check and engine support.
+- The interposer is built for glibc on Debian. A different libc can need its own helper or a changed build, and a build on another base can change the ABI that the module sees.
 
 ## Checking an extension image
 
@@ -480,9 +496,21 @@ The receiver's counters show that the selected packets were reordered, duplicate
 
 ## Published helpers
 
-Each helper tag lists `linux/amd64` and `linux/arm64`; `<tag>-linux-<architecture>` selects one platform. The contract version is part of the tag, so a later incompatible contract gets a new tag. Each helper is staged, promoted and checked again on its own: a failure of one helper never blocks the other, and neither blocks the release images.
+Each helper tag lists `linux/amd64` and `linux/arm64`; `<tag>-linux-<architecture>` selects one platform. Each helper is staged, promoted and checked again on its own: a failure of one helper never blocks the others, and none blocks the release images.
 
-Publication runs only from a manual run of the [checker workflow](../.github/workflows/test.yml) with `publish`. For each architecture, the job that built the helper and passed its functional check uploads that exact image under a `ci-<run>-<attempt>-` candidate tag. Promotion requires the candidates of both architectures from the same run and revision, verifies their configuration, platform, layers and extension label, points the platform tags and then the index at those digests, and checks that the index lists exactly the two tested digests. A platform whose check failed uploads no candidate, so nothing is promoted. [published-extension.yml](../.github/workflows/published-extension.yml) then pulls each platform by digest and runs the same functional check again. The weekly published image health workflow runs `python3 image/publish.py extension-health`, which fails when a helper tag no longer lists both platform images.
+| Helper | Tag | Publication gate |
+| --- | --- | --- |
+| netem | `extension-netem-v1` | Functional check with every selector profile, the bandwidth profile and the packet-fault profile |
+| packet-capture | `extension-capture-v1` | Functional check with every capture and negative control |
+| blockio | `extension-blockio-v1` | Quick check of contract 1 |
+
+Publication runs only from a manual run of the [checker workflow](../.github/workflows/test.yml) with `publish`; the capture and blockio helpers stage candidates only on the default branch. For each architecture, the job that built the helper and passed its publication gate uploads that exact image under a `ci-<run>-<attempt>-` candidate tag. Every gate includes the helper's quick check: each check that its contract names (`QUICK_CHECKS` in [image/extension_check.py](../image/extension_check.py)) must be recorded exactly once and pass. A probe that reports completion without one of them is incomplete, and a report without one is refused before any upload. Promotion requires the candidates of both architectures from the same run and revision, verifies their configuration, platform, layers and extension label, points the platform tags and then the index at those digests, and checks that the index lists exactly the two tested digests. A platform whose check failed uploads no candidate, so nothing is promoted. [published-extension.yml](../.github/workflows/published-extension.yml) then pulls each platform by the digest that the promotion recorded in the same run and runs the same gate check again. The weekly published image health workflow runs `python3 image/publish.py extension-health`, which fails when a helper tag no longer lists both platform images.
+
+### Selecting a helper
+
+Consumers select a helper by its tag. A compatible rebuild, for example one with updated Debian packages or a packaging correction, is published again under the same tag, so a consumer that selects the tag receives it with no change of its own. This repository does not recommend selecting a helper by digest and keeps no record of helper digests for consumers to read; a consumer that pins one does so on its own responsibility and does not receive later fixes.
+
+The contract version is part of the tag. A republication under an existing tag may keep or add capabilities and passes the same gate as the first publication; it never removes an executable, option, module or other requirement that the tag's contract lists. A change that removes one is a new contract, published under the next contract version, and the old tag keeps what it had. The same policy applies to the role images; see [Selecting images by tag](../README.md#selecting-images-by-tag).
 
 ### netem helper
 
@@ -492,7 +520,7 @@ ghcr.io/jsyoo5b/ceph-testcontainers-images:extension-netem-v1
 
 - Built from [image/extensions/netem](../image/extensions/netem) on the pinned `debian:bookworm-slim` base of the Debian role images, with Debian's `iproute2` and `python3` (iproute2 6.1.0 and Python 3.11.2 when this was written). The `linux/arm64` image is 45 MB compressed and 155 MB unpacked.
 - `/usr/share/ceph-testcontainers/SOURCES.txt` and `source-packages.txt` list every package with its source package and version.
-- CI checks the helper functionally on native runners of both architectures, with every selector profile, the bandwidth profile, the packet-fault profile, and the official image and the published `essential` role image of every release with published role images in [the digest inventory](../.github/ceph-role-images.json) as targets. Publication requires every target, every selector profile, the bandwidth profile and the packet-fault profile to pass and clean up on both architectures.
+- CI checks the helper functionally on native runners of both architectures, with every selector profile, the bandwidth profile, the packet-fault profile, and the official image and the published `essential` role image, selected by its tag, of every release that [the catalogue](../image/releases.json) marks published as targets. Publication requires every target, every selector profile, the bandwidth profile and the packet-fault profile to pass and clean up on both architectures.
 
 #### Engine coverage
 
@@ -522,7 +550,7 @@ ghcr.io/jsyoo5b/ceph-testcontainers-images:extension-capture-v1
 The tag exists once a manual run with `publish` on the default branch has passed; its capture jobs stage candidates only on that branch.
 
 - Built from [image/extensions/capture](../image/extensions/capture) as described under [Reference helper](#reference-helper), with Debian's `tcpdump` and `python3`. `/usr/share/ceph-testcontainers/SOURCES.txt` and `source-packages.txt` list every package with its source package and version, and the candidate records the tcpdump and libpcap version that the quick check read.
-- Publication requires, on each architecture, a passing functional report from the current checker and probe: the quick check including the refusal without `NET_RAW`, the reference labels, and for the official image of every release with published role images in [the digest inventory](../.github/ceph-role-images.json), a scenario with the checked helper image on that platform in which the traffic, empty, bound, abrupt, target-loss, IPv6 and restart captures pass, the invalid-filter, missing-interface and missing-`NET_RAW` controls fail with their own kinds, and cleanup leaves nothing behind.
+- Publication requires, on each architecture, a passing functional report from the current checker and probe: the quick check including the refusal without `NET_RAW`, the reference labels, and for the official image of every release that [the catalogue](../image/releases.json) marks published, a scenario with the checked helper image on that platform in which the traffic, empty, bound, abrupt, target-loss, IPv6 and restart captures pass, the invalid-filter, missing-interface and missing-`NET_RAW` controls fail with their own kinds, and cleanup leaves nothing behind.
 - The published digests are checked again the same way, with the official image of every such release as targets. No raw capture is uploaded at any stage (see [Raw captures](#raw-captures)).
 
 What the publication claims: on Docker Engine on GitHub-hosted Ubuntu 24.04 runners, natively on `amd64` and `arm64`, this exact image met contract 1 and the functional scenario above in a container of the official image of each supported release, as the image's own non-root user with `NET_RAW` alone, on an internal IPv4 bridge, and for the IPv6 and restart captures on an internal dual-stack bridge.
@@ -543,6 +571,25 @@ What it does not claim:
 | Engine | Platforms | Evidence |
 | --- | --- | --- |
 | Docker Engine on GitHub-hosted Ubuntu 24.04 runners | `amd64`, `arm64` | Quick checks, and functional checks against the official image of each release listed by `python3 image/releases.py published`, on pull requests and pushes to the default branch that change files outside the workflow's ignored documentation paths, before capture-helper publication and on its published digests |
+
+### blockio helper
+
+```text
+ghcr.io/jsyoo5b/ceph-testcontainers-images:extension-blockio-v1
+```
+
+The tag exists once a manual run with `publish` on the default branch has passed; its blockio jobs stage candidates only on that branch.
+
+- Built from [image/extensions/blockio](../image/extensions/blockio) as described under [Reference helper and runtime admission](#reference-helper-and-runtime-admission), with Debian's `python3`, `dmsetup`, `mount` and `util-linux`. `/usr/share/ceph-testcontainers/SOURCES.txt` lists every package with its source package and version, and the candidate records the util-linux versions that the quick check read.
+- Publication requires, on each architecture, a passing quick report from the current checker and probe in which every check that contract 1 names is recorded exactly once and passed, and the reference labels. The published digests are checked again the same way.
+
+What the publication claims: on Docker Engine on GitHub-hosted Ubuntu 24.04 runners, natively on `amd64` and `arm64`, this exact image carried every executable and option of contract 1 (`sh`, `sleep`, `python3` with its supervision modules, `dmsetup`, `losetup` and `blockdev` with the options listed in the [image contract](#image-contract-2)), each loading with its libraries, as root without a capability or a network.
+
+What it does not claim:
+
+- Kernel support: the device-mapper linear, error and delay targets and loop devices of any engine's kernel.
+- A privileged runtime, access to the engine host's `/dev`, device ownership or cleanup. These belong to the module's runtime admission.
+- Any engine, and any functional block-I/O behavior. Those are qualified natively by the consumer.
 
 ## Not in contract 1
 

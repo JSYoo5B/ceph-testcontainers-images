@@ -26,14 +26,16 @@ flow, a stop by SIGTERM with the file flushed and the statistics, a valid
 empty capture, the packet bound, and that an invalid filter, a missing
 interface and a missing NET_RAW are refused, each with its own kind.
 
-The blockio helper also has only a quick check: root, no capabilities or
-network, and user-space help/version and Python supervision checks only.
-It never opens host devices or queries the kernel device-mapper targets.
+The blockio helper has only a quick check, which is also its publication
+gate: root, no capabilities or network, and user-space help/version and Python
+supervision checks only. It never opens host devices or queries the kernel
+device-mapper targets.
 
-The clock-probe helper has only the quick check so far: its probe runs as root
-without capabilities or network and checks the compiler, the build manifest of
-the two pinned libfaketime builds, and that each build loads and shifts one
-clock path of one process.
+The clock-probe helper, a retained research helper that is not published,
+has only the quick check: its probe runs as root without capabilities or
+network and checks the compiler, the build manifest of the two pinned
+libfaketime builds, and that each build loads and shifts one clock path of one
+process.
 """
 import argparse
 import base64
@@ -62,16 +64,36 @@ HERE = Path(__file__).resolve().parent
 # none; the capture helper as the unprivileged user of its image with
 # NET_RAW, which its tcpdump needs to start at all; the clock-probe helper runs
 # as root with none; the blockio helper also runs as root with none.
+# A published helper names the check level that gates its publication: the
+# functional check for netem and capture, the quick check for blockio, whose
+# contract is the presence of the executables and options its consumer runs.
+# Each extension also names every check its quick probe must report: a probe
+# that reports COMPLETE without one of them is incomplete, and publication
+# requires each of them to pass.
+QUICK_CHECKS = {
+    "netem": ("path:sh", "path:sleep", "path:tc", "path:ip", "path:python3", "sleep-infinity", "version:tc",
+              "version:ip", "json:tc-qdisc", "json:tc-filter", "json:ip-link", "json:ip-address", "json:ip-route",
+              "netem-parser", "prio-parser", "u32-parser:ip", "u32-parser:ip6", "python-runtime", "writable:/tmp"),
+    "capture": ("path:sh", "path:sleep", "path:tcpdump", "path:python3", "sleep-infinity", "version:tcpdump",
+                "user:unprivileged", "file-capability:net_raw", "filter:compile", "filter:compile-ip6",
+                "filter:invalid", "capture:loopback", "python-runtime", "writable:/tmp"),
+    "blockio": ("path:sh", "path:sleep", "path:python3", "path:dmsetup", "path:losetup", "path:blockdev",
+                "sleep-infinity", "cli:dmsetup", "cli:losetup", "cli:blockdev", "version:losetup",
+                "version:blockdev", "user:root", "python-runtime", "writable:/tmp"),
+    "clock-probe": ("path:sh", "path:sleep", "path:python3", "path:gcc", "path:nm", "path:clock-probe-build-info",
+                    "sleep-infinity", "version:gcc", "python-runtime", "writable:/tmp", "manifest",
+                    "symbol:syscall", "load:shift"),
+}
 EXTENSIONS = {"netem": {"contract": "1", "probe": HERE / "extensions" / "netem" / "check-netem.sh", "user": "0:0",
-                        "caps": (), "published": True},
+                        "caps": (), "published": True, "gate": "functional"},
               "capture": {"contract": "1", "probe": HERE / "extensions" / "capture" / "check-capture.sh",
-                          "user": None, "caps": ("NET_RAW",), "published": True},
+                          "user": None, "caps": ("NET_RAW",), "published": True, "gate": "functional"},
               "blockio": {"contract": "1", "probe": HERE / "extensions" / "blockio" / "check-blockio.sh",
-                          "user": "0:0", "caps": (), "published": False},
+                          "user": "0:0", "caps": (), "published": True, "gate": "quick"},
               "clock-probe": {"contract": "1", "probe": HERE / "extensions" / "clock-probe" / "check-clock-probe.sh",
                               "user": "0:0", "caps": (), "published": False}}
-# The helpers that image/publish.py publishes, each gated by its own
-# functional check on both architectures.
+# The helpers that image/publish.py publishes, each gated by its own check on
+# both architectures.
 PUBLISHED = tuple(name for name, spec in EXTENSIONS.items() if spec["published"])
 # The checks that exist only for the netem helper.
 NETEM_ONLY = ("selector", "rate", "packet_faults")
@@ -515,7 +537,7 @@ def arguments(argv=None):
     if args.selector and not args.functional:
         parser.error("--selector requires --functional")
     if args.extension in ("clock-probe", "blockio") and (args.functional or args.target):
-        parser.error("--extension " + args.extension + " has only the quick check so far; --functional and --target belong to "
+        parser.error("--extension " + args.extension + " has only the quick check; --functional and --target belong to "
                      "netem and capture")
     if args.extension != "netem" and any(getattr(args, option) for option in NETEM_ONLY):
         parser.error("--extension " + args.extension + " has no --selector, --rate or --packet-faults; "
@@ -556,8 +578,15 @@ def parse_probe(output, name):
         if item["status"] != "passed":
             item.update(failure_stage="quick:" + item["name"],
                         failure_kind=failures.get(item["name"], "quick_failure"))
-    complete = "COMPLETE\t" + name in output.splitlines()
+    complete = "COMPLETE\t" + name in output.splitlines() and not probe_gaps(checks, name)
     return checks, versions, complete
+
+
+def probe_gaps(checks, name):
+    """The required quick checks of an extension that a probe did not report
+    exactly once."""
+    reported = [item["name"] for item in checks]
+    return [check for check in QUICK_CHECKS[name] if reported.count(check) != 1]
 
 
 def probe(extension, image, args, output):
@@ -584,7 +613,9 @@ def probe(extension, image, args, output):
         image.update(checks=checks, versions=versions, log=log.name, exit_code=result.returncode,
                      status="passed" if passed else "failed")
         if not complete:
-            image["error"] = "The probe did not finish all checks"
+            missing = probe_gaps(checks, extension)
+            image["error"] = "The probe did not finish all checks" + (
+                ": missing or repeated " + ", ".join(missing) if missing else "")
     finally:
         image["cleanup"] = remove_container(container)
 

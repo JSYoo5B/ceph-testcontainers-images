@@ -6,6 +6,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import releases
@@ -100,10 +101,42 @@ class ReleaseTests(unittest.TestCase):
         self.assertTrue(all(c["runner"] == releases.RUNNERS[c["architecture"]] for c in cells))
         self.assertEqual(len(releases.plan(releases.DEFAULT)["matrix"]["include"]), 6)
 
-    def test_published_releases_are_those_of_the_digest_inventory(self):
+    def test_published_releases_are_those_the_catalogue_marks_published(self):
         self.assertEqual(releases.published()[0], releases.DEFAULT)
-        self.assertEqual(set(releases.published()), set(releases.inventory()))
-        self.assertTrue(set(releases.published()) <= set(releases.RELEASES))
+        self.assertEqual(set(releases.published()),
+                         {name for name, entry in releases.RELEASES.items() if "published" in entry})
+        # A catalogued release that has not been published has no role tag.
+        self.assertIn("19.2.0", releases.RELEASES)
+        self.assertNotIn("19.2.0", releases.published())
+        with self.assertRaises(KeyError):
+            releases.published_roles("19.2.0", "official")
+        with self.assertRaises(KeyError):
+            releases.published_role("19.2.0", "official", "essential")
+        self.assertEqual(releases.published_role(releases.DEFAULT, "ubuntu", "rgw"),
+                         releases.REGISTRY + ":ubuntu-" + releases.DEFAULT + "-rgw")
+
+    def test_published_roles_name_the_tag_of_each_published_role(self):
+        entry = copy.deepcopy(releases.release(releases.DEFAULT))
+        entry["published"]["official"] = list(releases.ROLES)
+        with mock.patch.dict(releases.RELEASES, {releases.DEFAULT: entry}):
+            # An optional role that the release has not published is not selected.
+            self.assertEqual(releases.published_roles(releases.DEFAULT, "official"), releases.ROLES)
+            with self.assertRaises(KeyError):
+                releases.published_role(releases.DEFAULT, "official", "mgr-modules")
+            entry["published"]["official"].append("mgr-modules")
+            self.assertEqual(releases.published_role(releases.DEFAULT, "official", "mgr-modules"),
+                             releases.REGISTRY + ":official-" + releases.DEFAULT + "-mgr-modules")
+
+    def test_no_tracked_file_records_published_image_digests(self):
+        root = Path(releases.__file__).resolve().parents[1]
+        self.assertFalse((root / ".github" / "ceph-role-images.json").exists())
+        for name, entry in releases.RELEASES.items():
+            for variant, roles in entry.get("published", {}).items():
+                with self.subTest(release=name, variant=variant):
+                    self.assertTrue(all(isinstance(role, str) and not role.startswith("sha256:") for role in roles))
+        output = subprocess.run([sys.executable, str(Path(releases.__file__)), "role", releases.DEFAULT,
+                                 "official", "essential"], capture_output=True, text=True, check=True).stdout.strip()
+        self.assertEqual(output, releases.REGISTRY + ":official-" + releases.DEFAULT + "-essential")
 
     def test_catalogue_rejects_unpinned_mixed_or_silently_missing_inputs(self):
         baseline = {"schema": 1, "releases": {name: copy.deepcopy(releases.release(name))
@@ -120,6 +153,16 @@ class ReleaseTests(unittest.TestCase):
             lambda e: e["official"].update(cpu_baseline={"arm64": "x86-64-v3"}),
             lambda e: e["official"].update(cpu_baseline={"amd64": "haswell"}),
             lambda e: e["debian"].update(cpu_baseline=["x86-64-v3"]),
+            # A published release names the published roles of every variant:
+            # every baseline role, and an optional role only where its variant
+            # publishes it.
+            lambda e: e.update(published={"official": list(releases.ROLES), "debian": list(releases.ROLES)}),
+            lambda e: e.update(published={v: [r for r in releases.ROLES if r != "rgw"] for v in releases.VARIANTS}),
+            lambda e: e.update(published={v: list(releases.roles(v)) + ["mgr-modules"] for v in releases.VARIANTS}),
+            lambda e: e.update(published={v: list(releases.ROLES) + ["essential"] for v in releases.VARIANTS}),
+            lambda e: e.update(published={v: ["sha256:" + "1" * 64] for v in releases.VARIANTS}),
+            lambda e: e.update(published=True),
+            lambda e: e.update(other={}),
         )
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "releases.json"
