@@ -480,9 +480,15 @@ The receiver's counters show that the selected packets were reordered, duplicate
 
 ## Published helpers
 
-Each helper tag lists `linux/amd64` and `linux/arm64`; `<tag>-linux-<architecture>` selects one platform. The contract version is part of the tag, so a later incompatible contract gets a new tag. Each helper is staged, promoted and checked again on its own: a failure of one helper never blocks the other, and neither blocks the release images.
+Each helper tag lists `linux/amd64` and `linux/arm64`; `<tag>-linux-<architecture>` selects one platform. Each helper is staged, promoted and checked again on its own: a failure of one helper never blocks the other, and neither blocks the release images.
 
 Publication runs only from a manual run of the [checker workflow](../.github/workflows/test.yml) with `publish`. For each architecture, the job that built the helper and passed its functional check uploads that exact image under a `ci-<run>-<attempt>-` candidate tag. Promotion requires the candidates of both architectures from the same run and revision, verifies their configuration, platform, layers and extension label, points the platform tags and then the index at those digests, and checks that the index lists exactly the two tested digests. A platform whose check failed uploads no candidate, so nothing is promoted. [published-extension.yml](../.github/workflows/published-extension.yml) then pulls each platform by digest and runs the same functional check again. The weekly published image health workflow runs `python3 image/publish.py extension-health`, which fails when a helper tag no longer lists both platform images.
+
+### Selecting a helper
+
+Consumers select a helper by its tag. A compatible rebuild, for example one with updated Debian packages or a packaging correction, is published again under the same tag, so a consumer that selects the tag receives it with no change of its own. This repository does not recommend selecting a helper by digest and keeps no record of helper digests for consumers to read; a consumer that pins one does so on its own responsibility and does not receive later fixes.
+
+The contract version is part of the tag. A republication under an existing tag may keep or add capabilities and passes the same gate as the first publication; it never removes an executable, option, module or other requirement that the tag's contract lists. A change that removes one is a new contract, published under the next contract version, and the old tag keeps what it had. The same policy applies to the role images; see [Selecting images by tag](../README.md#selecting-images-by-tag).
 
 ### netem helper
 
@@ -492,7 +498,7 @@ ghcr.io/jsyoo5b/ceph-testcontainers-images:extension-netem-v1
 
 - Built from [image/extensions/netem](../image/extensions/netem) on the pinned `debian:bookworm-slim` base of the Debian role images, with Debian's `iproute2` and `python3` (iproute2 6.1.0 and Python 3.11.2 when this was written). The `linux/arm64` image is 45 MB compressed and 155 MB unpacked.
 - `/usr/share/ceph-testcontainers/SOURCES.txt` and `source-packages.txt` list every package with its source package and version.
-- CI checks the helper functionally on native runners of both architectures, with every selector profile, the bandwidth profile, the packet-fault profile, and the official image and the published `essential` role image of every release with published role images in [the digest inventory](../.github/ceph-role-images.json) as targets. Publication requires every target, every selector profile, the bandwidth profile and the packet-fault profile to pass and clean up on both architectures.
+- CI checks the helper functionally on native runners of both architectures, with every selector profile, the bandwidth profile, the packet-fault profile, and the official image and the published `essential` role image, selected by its tag, of every release that [the catalogue](../image/releases.json) marks published as targets. Publication requires every target, every selector profile, the bandwidth profile and the packet-fault profile to pass and clean up on both architectures.
 
 #### Engine coverage
 
@@ -522,7 +528,7 @@ ghcr.io/jsyoo5b/ceph-testcontainers-images:extension-capture-v1
 The tag exists once a manual run with `publish` on the default branch has passed; its capture jobs stage candidates only on that branch.
 
 - Built from [image/extensions/capture](../image/extensions/capture) as described under [Reference helper](#reference-helper), with Debian's `tcpdump` and `python3`. `/usr/share/ceph-testcontainers/SOURCES.txt` and `source-packages.txt` list every package with its source package and version, and the candidate records the tcpdump and libpcap version that the quick check read.
-- Publication requires, on each architecture, a passing functional report from the current checker and probe: the quick check including the refusal without `NET_RAW`, the reference labels, and for the official image of every release with published role images in [the digest inventory](../.github/ceph-role-images.json), a scenario with the checked helper image on that platform in which the traffic, empty, bound, abrupt, target-loss, IPv6 and restart captures pass, the invalid-filter, missing-interface and missing-`NET_RAW` controls fail with their own kinds, and cleanup leaves nothing behind.
+- Publication requires, on each architecture, a passing functional report from the current checker and probe: the quick check including the refusal without `NET_RAW`, the reference labels, and for the official image of every release that [the catalogue](../image/releases.json) marks published, a scenario with the checked helper image on that platform in which the traffic, empty, bound, abrupt, target-loss, IPv6 and restart captures pass, the invalid-filter, missing-interface and missing-`NET_RAW` controls fail with their own kinds, and cleanup leaves nothing behind.
 - The published digests are checked again the same way, with the official image of every such release as targets. No raw capture is uploaded at any stage (see [Raw captures](#raw-captures)).
 
 What the publication claims: on Docker Engine on GitHub-hosted Ubuntu 24.04 runners, natively on `amd64` and `arm64`, this exact image met contract 1 and the functional scenario above in a container of the official image of each supported release, as the image's own non-root user with `NET_RAW` alone, on an internal IPv4 bridge, and for the IPv6 and restart captures on an internal dual-stack bridge.

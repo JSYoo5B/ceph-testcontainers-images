@@ -4,8 +4,8 @@ This repository defines the requirements for Ceph images used by Ceph testcontai
 
 ## Purpose
 
-Ceph testcontainers modules use the pruned role runtime by default. Published
-role indexes are pinned in [.github/ceph-role-images.json](.github/ceph-role-images.json).
+Ceph testcontainers modules use the pruned role runtime by default and select
+the published role images by tag (see [Published images](#published-images)).
 The upstream official image remains an unmodified compatibility reference.
 
 The [release catalogue](image/releases.json) defines which releases can be built.
@@ -157,10 +157,12 @@ The netem helper is published as `ghcr.io/jsyoo5b/ceph-testcontainers-images:ext
 ## Published images
 
 Run `python3 image/releases.py list` for buildable releases and
-`python3 image/releases.py published` for releases with recorded role indexes.
-A recorded index is not the only pullable tag: a release outside the
-recorded set can still have a tag in the registry. To check one tag, inspect
-its manifest, for example
+`python3 image/releases.py published` for the releases that
+[the catalogue](image/releases.json) marks published, with the roles each
+variant has published. `python3 image/releases.py role <release> <variant> <role>`
+prints the tag of one published role. A release outside the published set can
+still have a tag in the registry. To check one tag, inspect its manifest, for
+example
 `docker buildx imagetools inspect ghcr.io/jsyoo5b/ceph-testcontainers-images:official-20.2.4-essential`.
 Published tags use
 `ghcr.io/jsyoo5b/ceph-testcontainers-images:<variant>-<release>-<role>`
@@ -204,12 +206,47 @@ cohorts to pass the requirement check; a failed cohort blocks that release, not
 the others. Publication and registry health remain separate from downstream
 consumer validation.
 
-The current published registry indexes are recorded in
-[the published digest map](.github/ceph-role-images.json). Consumers and
-extension checks can use these immutable references without rebuilding or
-republishing an image for a name change. The weekly
+The extension checks select the published role images by tag, and the weekly
 [published image health workflow](.github/workflows/published-health.yml)
-checks the native children of every pinned role and the extension tags.
+checks that every published role tag and every helper tag still resolves and
+lists its expected platforms. A compatible republication under the same tag
+needs no change in this repository for either to cover it.
+
+### Selecting images by tag
+
+Published tags are the supported way to select an image from this repository.
+This repository does not recommend selecting its images by digest, and it
+does not publish or maintain a list of digests for that purpose.
+
+The reason is maintenance. When use reveals something an image misses (a
+command, library, module or plugin that a consumer needs and the role or
+helper lacks, or a packaging defect), the fix is a rebuild that is published
+again under the same tag. A consumer that selects the tag receives the fix with
+no change on its side; a consumer that pinned a digest keeps the image without
+it. A consumer may still pin a digest on its own responsibility, for example to
+replay a past run, but such a pin is outside this replacement model and does
+not receive the fix.
+
+What a republication under an existing tag may change:
+
+- It may rebuild the same pinned inputs with updated distribution packages,
+  correct packaging and add capabilities. Each republication passes the same
+  requirement check as the first publication.
+- It never removes a command, daemon, library, module, plugin or other
+  requirement that [the role contract](docs/ROLES.md), the
+  [common requirements](docs/IMAGE_REQUIREMENTS.md#common-requirements) or
+  [an extension contract](docs/EXTENSIONS.md) lists for that tag. A capability
+  that has to leave a role or a helper is published under a new tag, and the
+  old tag keeps what it had. For a helper, the new tag is the next contract
+  version.
+
+The pinned build inputs in [the catalogue](image/releases.json) and the
+Dockerfiles (the official source image, its native children and the
+distribution base images) make a build reproducible. They are not a way for
+consumers to select an image. Digests that one publishing run computes (the
+candidate it checks at promotion, the index it checks against the tested
+platforms and the platform images its recheck pulls) are evidence of that run
+and stay in its artifacts; no later run reads them.
 
 | Variant | Source |
 | --- | --- |
@@ -223,6 +260,15 @@ its publication matrix. See [Alpine](#experimental-alpine-stable-squid).
 ## Development
 
 `make check` runs the host unit tests of the checkers, the publisher, the functional harness and the role extraction. The release jobs depend only on `make base-check`; the extension jobs run `make extension-test`, so that neither blocks the other. [The manual images workflow](.github/workflows/images.yml) checks official-derived, Debian and Ubuntu dependency roles on native AMD64 and ARM64. The requirement check gates publication; the functional scenarios, which cover split roles and `all` independently, are recorded as auxiliary evidence.
+
+### Changing a role or helper contract
+
+A change to [the role contract](docs/ROLES.md), the
+[common requirements](docs/IMAGE_REQUIREMENTS.md#common-requirements) or a
+helper's [extension contract](docs/EXTENSIONS.md) may add a requirement to an
+existing tag. A change that removes a listed requirement needs a new tag: a new
+role name for a role, the next contract version for a helper. A review refuses
+a removal under the same tag (see [Selecting images by tag](#selecting-images-by-tag)).
 
 ## License
 

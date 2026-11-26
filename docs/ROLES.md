@@ -48,6 +48,22 @@ is reused by separate daemon containers. Optional MGR modules are enabled by
 the consumer when needed. Python in a client cannot supervise commands inside
 another container; custom targets retain explicit capability checks.
 
+## Published role tags
+
+Consumers select the published role images by tag
+(`<variant>-<release>-<role>`). A role's tag is republished when use reveals a
+command, library, module or plugin that the role lacks, or a packaging defect,
+so a consumer that selects the tag receives the fix. This repository does not
+recommend selecting role images by digest and keeps no list of their digests.
+
+A republication under an existing tag may only keep or add capabilities. It
+never removes a requirement that the capability table above, the
+[common requirements](IMAGE_REQUIREMENTS.md#common-requirements) or the
+[component-use table](IMAGE_REQUIREMENTS.md#where-each-component-is-used)
+lists for that role. A change to this contract that removes one is published
+under a new role name, and the old role's tags keep what they had. See
+[Selecting images by tag](../README.md#selecting-images-by-tag).
+
 ## The mgr-modules role
 
 mgr-modules replaces only the MGR process image of a cluster. MON and OSD

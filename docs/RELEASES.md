@@ -1,10 +1,10 @@
 # Releases
 
 [The release catalogue](../image/releases.json) defines the inputs for
-building each release. Being catalogued, having a recorded promotion and
-having a pullable registry tag are separate facts: `releases.py list` gives
-the first, `releases.py published` the second, and only the registry
-manifest the third. A successful promotion publishes its selected release
+building each release and records which releases and roles are published.
+Being catalogued, being marked published and having a pullable registry tag
+are separate facts: `releases.py list` gives the first, `releases.py published`
+the second, and only the registry manifest the third. A successful promotion publishes its selected release
 under these tags:
 
 ```text
@@ -18,6 +18,9 @@ also publishes the optional `mgr-modules` role
 ([Roles](ROLES.md#the-mgr-modules-role)). A published release that turns
 out to be broken is rebuilt and its tags are replaced by a later publication.
 Each promotion receipt records the manifests the tags pointed to before.
+Consumers select these images by tag; see
+[Selecting images by tag](../README.md#selecting-images-by-tag) for what a
+republication under an existing tag may and may not change.
 
 ## Catalogue
 
@@ -39,13 +42,18 @@ For every release it pins:
 - which architectures of each variant have usable inputs and, for every other
   architecture, the reason (and, where relevant, the evidence) why not.
 
+For a published release it also lists, under `published`, the roles each
+variant has published. The pinned inputs make a build reproducible; they are
+not a way to select a published image, and the catalogue records no digest of
+a published image.
+
 `python3 image/releases.py` prints what other tools need: `list` (every
-catalogued release, default first), `published` (the releases whose promotion
-recorded role indexes in [the digest inventory](../.github/ceph-role-images.json)),
+catalogued release, default first), `published` (the releases that the
+catalogue marks published, default first),
 `official <release> [<architecture>]` (the index or its pinned native child),
-`build-args <release> <distribution>`, `role <release> <variant> <role>` (an
-immutable published role reference) and `plan --releases all|<list>` (the
-native matrix of available cohorts).
+`build-args <release> <distribution>`, `role <release> <variant> <role>` (the
+tag of a published role) and `plan --releases all|<list>` (the native matrix
+of available cohorts).
 
 ## Distribution inputs
 
@@ -172,12 +180,13 @@ check's job result likewise reflects the build and the requirement check; the
 functional outcome is in the uploaded `functional-summary.json` and a warning
 annotation.
 
-The index digests of published releases are recorded in
-[the digest inventory](../.github/ceph-role-images.json). The extension checks
-target those releases, and the weekly
+The first promotion of a release is followed by a change that adds its
+`published` entry to the catalogue, with the roles that the promotion
+published for each variant. A later publication of the same tags needs no
+change. The extension checks target the published releases and select their
+role images by tag, and the weekly
 [published image health workflow](../.github/workflows/published-health.yml)
-checks that every recorded index still lists exactly its available platforms.
-The inventory records the roles that a release's publication staged and
-promoted: a release published before its variant gained mgr-modules records
-no mgr-modules index until it is published again, and the health check covers
-the roles it records.
+checks that every published role tag still resolves and lists exactly its
+available platforms, without comparing it with any recorded digest. A release
+published before its variant gained mgr-modules lists no mgr-modules role
+until a publication adds it, and the health check covers the roles listed.
