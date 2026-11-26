@@ -7,6 +7,9 @@ pinned base image, the download.ceph.com suite, the exact package versions and
 the APT metadata that establishes them. A variant/architecture cohort that has
 no usable input is listed as unavailable with its reason, and a cohort whose
 source executables need a newer x86-64 level names it (docs/RELEASES.md).
+
+A published release also names the roles each variant has published. Consumers
+select those images by tag; no digest of a published image is recorded here.
 """
 import argparse
 import json
@@ -25,7 +28,7 @@ ROLES = ("essential", "client", "cephfs", "rbd-aux", "rgw", "all")
 OPTIONAL_ROLES = {"mgr-modules": ("official",)}
 RUNNERS = {"amd64": "ubuntu-24.04", "arm64": "ubuntu-24.04-arm"}
 CATALOGUE = Path(__file__).with_name("releases.json")
-INVENTORY = Path(__file__).resolve().parents[1] / ".github/ceph-role-images.json"
+REGISTRY = "ghcr.io/jsyoo5b/ceph-testcontainers-images"
 DIGEST = re.compile(r"sha256:[0-9a-f]{64}\Z")
 VERSION = re.compile(r"[0-9]+\.[0-9]+\.[0-9]+\Z")
 
@@ -35,8 +38,11 @@ def load(path=None):
     if data.get("schema") != 1 or not isinstance(data.get("releases"), dict) or DEFAULT not in data["releases"]:
         raise ValueError("Invalid release catalogue")
     for name, entry in data["releases"].items():
-        if not VERSION.fullmatch(name) or set(entry) != set(VARIANTS) | {"codename"}:
+        if not VERSION.fullmatch(name) or not set(VARIANTS) | {"codename"} <= set(entry) <= set(VARIANTS) | {
+                "codename", "published"}:
             raise ValueError("Invalid catalogued release: " + name)
+        if "published" in entry:
+            validate_published(name, entry["published"])
         for variant in VARIANTS:
             value = entry[variant]
             arches = value.get("architectures")
@@ -69,6 +75,18 @@ def load(path=None):
             if set(value.get("unavailable", {})) != set(ARCHITECTURES) - set(arches):
                 raise ValueError("Every unavailable architecture needs an explicit reason")
     return data["releases"]
+
+
+def validate_published(name, value):
+    """The published roles of a release: every variant, each with every
+    baseline role and only the optional roles that variant publishes."""
+    if not isinstance(value, dict) or set(value) != set(VARIANTS):
+        raise ValueError("A published release names the published roles of every variant: " + name)
+    for variant, published_roles in value.items():
+        if (not isinstance(published_roles, list) or len(published_roles) != len(set(published_roles))
+                or not set(ROLES) <= set(published_roles) <= set(ROLES) | {
+                    role for role, variants in OPTIONAL_ROLES.items() if variant in variants}):
+            raise ValueError("Published roles differ from the role contract: " + name + " " + variant)
 
 
 RELEASES = load()
@@ -141,42 +159,40 @@ def build_args(name, distribution):
             "CEPH_MGR_PACKAGES": values["mgr_packages"]}
 
 
-def inventory():
-    return json.loads(INVENTORY.read_text())["images"]
-
-
 def published():
-    """The releases whose role indexes are recorded in the digest inventory, the default first."""
-    recorded = inventory()
-    return [name for name in names() if name in recorded]
+    """The releases that have published role images, the default first."""
+    return [name for name in names() if "published" in RELEASES[name]]
 
 
-def recorded_roles(name, variant):
-    """The roles whose indexes the digest inventory records for a published
-    release and variant. An optional role is absent until a publication of
-    its release has recorded it."""
-    recorded = set(inventory()[name][variant])
-    expected = roles(variant)
-    if not set(ROLES) <= recorded <= set(expected):
-        raise ValueError("Recorded roles differ from the role contract: " + name + " " + variant)
-    return tuple(role for role in expected if role in recorded)
+def published_roles(name, variant):
+    """The roles a published release has published for a variant, in role
+    order. An optional role is absent until a publication of its release
+    has added it."""
+    entry = release(name)
+    if "published" not in entry:
+        raise KeyError("Release " + name + " has no published role images")
+    if variant not in VARIANTS:
+        raise KeyError("Unknown variant " + repr(variant))
+    return tuple(role for role in roles(variant) if role in entry["published"][variant])
+
+
+def role_tag(name, variant, role, architecture=None):
+    """The tag of a release role index, or with an architecture of its platform image."""
+    return REGISTRY + ":" + variant + "-" + name + "-" + role + ("-linux-" + architecture if architecture else "")
 
 
 def published_role(name, variant, role):
-    release(name)
-    if role not in roles(variant):
-        raise KeyError("Variant " + variant + " publishes no " + role + " role")
-    digest = inventory()[name][variant][role]
-    if not DIGEST.fullmatch(digest):
-        raise ValueError("Invalid published role digest")
-    return "ghcr.io/jsyoo5b/ceph-testcontainers-images@" + digest
+    """The tag reference of a published role index."""
+    if role not in published_roles(name, variant):
+        raise KeyError("Release " + name + " has published no " + variant + " " + role + " role")
+    return role_tag(name, variant, role)
 
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
     commands.add_parser("list", help="Print every catalogued release, default first")
-    commands.add_parser("published", help="Print every release with recorded role indexes, default first")
+    commands.add_parser("published", help="Print every release with published role images, default first")
     official_parser = commands.add_parser("official", help="Print the official source image of a release")
     official_parser.add_argument("release")
     official_parser.add_argument("architecture", nargs="?", choices=ARCHITECTURES,
@@ -184,7 +200,7 @@ def main(argv=None):
     arguments = commands.add_parser("build-args", help="Print docker --build-arg options as shell words")
     arguments.add_argument("release")
     arguments.add_argument("distribution", choices=DISTRIBUTIONS)
-    role = commands.add_parser("role", help="Print an immutable published role reference")
+    role = commands.add_parser("role", help="Print the tag of a published role index")
     role.add_argument("release")
     role.add_argument("variant", choices=VARIANTS)
     role.add_argument("role", choices=ROLES + tuple(OPTIONAL_ROLES))

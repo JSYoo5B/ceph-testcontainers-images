@@ -17,7 +17,7 @@ import sys
 import check
 import releases
 
-REGISTRY = "ghcr.io/jsyoo5b/ceph-testcontainers-images"
+REGISTRY = releases.REGISTRY
 VARIANTS = ("official", "debian", "ubuntu")
 ARCHITECTURES = ("amd64", "arm64")
 CONTRACT = "roles"
@@ -65,8 +65,7 @@ def raw_manifest(reference):
 
 
 def release_tag(release, variant, role, architecture=None):
-    return REGISTRY + ":" + variant + "-" + release + "-" + role + (
-        "-linux-" + architecture if architecture else "")
+    return releases.role_tag(release, variant, role, architecture)
 
 
 def previous_manifest(tag):
@@ -290,9 +289,9 @@ def extension_tag(extension, architecture=None):
 
 def extension_targets(extension):
     """The targets every published helper must pass. The netem helper: the
-    official image and the published essential role image of every published
-    release. The capture helper: the official image of every published release,
-    which is what its CI job checks."""
+    official image and the published essential role image, by its tag, of
+    every published release. The capture helper: the official image of every
+    published release, which is what its CI job checks."""
     if extension == "capture":
         return {releases.official(release) for release in releases.published()}
     return {reference for release in releases.published()
@@ -550,11 +549,11 @@ def health(args):
                       for v in platforms for r in active_roles(v)}
         check_tags(list(tags), tags, identities)
     else:
-        # The roles the digest inventory pins; an optional role is pinned once
-        # a publication of its release has recorded it.
+        # The published role tags of the selected releases; an optional role
+        # is checked once a publication of its release has added it.
         tags = {releases.published_role(release, v, r): architectures
                 for release in args.releases for v, architectures in published_architectures(release).items()
-                for r in releases.recorded_roles(release, v)}
+                for r in releases.published_roles(release, v)}
         check_tags(list(tags), tags)
 
 
@@ -625,7 +624,7 @@ def main():
         command.add_argument("--output", type=Path, required=True)
     health_parser = commands.add_parser("health", help="Check that every published platform image still exists")
     health_parser.add_argument("--promotion", type=Path, help="Check the tags of this completed promotion")
-    health_parser.add_argument("--release", dest="releases", action="append", choices=tuple(releases.RELEASES))
+    health_parser.add_argument("--release", dest="releases", action="append", choices=tuple(releases.published()))
     commands.add_parser("extension-health", help="Check that every published helper platform image still exists")
     reference = commands.add_parser("published-reference", help="Print one platform of a promoted helper by digest")
     reference.add_argument("--extension", required=True)

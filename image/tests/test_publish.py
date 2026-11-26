@@ -202,21 +202,29 @@ class PublicationTests(unittest.TestCase):
         with self.assertRaises(publish.PublishError):
             publish.validate_report(value, "arm64", RELEASE, "official")
 
-    def test_inventory_health_checks_the_roles_it_records(self):
-        recorded = publish.releases.recorded_roles(RELEASE, "official")
-        self.assertTrue(set(publish.releases.ROLES) <= set(recorded))
-        inventory = {RELEASE: {"official": dict({r: digest(1) for r in publish.releases.ROLES},
-                                                **{"mgr-modules": digest(2)})}}
-        with mock.patch.object(publish.releases, "inventory", return_value=inventory):
-            self.assertEqual(publish.releases.recorded_roles(RELEASE, "official"),
-                             publish.releases.roles("official"))
-            self.assertEqual(publish.releases.published_role(RELEASE, "official", "mgr-modules"),
-                             publish.REGISTRY + "@" + digest(2))
-        for broken in ({r: digest(1) for r in publish.releases.ROLES if r != "rgw"},
-                       dict({r: digest(1) for r in publish.releases.ROLES}, **{"other": digest(3)})):
-            with mock.patch.object(publish.releases, "inventory", return_value={RELEASE: {"official": broken}}), \
-                    self.subTest(roles=sorted(broken)), self.assertRaises(ValueError):
-                publish.releases.recorded_roles(RELEASE, "official")
+    def test_health_checks_the_published_role_tags_by_tag(self):
+        published = publish.releases.published_roles(RELEASE, "official")
+        self.assertEqual(published, publish.releases.roles("official"))
+        tags = []
+        def raw(reference):
+            tags.append(reference)
+            if "@" in reference:
+                return {"config": {}}
+            return {"manifests": [{"platform": {"os": "linux", "architecture": a}, "digest": digest(1)}
+                                  for a in publish.ARCHITECTURES]}
+        with mock.patch.object(publish, "raw_manifest", side_effect=raw), mock.patch("sys.stdout"):
+            publish.health(SimpleNamespace(releases=[RELEASE]))
+        indexes = [tag for tag in tags if "@" not in tag]
+        self.assertIn(publish.REGISTRY + ":official-" + RELEASE + "-mgr-modules", indexes)
+        self.assertNotIn(publish.REGISTRY + ":debian-" + RELEASE + "-mgr-modules", indexes)
+        self.assertEqual(len(indexes), sum(len(publish.releases.published_roles(RELEASE, v)) for v in publish.VARIANTS))
+        # A same-tag republication changes the platform digests; the check
+        # follows the tag and compares against no recorded digest.
+        tags.clear()
+        with mock.patch.object(publish, "raw_manifest", side_effect=lambda r: {"config": {}} if "@" in r else {
+                "manifests": [{"platform": {"os": "linux", "architecture": a}, "digest": digest(9)}
+                              for a in publish.ARCHITECTURES]}), mock.patch("sys.stdout"):
+            publish.health(SimpleNamespace(releases=[RELEASE]))
         with self.assertRaises(KeyError):
             publish.releases.published_role(RELEASE, "debian", "mgr-modules")
 
@@ -332,7 +340,7 @@ class PublicationTests(unittest.TestCase):
     def test_health_reports_release_tags_whose_platform_images_were_deleted(self):
         present = {publish.REGISTRY + "@" + digest(n) for n in (1, 2)}
         indexes = {publish.releases.published_role(RELEASE,v,r) for v in publish.VARIANTS
-                   for r in publish.releases.recorded_roles(RELEASE,v)}
+                   for r in publish.releases.published_roles(RELEASE,v)}
         def raw(reference):
             if reference not in indexes:
                 if reference not in present:
