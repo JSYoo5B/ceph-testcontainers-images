@@ -152,7 +152,15 @@ make extension-images   # build the netem helper
 make extension-check    # check it, including a delay inside an official-image container
 ```
 
-The netem helper is published as `ghcr.io/jsyoo5b/ceph-testcontainers-images:extension-netem-v1` for `linux/amd64` and `linux/arm64`. A publication run from the default branch publishes the packet-capture helper the same way as `ghcr.io/jsyoo5b/ceph-testcontainers-images:extension-capture-v1`. Each helper is checked and published apart from the other and from the release images below, and none blocks another. The clock-probe helper (a compiler and two pinned libfaketime builds for clock scratch work) and the blockio helper (device-mapper and loop-device user-space tools) have only their quick checks and are not published.
+Three helpers are published for `linux/amd64` and `linux/arm64`:
+
+| Tag | Helper | Publication gate |
+| --- | --- | --- |
+| `ghcr.io/jsyoo5b/ceph-testcontainers-images:extension-netem-v1` | Kernel packet delay, loss, rate and packet faults with `tc` | Functional check |
+| `ghcr.io/jsyoo5b/ceph-testcontainers-images:extension-capture-v1` | Packet capture with `tcpdump` | Functional check |
+| `ghcr.io/jsyoo5b/ceph-testcontainers-images:extension-blockio-v1` | Device-mapper and loop-device user-space tools | Quick check |
+
+Each helper is checked and published apart from the others and from the release images below, and none blocks another. The capture and blockio helpers are published only from the default branch. The clock-probe helper (a compiler and two pinned libfaketime builds for clock scratch work) has only its quick check and is not published.
 
 ## Published images
 
@@ -274,4 +282,4 @@ a removal under the same tag (see [Selecting images by tag](#selecting-images-by
 
 The code and documents in this repository are licensed under the [MIT License](LICENSE).
 
-The checkers and the functional scenarios run Ceph only inside containers and include no Ceph code. The netem helper contains no Ceph component; its packages keep their licenses as described in [Extension Images](docs/EXTENSIONS.md). Role images built with this repository are different: they contain Ceph and distribution packages, each under its own license (Ceph is mostly LGPL-2.1 or LGPL-3, see its [COPYING](https://github.com/ceph/ceph/blob/v20.2.4/COPYING)). Images built by `image/roles/`, `image/debian/` and `image/ubuntu/` keep their license files and carry `/usr/share/ceph-testcontainers/SOURCES.txt` with `source-packages.txt`, which name the source package of every installed package and where it is published. Whoever distributes such images must meet those licenses, including making the corresponding source available where required.
+The checkers and the functional scenarios run Ceph only inside containers and include no Ceph code. The extension helpers contain no Ceph component; their packages keep their licenses as described in [Extension Images](docs/EXTENSIONS.md). Role images built with this repository are different: they contain Ceph and distribution packages, each under its own license (Ceph is mostly LGPL-2.1 or LGPL-3, see its [COPYING](https://github.com/ceph/ceph/blob/v20.2.4/COPYING)). Images built by `image/roles/`, `image/debian/` and `image/ubuntu/` keep their license files and carry `/usr/share/ceph-testcontainers/SOURCES.txt` with `source-packages.txt`, which name the source package of every installed package and where it is published. Whoever distributes such images must meet those licenses, including making the corresponding source available where required.
