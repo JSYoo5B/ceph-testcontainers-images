@@ -276,10 +276,12 @@ This section defines contract 1 and its quick check, which [image/extension_chec
 These are observations of the research that used the helper, not checks of this repository and not a support claim for any engine:
 
 - Per-process wall-clock offsets through `LD_PRELOAD` and a live timestamp file that the caller owns, measured for each clock route and for each interposer variant.
-- On Tentacle 20.2.4, natively on `arm64`, an offset of ±2 s in the process of a follower or of the leader MON raised `MON_CLOCK_SKEW`, which cleared after the offset was restored in the same process.
+- Natively on `amd64`, the public `clock_gettime` follows the live file with both variants, the libc `syscall()` route follows it only with the `intercept-syscall` variant, and the vDSO symbol and a raw syscall bypass it with both. `CLOCK_MONOTONIC` stays unfaked only with `FAKETIME_DONT_FAKE_MONOTONIC=1`; without it, both variants fake it.
+- On Tentacle 20.2.4, natively on `arm64`, and on 20.2.4, 19.2.5 and 21.2.0, natively on `amd64` with the `default` variant and `FAKETIME_DONT_FAKE_MONOTONIC=1`, an offset of ±2 s in the process of a follower or of the leader MON raised `MON_CLOCK_SKEW`, which cleared after the offset was restored in the same process.
+- On those three releases on `amd64`, a backward leader jump larger than the ping-to-pong delay, written while a timecheck round was in flight, cancelled the round; a forward jump let the round complete without reporting the skew, and the following rounds reported it.
 - The interposer built on Debian's glibc 2.36 also loaded into the official-derived essential role images, which are based on CentOS Stream 9.
 
-What it does not cover: the vDSO symbol and raw syscall routes, monotonic time, and daemon instrumentation on `amd64`, which the Go repository qualifies natively with this helper next, together with a MON timecheck round that the research did not exercise.
+What it does not cover: the `CLOCK_MONOTONIC` of the daemon itself, which was not sampled inside `ceph-mon`; a backward leader jump smaller than the ping-to-pong delay inside a timecheck round; and the releases other than 20.2.4 on `arm64`.
 
 ### Why it is not published
 
@@ -322,6 +324,7 @@ The load check uses a static file. It does not update a file while a process run
 - Whether the clock routes other than the public `clock_gettime(CLOCK_REALTIME)` (libc `syscall`, the vDSO and a raw syscall) follow or bypass the interposer. The quick check measures the public realtime path of one process only.
 - A live update of the offset file, update latency, restoration or disposal of an instrumented process.
 - Any Ceph daemon or client, a time namespace, a virtual machine or a kernel clock fault.
+- Which variant can instrument a Ceph daemon. The `intercept-syscall` build is for the scratch probe's libc `syscall()` route only. A process that loads tcmalloc hangs at start with it, and the Ceph daemons of the role images load tcmalloc, so daemon instrumentation uses the `default` build. In the research on `amd64`, `ceph-mon --version`, and `date` with `libtcmalloc.so.4` preloaded first, hung with one thread in a futex wait and ignored `SIGTERM`, while both ran normally with the `default` build and `date` and `python3` without tcmalloc ran normally with the `intercept-syscall` build. The cause inside the interposer is not determined.
 - A functional check and engine support.
 - The interposer is built for glibc on Debian. A different libc can need its own helper or a changed build, and a build on another base can change the ABI that the module sees.
 
