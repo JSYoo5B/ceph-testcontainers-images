@@ -7,7 +7,9 @@ name: published extension
 # image and published essential role image. The capture helper: the contract
 # and every capture and negative control in the namespace of a container of
 # every published release's official image. The blockio helper: its quick
-# check, which is its publication gate.
+# check, which is its publication gate. The clock helper: its quick check, its
+# publication gate, with the interposer loaded in a container of every published
+# release's official image and published essential role image.
 on:
   workflow_call:
     inputs:
@@ -23,7 +25,7 @@ on:
         description: The published helper to check
         required: true
         type: choice
-        options: [netem, capture, blockio]
+        options: [netem, capture, blockio, clock]
       images:
         description: 'JSON digest map: extension -> architecture -> sha256 digest'
         required: true
@@ -177,6 +179,56 @@ jobs:
         if: always()
         with:
           name: published-blockio-extension-${{ matrix.architecture }}-check
+          retention-days: 30
+          path: |
+            ${{ runner.temp }}/published-extension-digests.json
+            ${{ runner.temp }}/published-extension/
+          if-no-files-found: warn
+
+  published-clock-extension:
+    if: inputs.extension == 'clock'
+    strategy:
+      fail-fast: false
+      matrix:
+        architecture: [amd64, arm64]
+        include:
+          - architecture: amd64
+            runner: ubuntu-24.04
+          - architecture: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.9'
+      - run: make extension-test
+      - name: Pull the published digest and check the clock contract in Ceph targets
+        env:
+          PUBLISHED_IMAGES: ${{ inputs.images }}
+          IMAGE_EXTENSION: ${{ inputs.extension }}
+          IMAGE_ARCHITECTURE: ${{ matrix.architecture }}
+        run: |
+          reference="$(python3 image/publish.py published-reference --extension "$IMAGE_EXTENSION" \
+            --architecture "$IMAGE_ARCHITECTURE" --images "$PUBLISHED_IMAGES")"
+          platform="linux/$IMAGE_ARCHITECTURE"
+          docker pull --platform "$platform" "$reference"
+          targets=()
+          for release in $(python3 image/releases.py published); do
+            for target in "$(python3 image/releases.py official "$release")" \
+                "$(python3 image/releases.py role "$release" official essential)"; do
+              docker pull --platform "$platform" "$target"
+              targets+=(--target "$target")
+            done
+          done
+          echo "$PUBLISHED_IMAGES" > "$RUNNER_TEMP/published-extension-digests.json"
+          python3 image/extension_check.py --extension clock --image "$reference" --platform "$platform" \
+            "${targets[@]}" --output-dir "$RUNNER_TEMP/published-extension"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: published-clock-extension-${{ matrix.architecture }}-check
           retention-days: 30
           path: |
             ${{ runner.temp }}/published-extension-digests.json
