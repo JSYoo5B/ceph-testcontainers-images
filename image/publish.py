@@ -292,7 +292,8 @@ def extension_targets(extension):
     official image and the published essential role image, by its tag, of
     every published release. The capture helper: the official image of every
     published release, which is what its CI job checks. The blockio helper has
-    no target: its quick check is its whole gate."""
+    no target: its quick check is its whole gate. The clock helper: the same
+    images as netem, which its quick check loads the interposer in."""
     if extension == "blockio":
         return set()
     if extension == "capture":
@@ -328,7 +329,7 @@ def validate_extension_report(report, extension, architecture):
         require(result.get("status") == "passed" and result.get("cleanup", {}).get("status") == "passed"
                 and not result["cleanup"].get("leftovers"), "Every target scenario must pass and clean up")
     {"netem": validate_netem_report, "capture": validate_capture_report,
-     "blockio": validate_blockio_report}[extension](report, architecture)
+     "blockio": validate_blockio_report, "clock": validate_clock_report}[extension](report, architecture)
 
 
 def validate_netem_report(report, architecture):
@@ -403,6 +404,24 @@ def validate_blockio_report(report, architecture):
     platform: every executable and option of its contract, checked by
     require_quick_checks, and no target scenario."""
     require(not report.get("targets"), "The blockio helper has no target scenario")
+
+
+def validate_clock_report(report, architecture):
+    """The clock helper publishes what its quick check showed on this
+    platform: the files, manifest and ELF checks of require_quick_checks,
+    and in every release target the load of exactly the checked interposer
+    by this helper, with no problem."""
+    image = report["image"]
+    digest = (image.get("versions") or {}).get("interposer_sha256")
+    require(isinstance(digest, str) and DIGEST.fullmatch("sha256:" + digest) is not None,
+            "The clock report must record the interposer's sha256")
+    for reference, result in report["targets"].items():
+        require(result.get("helper_image_id") == image.get("image_id")
+                and result.get("platform") == "linux/" + architecture
+                and result.get("interposer_sha256") == digest,
+                "Every load check must use the checked interposer on the requested platform: " + reference)
+        require(result.get("problems") == [] and result.get("samples"),
+                "Every load check must record its samples without a problem: " + reference)
 
 
 # The leading bytes of classic pcap (both byte orders, micro- and nanosecond)

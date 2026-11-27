@@ -31,6 +31,15 @@ gate: root, no capabilities or network, and user-space help/version and Python
 supervision checks only. It never opens host devices or queries the kernel
 device-mapper targets.
 
+The clock helper is a file source that never runs. Its quick check, which is
+also its publication gate, reads the image's filesystem through the engine
+without starting a container: exactly one interposer, the libfaketime default
+build, with its manifest and the manifest's hash, no executable, no exported
+syscall() and no glibc symbol version above the stated bound. Each --target
+(a Ceph image) then gets the interposer copied into a container of it, as a
+module places it, and python3 there must show a +0 and a +3600 timestamp file
+in its public realtime clock while CLOCK_MONOTONIC stays unchanged.
+
 The clock-probe helper, a retained research helper that is not published,
 has only the quick check: its probe runs as root without capabilities or
 network and checks the compiler, the build manifest of the two pinned
@@ -63,10 +72,12 @@ HERE = Path(__file__).resolve().parent
 # gets in a container without a network: the netem helper runs as root with
 # none; the capture helper as the unprivileged user of its image with
 # NET_RAW, which its tcpdump needs to start at all; the clock-probe helper runs
-# as root with none; the blockio helper also runs as root with none.
+# as root with none; the blockio helper also runs as root with none. The clock
+# helper runs nothing: its probe is the load script that runs in each target.
 # A published helper names the check level that gates its publication: the
 # functional check for netem and capture, the quick check for blockio, whose
-# contract is the presence of the executables and options its consumer runs.
+# contract is the presence of the executables and options its consumer runs,
+# and for clock, whose contract is the files its consumer copies.
 # Each extension also names every check its quick probe must report: a probe
 # that reports COMPLETE without one of them is incomplete, and publication
 # requires each of them to pass.
@@ -83,6 +94,8 @@ QUICK_CHECKS = {
     "clock-probe": ("path:sh", "path:sleep", "path:python3", "path:gcc", "path:nm", "path:clock-probe-build-info",
                     "sleep-infinity", "version:gcc", "python-runtime", "writable:/tmp", "manifest",
                     "symbol:syscall", "load:shift"),
+    "clock": ("file:manifest", "file:interposer", "interposer:single", "executables:none", "manifest",
+              "manifest:default-build", "hash", "elf", "symbol:syscall", "glibc-bound"),
 }
 EXTENSIONS = {"netem": {"contract": "1", "probe": HERE / "extensions" / "netem" / "check-netem.sh", "user": "0:0",
                         "caps": (), "published": True, "gate": "functional"},
@@ -90,6 +103,8 @@ EXTENSIONS = {"netem": {"contract": "1", "probe": HERE / "extensions" / "netem" 
                           "user": None, "caps": ("NET_RAW",), "published": True, "gate": "functional"},
               "blockio": {"contract": "1", "probe": HERE / "extensions" / "blockio" / "check-blockio.sh",
                           "user": "0:0", "caps": (), "published": True, "gate": "quick"},
+              "clock": {"contract": "1", "probe": HERE / "extensions" / "clock" / "check-clock-load.py",
+                        "user": "0:0", "caps": (), "published": True, "gate": "quick"},
               "clock-probe": {"contract": "1", "probe": HERE / "extensions" / "clock-probe" / "check-clock-probe.sh",
                               "user": "0:0", "caps": (), "published": False}}
 # The helpers that image/publish.py publishes, each gated by its own check on
@@ -513,7 +528,8 @@ def arguments(argv=None):
     parser.add_argument("--functional", action="store_true",
                         help="Also check the kernel feature and a delay inside each target's namespace")
     parser.add_argument("--target", action="append", default=[], metavar="REF",
-                        help="With --functional, a Ceph image whose container namespace the helper joins; repeat")
+                        help="With --functional, a Ceph image whose container namespace the helper joins; for "
+                             "clock, a Ceph image that the interposer is loaded in; repeat")
     parser.add_argument("--selector", action="append", default=[], choices=tuple(SELECTORS),
                         help="With --functional, also check a selector profile in each target; repeat")
     parser.add_argument("--rate", action="store_true",
@@ -530,7 +546,9 @@ def arguments(argv=None):
     parser.add_argument("--output-dir", type=Path, help="Fresh report directory (default: artifacts/extension-check-UUID)")
     parser.add_argument("--probe-timeout", type=check.positive_number, default=120, metavar="SECONDS")
     args = parser.parse_args(argv)
-    if args.target and not args.functional:
+    if args.extension == "clock" and args.functional:
+        parser.error("--extension clock has only the quick check; its --target images get the interposer loaded")
+    if args.target and not args.functional and args.extension != "clock":
         parser.error("--target requires --functional")
     if args.functional and not args.target:
         parser.error("--functional requires at least one --target")
@@ -668,6 +686,365 @@ def capture_refusal(image, output):
                       failure_kind="checker_failure")
     finally:
         result["cleanup"] = remove_container(container)
+        if result["cleanup"]["status"] != "passed":
+            result.update(status="failed", failure_kind="checker_failure")
+    return result
+
+
+# The clock helper (docs/EXTENSIONS.md) is a file source and never runs. Its
+# quick check reads the image's filesystem through the engine, as a module
+# copies the interposer and the manifest out of a created container, and
+# judges the files here. With --target, it then loads the interposer in a
+# container of each Ceph image, where a module places it.
+CLOCK_ROOT = "/opt/ceph-testcontainers/clock"
+CLOCK_MANIFEST = CLOCK_ROOT + "/build.json"
+CLOCK_INTERPOSER = CLOCK_ROOT + "/libfaketime.so.1"
+# The oldest glibc of the Ceph images the Go library supports: CentOS Stream 9,
+# which the official images of 19.2.5 and 20.2.4 and their role images use.
+CLOCK_GLIBC_BOUND = (2, 34)
+# The machine name and ELF e_machine of each platform.
+CLOCK_MACHINES = {"linux/amd64": ("x86_64", 62), "linux/arm64": ("aarch64", 183)}
+# Files that the engine itself places into every exported container.
+CLOCK_ENGINE_FILES = ("/.dockerenv", "/etc/hostname", "/etc/hosts", "/etc/mtab", "/etc/resolv.conf")
+CLOCK_ENGINE_TREES = ("/dev/", "/proc/", "/sys/")
+# Where the load check places the interposer in a target container.
+CLOCK_LOAD_PATH = "/tmp/libfaketime.so.1"
+# The samples of the load check: name, timestamp file content and the offset
+# that the child's realtime clock must show, in seconds (None: uninstrumented).
+CLOCK_SAMPLES = (("reference", None, None), ("+0", "+0", 0), ("+3600", "+3600", 3600))
+CLOCK_BOUND = 5
+HEX40 = re.compile(r"[0-9a-f]{40}")
+HEX64 = re.compile(r"[0-9a-f]{64}")
+GLIBC_VERSION = re.compile(r"GLIBC_([0-9]+)\.([0-9]+)(?:\.([0-9]+))?")
+
+
+def clock_members(archive):
+    """The members of an exported container filesystem: absolute path ->
+    {"type", "mode"}, with "data" for the manifest and the interposer."""
+    import tarfile
+    members = {}
+    with tarfile.open(archive) as tar:
+        for member in tar:
+            name = member.name[2:] if member.name.startswith("./") else member.name
+            path = "/" + name.strip("/")
+            kind = ("file" if member.isreg() else "directory" if member.isdir() else
+                    "symlink" if member.issym() else "link" if member.islnk() else "other")
+            entry = {"type": kind, "mode": member.mode}
+            if kind == "file" and path in (CLOCK_MANIFEST, CLOCK_INTERPOSER):
+                entry["data"] = tar.extractfile(member).read()
+            members[path] = entry
+    return members
+
+
+def elf_dynamic(data):
+    """The type, machine, defined dynamic symbols and version needs (library,
+    version) of a little-endian ELF64 object, read from its section headers.
+    A malformed or unsupported object raises ValueError."""
+    try:
+        if len(data) < 64 or data[:4] != b"\x7fELF":
+            raise ValueError("not an ELF object")
+        if data[4] != 2 or data[5] != 1:
+            raise ValueError("not a little-endian ELF64 object")
+        kind, machine = struct.unpack_from("<HH", data, 16)
+        offset, = struct.unpack_from("<Q", data, 0x28)
+        size, count = struct.unpack_from("<HH", data, 0x3A)
+        if size != 64 or not count or offset + count * size > len(data):
+            raise ValueError("no section header table")
+        sections = [struct.unpack_from("<IIQQQQIIQQ", data, offset + index * size) for index in range(count)]
+
+        def body(index):
+            section = sections[index]
+            if section[1] == 8:  # SHT_NOBITS
+                return b""
+            if section[4] + section[5] > len(data):
+                raise ValueError("a section extends beyond the file")
+            return data[section[4]:section[4] + section[5]]
+
+        def text(table, index):
+            end = table.find(b"\0", index)
+            if index >= len(table) or end < 0:
+                raise ValueError("a string index is out of range")
+            return table[index:end].decode("ascii", "replace")
+
+        dynamic = [index for index, section in enumerate(sections) if section[1] == 11]  # SHT_DYNSYM
+        if len(dynamic) != 1:
+            raise ValueError("no single dynamic symbol table")
+        table, strings = body(dynamic[0]), body(sections[dynamic[0]][6])
+        symbols = set()
+        for position in range(0, len(table) - len(table) % 24, 24):
+            name, info, _, index = struct.unpack_from("<IBBH", table, position)
+            # A defined global or weak symbol is exported.
+            if index != 0 and info >> 4 in (1, 2):
+                symbols.add(text(strings, name))
+        needs = []
+        for number, section in enumerate(sections):
+            if section[1] != 0x6ffffffe:  # SHT_GNU_verneed
+                continue
+            table, strings = body(number), body(section[6])
+            position = 0
+            for _ in range(section[7]):
+                _, entries, library, auxiliary, following = struct.unpack_from("<HHIII", table, position)
+                cursor = position + auxiliary
+                for _ in range(entries):
+                    _, _, _, name, step = struct.unpack_from("<IHHII", table, cursor)
+                    needs.append((text(strings, library), text(strings, name)))
+                    if not step:
+                        break
+                    cursor += step
+                if not following:
+                    break
+                position += following
+        return {"type": kind, "machine": machine, "symbols": symbols, "needs": needs}
+    except (struct.error, IndexError) as error:
+        raise ValueError("truncated ELF object: " + str(error)) from error
+
+
+def clock_manifest_problem(manifest, platform):
+    """Why a build manifest is not one of the clock contract, or None."""
+    if not isinstance(manifest, dict) or manifest.get("schema") != 1:
+        return "schema"
+    if set(manifest) != {"schema", "source", "toolchain", "architecture", "interposer"}:
+        return "fields: " + ", ".join(sorted(manifest))
+    source = manifest["source"]
+    if not isinstance(source, dict) or not all(isinstance(source.get(key), str) and source[key]
+                                               for key in ("repository", "tag", "commit", "tree")):
+        return "source"
+    if not HEX40.fullmatch(source["commit"]) or not HEX40.fullmatch(source["tree"]):
+        return "source identity"
+    toolchain = manifest["toolchain"]
+    if not isinstance(toolchain, dict) or not all(isinstance(toolchain.get(key), str) and toolchain[key]
+                                                  for key in ("compiler", "libc")):
+        return "toolchain"
+    if manifest["architecture"] != CLOCK_MACHINES[platform][0]:
+        return "architecture " + repr(manifest["architecture"])
+    interposer = manifest["interposer"]
+    if not isinstance(interposer, dict) or interposer.get("path") != CLOCK_INTERPOSER:
+        return "interposer path"
+    if not isinstance(interposer.get("sha256"), str) or not HEX64.fullmatch(interposer["sha256"]):
+        return "interposer sha256"
+    return None
+
+
+def clock_build_problem(manifest):
+    """Why a valid manifest does not declare the upstream default build, or
+    None. Only that build can instrument a Ceph daemon: the intercept-syscall
+    build hangs every process that loads tcmalloc."""
+    interposer = manifest["interposer"]
+    if interposer.get("build") != "default":
+        return "build " + repr(interposer.get("build"))
+    if interposer.get("intercept_syscall") is not False:
+        return "intercept_syscall " + repr(interposer.get("intercept_syscall"))
+    if interposer.get("compile_flags") != "":
+        return "compile_flags " + repr(interposer.get("compile_flags"))
+    return None
+
+
+def glibc_problem(needs):
+    """Why version needs go beyond CLOCK_GLIBC_BOUND or are not glibc
+    versions, or None; and the newest glibc version needed, or None."""
+    newest, problems = None, set()
+    for library, name in needs:
+        match = GLIBC_VERSION.fullmatch(name)
+        if not match:
+            problems.add(library + " " + name)
+            continue
+        version = tuple(int(part or 0) for part in match.groups())
+        newest = max(newest or version, version)
+        if version[:2] > CLOCK_GLIBC_BOUND:
+            problems.add(library + " " + name)
+    label = None
+    if newest is not None:
+        label = "GLIBC_%d.%d" % newest[:2] + (".%d" % newest[2] if newest[2] else "")
+    return ("needs " + ", ".join(sorted(problems)) if problems else None), label
+
+
+def clock_checks(members, platform):
+    """The quick checks of the clock contract on an exported filesystem: the
+    checks, the versions to record, and the interposer's bytes when every
+    check passed."""
+    checks, versions = [], {}
+
+    def record(name, problem, kind="quick_failure"):
+        entry = {"name": name, "status": "passed" if problem is None else "failed"}
+        if problem is not None:
+            entry.update(detail=problem, failure_stage="quick:" + name, failure_kind=kind)
+        checks.append(entry)
+        return problem is None
+
+    for name, path in (("file:manifest", CLOCK_MANIFEST), ("file:interposer", CLOCK_INTERPOSER)):
+        kind = members.get(path, {}).get("type")
+        record(name, None if kind == "file" else "no regular file at " + path, "missing_file")
+    others = sorted(path for path, entry in members.items() if entry["type"] != "directory"
+                    and (path.rsplit("/", 1)[-1].startswith("libfaketime") or path.startswith(CLOCK_ROOT + "/"))
+                    and path not in (CLOCK_MANIFEST, CLOCK_INTERPOSER))
+    record("interposer:single", "other files: " + ", ".join(others) if others else None)
+    executables = sorted(path for path, entry in members.items()
+                         if entry["type"] == "file" and entry["mode"] & 0o111 and path not in CLOCK_ENGINE_FILES
+                         and not path.startswith(CLOCK_ENGINE_TREES))
+    record("executables:none", "executable files: " + ", ".join(executables[:20]) if executables else None)
+
+    data = members.get(CLOCK_MANIFEST, {}).get("data")
+    manifest = None
+    if data is None:
+        problem = "no manifest"
+    else:
+        try:
+            manifest = json.loads(data.decode("utf-8"))
+            problem = clock_manifest_problem(manifest, platform)
+        except ValueError:
+            problem = "not JSON"
+    valid = record("manifest", problem)
+    if valid:
+        versions["libfaketime"] = manifest["source"]["tag"] + " " + manifest["source"]["commit"]
+        versions["interposer_sha256"] = manifest["interposer"]["sha256"]
+    record("manifest:default-build", clock_build_problem(manifest) if valid else "no valid manifest")
+
+    interposer = members.get(CLOCK_INTERPOSER, {}).get("data")
+    if interposer is None:
+        problem = "no interposer"
+    elif not valid:
+        problem = "no valid manifest"
+    else:
+        digest = hashlib.sha256(interposer).hexdigest()
+        problem = None if digest == manifest["interposer"]["sha256"] else "sha256 " + digest
+    record("hash", problem)
+
+    elf = None
+    if interposer is None:
+        problem = "no interposer"
+    else:
+        try:
+            elf = elf_dynamic(interposer)
+            problem = None
+            if elf["type"] != 3:  # ET_DYN
+                problem = "not a shared object"
+            elif elf["machine"] != CLOCK_MACHINES[platform][1]:
+                problem = "machine %d" % elf["machine"]
+        except ValueError as error:
+            problem = str(error)
+    if not record("elf", problem):
+        elf = None
+    record("symbol:syscall", "no ELF object" if elf is None else
+           "exports syscall" if "syscall" in elf["symbols"] else None)
+    if elf is None:
+        record("glibc-bound", "no ELF object")
+    else:
+        problem, newest = glibc_problem(elf["needs"])
+        if newest:
+            versions["glibc_required"] = newest
+        record("glibc-bound", problem)
+    passed = all(entry["status"] == "passed" for entry in checks)
+    return checks, versions, interposer if passed else None
+
+
+def clock_quick(image, args, output):
+    """The quick check of the clock helper on the files of a created, never
+    started container, read through the engine. Returns the interposer's
+    bytes when every check passed."""
+    container = "ceph-extension-check-" + uuid.uuid4().hex
+    try:
+        with tempfile.TemporaryDirectory() as directory:
+            archive = Path(directory) / "filesystem.tar"
+            # The image has no executable; the entrypoint only lets Docker
+            # create the container, which is never started.
+            docker("create", "--name", container, "--label", LABEL + "=quick", "--pull=never", "--network=none",
+                   "--platform", image["platform"], "--entrypoint=/ceph-extension-check-never-runs",
+                   image["image_id"])
+            docker("export", "--output", str(archive), container, timeout=args.probe_timeout)
+            members = clock_members(archive)
+    finally:
+        image["cleanup"] = remove_container(container)
+    checks, versions, interposer = clock_checks(members, image["platform"])
+    (output / "quick.log").write_text("".join(
+        "CHECK\t%s\t%s%s\n" % (entry["status"], entry["name"], "\t" + entry["detail"] if "detail" in entry else "")
+        for entry in checks))
+    image.update(checks=checks, versions=versions, log="quick.log",
+                 status="passed" if interposer is not None else "failed")
+    return interposer
+
+
+def clock_load_problems(measured, path=CLOCK_LOAD_PATH):
+    """Why the samples of check-clock-load.py do not show the interposer
+    mapped only with LD_PRELOAD and moving the public realtime clock of a
+    process by the file's offset, within CLOCK_BOUND, while its
+    CLOCK_MONOTONIC stays the uninstrumented clock."""
+    if not isinstance(measured, dict) or measured.get("interposer") != path:
+        return ["no measurement of " + path]
+    samples = {sample.get("name"): sample for sample in measured.get("samples") or [] if isinstance(sample, dict)}
+    problems = []
+
+    def number(value):
+        return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+    for name, stamp, offset in CLOCK_SAMPLES:
+        sample = samples.get(name)
+        if sample is None or sample.get("stamp") != stamp:
+            problems.append(name + ": not measured")
+            continue
+        if sample.get("error") or sample.get("exit_code") != 0:
+            problems.append("%s: the child failed: %s" % (name, sample.get("error") or sample.get("stderr", "")))
+            continue
+        clocks = [sample.get(key) for key in ("before", "child", "after")]
+        if not all(isinstance(value, dict) and number(value.get("realtime")) and number(value.get("monotonic"))
+                   for value in clocks):
+            problems.append(name + ": malformed sample")
+            continue
+        before, child, after = clocks
+        if child.get("loaded") is not (offset is not None):
+            problems.append(name + (": the interposer is not mapped" if offset is not None
+                                    else ": the interposer is mapped without LD_PRELOAD"))
+        expected = offset or 0
+        low, high = child["realtime"] - after["realtime"], child["realtime"] - before["realtime"]
+        if low < expected - CLOCK_BOUND or high > expected + CLOCK_BOUND:
+            problems.append("%s: realtime offset %.1f..%.1f s, expected %d s" % (name, low, high, expected))
+        if not before["monotonic"] <= child["monotonic"] <= after["monotonic"]:
+            problems.append("%s: CLOCK_MONOTONIC %.3f outside %.3f..%.3f" % (
+                name, child["monotonic"], before["monotonic"], after["monotonic"]))
+    return problems
+
+
+def clock_load(image, target, run, interposer, timeout, output):
+    """Load the checked interposer into python3 in a container of a Ceph
+    image, as root without network or capability, and judge the samples."""
+    label = LABEL + "=" + run
+    container = "ceph-extension-check-" + run
+    output.mkdir()
+    result = {"reference": target["reference"], "image_id": target["image_id"], "platform": target["platform"],
+              "helper_image_id": image["image_id"], "interposer_sha256": hashlib.sha256(interposer).hexdigest(),
+              "status": "running"}
+    try:
+        source = output / "libfaketime.so.1"
+        source.write_bytes(interposer)
+        try:
+            docker("create", "--name", container, "--label", label, "--pull=never", "--network=none",
+                   "--cap-drop=ALL", "--user=0:0", "--interactive", "--platform", target["platform"],
+                   "--entrypoint=python3", target["image_id"], "-I", "-", CLOCK_LOAD_PATH)
+            docker("cp", str(source), container + ":" + CLOCK_LOAD_PATH)
+        finally:
+            source.unlink()
+        try:
+            completed = subprocess.run(["docker", "start", "--attach", "--interactive", container],
+                                       input=EXTENSIONS["clock"]["probe"].read_text(), capture_output=True,
+                                       text=True, timeout=timeout)
+        except subprocess.TimeoutExpired as error:
+            raise CheckError("The load check timed out", "timeout") from error
+        (output / "load.log").write_text(completed.stdout + completed.stderr)
+        lines = completed.stdout.strip().splitlines()
+        try:
+            measured = json.loads(lines[-1]) if lines else None
+        except ValueError:
+            measured = None
+        result.update(exit_code=completed.returncode, samples=(measured or {}).get("samples"),
+                      python=(measured or {}).get("python"))
+        problems = clock_load_problems(measured) if completed.returncode == 0 else [
+            "the load script exited %d: %s" % (completed.returncode, completed.stderr.strip()[-300:])]
+        result.update(problems=problems, status="failed" if problems else "passed")
+        if problems:
+            result["failure_kind"] = "load_failure"
+    except check.CheckError as error:
+        result.update(status="failed", error=str(error), failure_kind=getattr(error, "kind", "checker_failure"))
+    finally:
+        result["cleanup"] = cleanup(label, output)
         if result["cleanup"]["status"] != "passed":
             result.update(status="failed", failure_kind="checker_failure")
     return result
@@ -3632,6 +4009,33 @@ def faults_profile(args, image, report, output):
     return None
 
 
+def clock_contract(args, image, report, output):
+    """The clock helper's quick check, then the load check in each target.
+    Failures raise; main() records them."""
+    interposer = clock_quick(image, args, output)
+    save(output, report)
+    if image["cleanup"]["status"] != "passed":
+        raise CheckError("Could not remove the quick check container: " + "; ".join(image["cleanup"]["errors"]),
+                         "checker_failure")
+    if interposer is None:
+        raise CheckError("The image does not meet the clock contract; see quick.log", "image_unsupported")
+    for reference in args.target:
+        target = check.inspect_image(reference, args.platform)
+        if target["platform"] != image["platform"]:
+            raise CheckError("The target and the helper must use one platform: " + reference)
+        print("Loading the interposer in a container of " + reference, flush=True)
+        run = uuid.uuid4().hex[:12]
+        report["targets"][reference] = clock_load(image, target, run, interposer, args.probe_timeout,
+                                                  output / ("load-" + run))
+        save(output, report)
+    failed = [reference for reference, result in report["targets"].items() if result["status"] != "passed"]
+    if failed:
+        kinds = {report["targets"][reference].get("failure_kind", "load_failure") for reference in failed}
+        raise CheckError("The load check failed for: " + ", ".join(failed),
+                         kinds.pop() if len(kinds) == 1 else "load_failure")
+    report["status"] = "passed"
+
+
 def main(argv=None):
     args = arguments(argv)
     output = (args.output_dir or Path("artifacts") / ("extension-check-" + uuid.uuid4().hex)).resolve()
@@ -3654,6 +4058,9 @@ def main(argv=None):
         image["labels"] = {key: value for key, value in labels.items() if key.startswith("io.ceph-testcontainers.")}
         report["image"] = image
         print("Checking the " + args.extension + " contract: " + args.image, flush=True)
+        if args.extension == "clock":
+            clock_contract(args, image, report, output)
+            return 0 if report["status"] == "passed" else 1
         probe(args.extension, image, args, output)
         save(output, report)
         if args.extension == "capture" and image["status"] == "passed":

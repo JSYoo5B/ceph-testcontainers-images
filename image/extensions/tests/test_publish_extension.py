@@ -58,6 +58,23 @@ def blockio_report(architecture="amd64"):
                                  "io.ceph-testcontainers.extension.contract": "1"}}}
 
 
+def clock_report(architecture="amd64"):
+    sha = "f" * 64
+    targets = {reference: {"status": "passed", "cleanup": {"status": "passed", "leftovers": []},
+                           "helper_image_id": digest(50), "platform": "linux/" + architecture,
+                           "interposer_sha256": sha, "problems": [],
+                           "samples": [{"name": "reference"}, {"name": "+0"}, {"name": "+3600"}]}
+               for reference in publish.extension_targets("clock")}
+    return {"status": "passed", "level": "quick", "extension": "clock", "contract": "1",
+            "checker_sha256": publish.extensions().checker_sha256(), "targets": targets,
+            "image": {"image_id": digest(50), "status": "passed", "platform": "linux/" + architecture,
+                      "cleanup": {"status": "passed"}, "checks": quick_checks("clock"),
+                      "versions": {"libfaketime": "v0.9.12 " + "3" * 40, "interposer_sha256": sha,
+                                   "glibc_required": "GLIBC_2.34"},
+                      "labels": {"io.ceph-testcontainers.extension": "clock",
+                                 "io.ceph-testcontainers.extension.contract": "1"}}}
+
+
 def promote_with_fake_registry(test, root, extension):
     """Promote the candidates below root/candidates against a fake registry;
     returns the tags written and the references each points to."""
@@ -115,7 +132,8 @@ class BlockioPublicationTests(unittest.TestCase):
                 publish.validate_extension_report(value, extension, "amd64")
 
     def test_every_published_gate_requires_each_contract_check_once(self):
-        reports = {"blockio": (blockio_report(), "amd64"), "netem": (extension_report(), "arm64")}
+        reports = {"blockio": (blockio_report(), "amd64"), "netem": (extension_report(), "arm64"),
+                   "clock": (clock_report(), "amd64")}
         for extension, (good, architecture) in reports.items():
             publish.validate_extension_report(good, extension, architecture)
             names = publish.extensions().QUICK_CHECKS[extension]
@@ -249,7 +267,120 @@ class BlockioPublicationTests(unittest.TestCase):
         self.assertIn("if: inputs.extension == 'blockio'", recheck)
         self.assertIn("image/publish.py published-reference", recheck)
         self.assertIn("--extension blockio --image \"$reference\"", recheck)
-        self.assertIn("options: [netem, capture, blockio]", published)
+        self.assertIn("options: [netem, capture, blockio, clock]", published)
+
+
+class ClockPublicationTests(unittest.TestCase):
+
+    def test_the_clock_gate_is_a_quick_report_with_a_load_in_every_release_target(self):
+        good = clock_report()
+        publish.validate_extension_report(good, "clock", "amd64")
+        targets = publish.extension_targets("clock")
+        self.assertEqual(targets, publish.extension_targets("netem"))
+        self.assertEqual(len(targets), 2 * len(publish.releases.published()))
+        first = sorted(targets)[0]
+        bad = {}
+        def case(name, change):
+            value = copy.deepcopy(good); change(value); bad[name] = value
+        case("functional level", lambda v: v.update(level="functional"))
+        case("a missing target", lambda v: v["targets"].pop(first))
+        case("a failed load", lambda v: v["targets"][first].update(status="failed"))
+        case("a load problem", lambda v: v["targets"][first].update(problems=["+3600: not mapped"]))
+        case("no problems recorded", lambda v: v["targets"][first].pop("problems"))
+        case("no samples", lambda v: v["targets"][first].update(samples=[]))
+        case("another interposer", lambda v: v["targets"][first].update(interposer_sha256="e" * 64))
+        case("another helper", lambda v: v["targets"][first].update(helper_image_id=digest(51)))
+        case("another platform", lambda v: v["targets"][first].update(platform="linux/arm64"))
+        case("leftovers", lambda v: v["targets"][first]["cleanup"].update(leftovers=["x"]))
+        case("no recorded hash", lambda v: v["image"]["versions"].pop("interposer_sha256"))
+        case("a short hash", lambda v: v["image"]["versions"].update(interposer_sha256="f" * 12))
+        for dropped in ("symbol:syscall", "glibc-bound", "hash", "manifest:default-build", "interposer:single"):
+            case("without " + dropped, lambda v, d=dropped: v["image"].update(
+                checks=[entry for entry in v["image"]["checks"] if entry["name"] != d]))
+            case("failed " + dropped, lambda v, d=dropped: [entry.update(status="failed")
+                                                           for entry in v["image"]["checks"] if entry["name"] == d])
+        for name, value in bad.items():
+            with self.subTest(name), self.assertRaises(publish.PublishError):
+                publish.validate_extension_report(value, "clock", "amd64")
+        with self.assertRaises(publish.PublishError):
+            publish.validate_extension_report(good, "clock", "arm64")
+        publish.validate_extension_report(clock_report("arm64"), "clock", "arm64")
+
+    def test_stage_extension_uploads_the_quick_checked_clock_helper(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary); publish.save(root / "clock" / "extension-report.json", clock_report())
+            local = {"Id": digest(50), "Os": "linux", "Architecture": "amd64", "RootFS": {"Layers": [digest(100)]},
+                     "Config": {"Labels": {"io.ceph-testcontainers.extension": "clock"}}}
+            calls = []
+            def run(command):
+                calls.append(command)
+                return json.dumps([local]) if command[:3] == ["docker", "image", "inspect"] else ""
+            args = SimpleNamespace(report=root / "clock" / "extension-report.json", extension="clock",
+                                   architecture="amd64", revision="a" * 40, run_id="123-1",
+                                   output=root / "candidate" / "extension-candidate.json")
+            with mock.patch.object(publish, "run", side_effect=run), \
+                    mock.patch.object(publish, "manifest", return_value={"digest": digest(70)}), \
+                    mock.patch.object(publish, "verify_image"), mock.patch("sys.stdout"):
+                publish.stage_extension(args)
+            self.assertIn(["docker", "tag", digest(50), publish.REGISTRY + ":ci-123-1-extension-clock-v1-linux-amd64"],
+                          calls)
+            saved = json.loads(args.output.read_text())
+            self.assertEqual((saved["status"], saved["gate"], saved["targets"], saved["versions"]["interposer_sha256"]),
+                             ("passed", "quick", sorted(publish.extension_targets("clock")), "f" * 64))
+
+    def test_clock_promotion_tags_only_the_clock_helper(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            extension_candidates(root / "one", architectures=("amd64",), extension="clock")
+            with self.assertRaises(publish.PublishError):
+                publish.collect_extension_candidates(root / "one", "a" * 40, "123-1", "clock")
+            extension_candidates(root / "mixed", extension="clock")
+            extension_candidates(root / "mixed", extension="blockio")
+            with self.assertRaises(publish.PublishError):
+                publish.collect_extension_candidates(root / "mixed", "a" * 40, "123-1", "clock")
+            extension_candidates(root / "candidates", extension="clock")
+            observed, args = promote_with_fake_registry(self, root, "clock")
+            self.assertEqual(set(observed), {publish.REGISTRY + ":extension-clock-v1",
+                                             publish.REGISTRY + ":extension-clock-v1-linux-amd64",
+                                             publish.REGISTRY + ":extension-clock-v1-linux-arm64"})
+            images = {"clock": {"amd64": digest(70), "arm64": digest(71)}}
+            self.assertEqual(json.loads(args.output.read_text())["images"], images)
+            self.assertEqual(publish.published_reference("clock", "amd64", json.dumps(images)),
+                             publish.REGISTRY + "@" + digest(70))
+
+    def test_clock_publication_is_its_own_workflow_route(self):
+        root = Path(publish.__file__).resolve().parents[1] / ".github" / "workflows"
+        workflow = (root / "test.yml").read_text()
+        gate = "inputs.publish && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)"
+        job = workflow[workflow.index("  clock-extension:"):workflow.index("  promote-extension:")]
+        self.assertIn("--extension clock --image ceph-check:extension-clock", job)
+        self.assertNotIn("--functional", job)
+        # The same release targets as the publication gate.
+        self.assertIn('python3 image/releases.py official "$release"', job)
+        self.assertIn('python3 image/releases.py role "$release" official essential', job)
+        stage = job[job.index("image/publish.py stage-extension"):]
+        self.assertIn('--report "$RUNNER_TEMP/clock/extension-report.json"', stage)
+        self.assertIn("if: " + gate + "\n", job[:job.index("image/publish.py stage-extension")].rsplit("      - ", 1)[1])
+        promote = workflow[workflow.index("  promote-clock-extension:"):workflow.index("  verify-published-clock-extension:")]
+        self.assertIn("if: " + gate + "\n", promote)
+        self.assertIn("needs: clock-extension\n", promote)
+        self.assertIn("pattern: extension-candidate-clock-*\n", promote)
+        self.assertIn("--extension clock --candidates", promote)
+        for other in ("promote-extension:", "promote-capture-extension:", "promote-blockio-extension:",
+                      "blockio-extension:", "capture-extension:", "netem-extension:"):
+            section = workflow[workflow.index("\n  " + other) + 1:]
+            section = section[:section.index("\n  ", 3)]
+            self.assertNotIn("clock", section)
+        verify = workflow[workflow.index("  verify-published-clock-extension:"):]
+        self.assertIn("extension: clock\n", verify)
+        self.assertIn("images: ${{ needs.promote-clock-extension.outputs.images }}", verify)
+        published = (root / "published-extension.yml").read_text()
+        recheck = published[published.index("  published-clock-extension:"):]
+        self.assertIn("if: inputs.extension == 'clock'", recheck)
+        self.assertIn("image/publish.py published-reference", recheck)
+        self.assertIn("--extension clock --image \"$reference\"", recheck)
+        self.assertIn('python3 image/releases.py role "$release" official essential', recheck)
+        self.assertNotIn("--functional", recheck)
 
 
 class ExtensionPublicationTests(unittest.TestCase):
@@ -383,7 +514,7 @@ class ExtensionPublicationTests(unittest.TestCase):
                 mock.patch("sys.stderr") as stderr, self.assertRaises(publish.PublishError):
             publish.extension_health(SimpleNamespace())
         reported = "".join(str(call) for call in stderr.write.call_args_list)
-        for extension in ("netem", "capture", "blockio"):
+        for extension in ("netem", "capture", "blockio", "clock"):
             self.assertIn("extension-" + extension + "-v1", reported)
 
     def test_extension_promotion_takes_one_extension_and_rejects_another_ones_candidates(self):
