@@ -1,4 +1,4 @@
-.PHONY: check base-check checker-test functional-test roles-test extension-test extension-images extension-selectors extension-check capture-image capture-check capture-functional-check clock-probe-image clock-probe-check blockio-image blockio-check image-check official-check role-images role-images-full debian-images ubuntu-images alpine-images
+.PHONY: check base-check checker-test functional-test roles-test extension-test extension-images extension-selectors extension-check capture-image capture-check capture-functional-check clock-probe-image clock-probe-check clock-image clock-check blockio-image blockio-check image-check official-check role-images role-images-full debian-images ubuntu-images alpine-images
 CEPH_RELEASE ?= 20.2.4
 OFFICIAL_IMAGE ?= $(shell python3 image/releases.py official $(CEPH_RELEASE))
 # role-images extracts the catalogue's pinned native child of the official index.
@@ -108,6 +108,22 @@ clock-probe-image:
 # Example: make clock-probe-check CLOCK_PROBE_IMAGE=my-registry/clock-probe:dev
 clock-probe-check:
 	python3 image/extension_check.py --extension clock-probe --image "$(CLOCK_PROBE_IMAGE)"
+
+# The clock helper is a file source: the libfaketime default interposer and its
+# manifest. Its quick check reads the files without starting the helper and
+# loads the interposer in a container of each CLOCK_TARGET.
+CLOCK_IMAGE ?= $(IMAGE_REPOSITORY):extension-clock
+CLOCK_TARGET ?= $(OFFICIAL_IMAGE)
+
+clock-image:
+	$(call registry_cache) \
+	docker buildx build --load --platform "$(PLATFORM)" --provenance=false $$cache_args \
+		-t "$(IMAGE_REPOSITORY):extension-clock" image/extensions/clock
+
+# Example: make clock-check CLOCK_IMAGE=my-registry/clock-helper:dev CLOCK_TARGET=my-registry/ceph:dev
+clock-check:
+	python3 image/extension_check.py --extension clock --image "$(CLOCK_IMAGE)" \
+		$(addprefix --target ,$(CLOCK_TARGET))
 
 # Block-I/O tools only; the caller admits the privileged kernel/device runtime.
 BLOCKIO_IMAGE ?= $(IMAGE_REPOSITORY):extension-blockio

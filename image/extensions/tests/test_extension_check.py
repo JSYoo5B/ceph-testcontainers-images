@@ -377,7 +377,11 @@ class ExtensionCheckTests(unittest.TestCase):
     def test_each_probe_reports_exactly_its_contract_checks(self):
         # The probe scripts and QUICK_CHECKS must name the same checks, so that
         # a probe edit that drops a check also has to change the contract list.
+        # The clock helper runs no probe; test_extension_clock.py ties its
+        # checks to QUICK_CHECKS.
         for extension, spec in extension_check.EXTENSIONS.items():
+            if extension == "clock":
+                continue
             script = Path(spec["probe"]).read_text()
             loops = re.findall(r'^for utility in ([^;]+); do\n\s+check "path:\$utility"', script, re.M)
             names = ["path:" + utility for loop in loops for utility in loop.split()]
