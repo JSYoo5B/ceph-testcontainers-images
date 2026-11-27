@@ -152,15 +152,16 @@ make extension-images   # build the netem helper
 make extension-check    # check it, including a delay inside an official-image container
 ```
 
-Three helpers are published for `linux/amd64` and `linux/arm64`:
+Four helpers are published for `linux/amd64` and `linux/arm64`:
 
 | Tag | Helper | Publication gate |
 | --- | --- | --- |
 | `ghcr.io/jsyoo5b/ceph-testcontainers-images:extension-netem-v1` | Kernel packet delay, loss, rate and packet faults with `tc` | Functional check |
 | `ghcr.io/jsyoo5b/ceph-testcontainers-images:extension-capture-v1` | Packet capture with `tcpdump` | Functional check |
 | `ghcr.io/jsyoo5b/ceph-testcontainers-images:extension-blockio-v1` | Device-mapper and loop-device user-space tools | Quick check |
+| `ghcr.io/jsyoo5b/ceph-testcontainers-images:extension-clock-v1` | The libfaketime `default` interposer and its build manifest, copied into Ceph daemon containers for wall-clock offsets | Quick check, with the interposer loaded in each published release's official and essential images |
 
-Each helper is checked and published apart from the others and from the release images below, and none blocks another. The capture and blockio helpers are published only from the default branch. The clock-probe helper (a compiler and two pinned libfaketime builds) is kept as the reproducible environment of the clock-fault research and is not published, because no module feature selects it; see [the clock-probe helper](docs/EXTENSIONS.md#clock-probe-helper-contract-1-retained-research-helper).
+Each helper is checked and published apart from the others and from the release images below, and none blocks another. The capture, blockio and clock helpers are published only from the default branch. The clock helper is a file source with no executable: a module copies its interposer out and preloads it into a daemon; see [the clock helper](docs/EXTENSIONS.md#clock-helper-contract-1). The clock-probe helper (a compiler and two pinned libfaketime builds) is kept as the reproducible environment of the clock-fault research and is not published, because no module feature selects it; see [the clock-probe helper](docs/EXTENSIONS.md#clock-probe-helper-contract-1-retained-research-helper).
 
 ## Published images
 

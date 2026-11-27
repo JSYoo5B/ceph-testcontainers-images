@@ -9,7 +9,7 @@ Every baseline module feature works with the unmodified official Ceph image, and
 - A missing tool, a denied permission and an unsupported kernel are distinct errors. Nothing is installed at run time, and there is no fallback to another mechanism.
 - How an extension image is built is up to its owner. The contract names executables and behavior, not packages, labels or file paths. [image/extension_check.py](../image/extension_check.py) checks any local image against it.
 
-This repository defines the contracts, checks images against them and publishes a reference helper for each extension that a module feature selects: the netem, packet-capture and blockio helpers (see [Published helpers](#published-helpers)). The clock-probe helper is a retained research helper and is not published, because no module feature selects it. The modules decide when an extension is used and own everything the feature does with it.
+This repository defines the contracts, checks images against them and publishes a reference helper for each extension that a module feature selects: the netem, packet-capture, blockio and clock helpers (see [Published helpers](#published-helpers)). The clock-probe helper is a retained research helper and is not published, because no module feature selects it. The modules decide when an extension is used and own everything the feature does with it.
 
 ## netem helper (contract 1)
 
@@ -265,6 +265,55 @@ none of those properties. Functional block-I/O qualification (loop devices,
 device-mapper delay and error tables, recovery) belongs to the consumer's native
 tests and is not part of this helper's publication.
 
+## clock helper (contract 1)
+
+The clock helper is the file source of per-daemon wall-clock offsets. It carries one libfaketime interposer, the upstream `default` build, and its build manifest. A module copies the interposer into a Ceph daemon container and preloads it into the long-running daemon only; the helper itself never runs, so nothing of it runs next to a daemon. It contains no Ceph component, no package, no compiler and no executable. Contract 1 has a quick check only, and that check is its publication gate: the reference helper is published as `extension-clock-v1` (see [Published helpers](#clock-helper)).
+
+The helper carries only the `default` build. The `intercept-syscall` build of the [clock-probe helper](#clock-probe-helper-contract-1-retained-research-helper) hangs every process that loads tcmalloc, and the Ceph daemons of the role images load tcmalloc, so that build cannot instrument a daemon. The `default` build is the one with which the clock-fault research raised and cleared `MON_CLOCK_SKEW` in a long-running `ceph-mon`.
+
+### Image contract
+
+| Requirement | Detail |
+| --- | --- |
+| Platform | Linux `amd64` or `arm64`. |
+| Entry and executables | None. The image has no executable, entrypoint or command. A module creates a container of it with an entrypoint of its own, never starts it, and reads the two files below through the engine's archive API, as `docker cp` does. |
+| Interposer | `/opt/ceph-testcontainers/clock/libfaketime.so.1`: a regular file that is a little-endian ELF64 shared object for the platform's machine (`x86_64` or `aarch64`). It does not export `syscall`. No other file of the image is named `libfaketime*`, and no other file is under `/opt/ceph-testcontainers/clock`. |
+| glibc bound | Every symbol version that the interposer needs is a glibc version (`GLIBC_x.y` or `GLIBC_x.y.z`) no newer than `GLIBC_2.34`. That is the glibc of CentOS Stream 9, which the official images of 19.2.5 and 20.2.4 and their role images use, and the oldest glibc of the Ceph images that the Go library supports; the 21.2.0 images use glibc 2.39. An image without glibc cannot load the interposer. |
+| Build manifest | `/opt/ceph-testcontainers/clock/build.json`: one JSON object with exactly `schema` 1; `source` with `repository`, `tag`, `commit` and `tree` (a 40-digit commit and tree); `toolchain` with `compiler` and `libc`; `architecture` (the platform's machine); and `interposer` with `path` (the interposer path above), `sha256` (the hash of that file), `build` `default`, `intercept_syscall` `false` and `compile_flags` (the empty string: the upstream default compile flags, without `-DINTERCEPT_SYSCALL`). |
+| No executable | No regular file of the image has an execute bit, the interposer included. |
+| Interposer load | In a container of a Ceph image, with `LD_PRELOAD` naming the interposer, `FAKETIME_DONT_FAKE_MONOTONIC=1`, `FAKETIME_TIMESTAMP_FILE` naming a file that the caller owns and `FAKETIME` unset: a `+0` file leaves the public `clock_gettime(CLOCK_REALTIME)` of that process within 5 seconds of an uninstrumented reader, a `+3600` file moves it by 3600 seconds within 5 seconds, and its `CLOCK_MONOTONIC` stays the uninstrumented clock. |
+
+The manifest exists so that a module records the interposer's identity (source commit and tree, compile flags, hash and architecture) from the image itself and not from a tag name or a label, and so that it can refuse a helper that carries another build before any daemon starts. The reference image declares `io.ceph-testcontainers.extension=clock` and `io.ceph-testcontainers.extension.contract=1`, as the other helpers do; the checker does not rely on them.
+
+### Quick check
+
+```sh
+make clock-image                          # build ceph-testcontainers:extension-clock
+make clock-check                          # its quick check, loading the interposer in the default release's official image
+python3 image/extension_check.py --extension clock --image my-registry/clock-helper:dev \
+  --target quay.io/ceph/ceph:v20.2.4 --target my-registry/ceph-essential:dev
+```
+
+The quick check never starts a helper container. It creates one, never started and without a network, exports its filesystem through the engine and checks the files on the checker's side: the two files at their paths, the single interposer, no executable, the manifest, the declared `default` build, the manifest's hash against the file, the ELF header and machine, the dynamic symbol table (no `syscall`), and the version needs against the glibc bound. A helper that carries the `intercept-syscall` build fails, whether its manifest declares it, the interposer exports `syscall`, or the build lies next to the default build.
+
+Each `--target` is a Ceph image that the interposer is loaded in, as a module places it: the checker creates a container of the target as root with `--network=none` and `--cap-drop=ALL`, copies the checked interposer into it at `/tmp/libfaketime.so.1` through the engine, and runs [check-clock-load.py](../image/extensions/clock/check-clock-load.py) on the target's `python3`. That script is the uninstrumented reference: it starts a child `python3` once without the interposer and then with it and a `+0` and a `+3600` timestamp file that it owns, and reads both clocks before and after each child. The checker requires the interposer to be mapped in exactly the preloaded children, their realtime clock to show the file's offset, and their `CLOCK_MONOTONIC` to lie between the reference reads around them. A target needs `python3` on `PATH`; the official images and the essential role images have it. Without `--target`, only the files are checked; publication requires every release target.
+
+`extension-report.json` records every check, the libfaketime tag and commit, the interposer's `sha256` and the newest glibc version it needs, and for each target the samples, the target's Python version and the cleanup; `quick.log` records each check with the reason of a failure, and each target's `load.log` the script's output. `--functional` and the netem options are rejected. A failure carries a kind: `missing_file`, `quick_failure` or `image_unsupported` for the helper, `load_failure` for a target, `timeout` or `checker_failure`.
+
+### Reference helper
+
+[image/extensions/clock](../image/extensions/clock) builds in a stage on the pinned `debian:bookworm-slim` base of the Debian role images with Debian's `build-essential`, `python3` and `git`. [build-interposer.sh](../image/extensions/clock/build-interposer.sh) fetches libfaketime `v0.9.12` once as the single pinned commit `3ccdd344aadf1e317156fa5fb7c881f2c4404778`, fails the build when the fetched commit differs, builds `libfaketime.so.1` with the upstream default flags, and writes the manifest. The published stage is `scratch` with the interposer, the manifest, libfaketime's license (GPL-2.0) at `/usr/share/doc/libfaketime/copyright` and `/usr/share/ceph-testcontainers/SOURCES.txt`, which points to the commit; none of the build stage's packages is in it. The `linux/amd64` image is 189 kB unpacked.
+
+The clock and clock-probe helpers pin the same libfaketime commit, which a unit test enforces. A change of the commit in either is qualified with both.
+
+### What the quick check does not cover
+
+- The clock routes other than the public `clock_gettime`: the libc `syscall()`, the vDSO symbol and a raw syscall bypass the `default` build.
+- A live update of the offset file, update latency, restoration or disposal of an instrumented process.
+- Any Ceph daemon: the load check runs `python3` of the target image and starts no daemon, so `MON_CLOCK_SKEW`, timecheck and a daemon that loads tcmalloc are qualified natively by the consumer.
+- A time namespace, a virtual machine, the host clock or a kernel clock fault, and faults of `CLOCK_MONOTONIC`.
+- Ceph images without glibc. The glibc bound is checked on the interposer; the load is checked only in the targets.
+
 ## clock-probe helper (contract 1, retained research helper)
 
 The clock-probe helper is the reproducible environment of the clock-fault research in ceph-testcontainers-go: per-process wall-clock offsets of Ceph daemons through a libfaketime interposer. It carries a C compiler and two pinned libfaketime builds (`default` and `intercept-syscall`) with a build manifest, which the essential role images do not, so a research fixture needs no toolchain on the runner, no matching of the image's libc and no network at test time. The helper contains no Ceph component, and nothing in it decides what a clock fault means or qualifies a clock-fault backend: a fixture starts the helper as a scratch container of its own and runs its own probe in it.
@@ -285,7 +334,7 @@ What it does not cover: the `CLOCK_MONOTONIC` of the daemon itself, which was no
 
 ### Why it is not published
 
-No module feature selects the helper, so no consumer needs a published tag; CI builds it and runs its quick check on native runners of both architectures so that the research can rebuild exactly this environment. A clock-fault feature would place the interposer into Ceph daemon containers. Its helper would carry the interposer and its manifest but no compiler, so its contract would differ from this research contract, and it would be published under a contract of its own when that feature exists.
+No module feature selects the helper, so no consumer needs a published tag; CI builds it and runs its quick check on native runners of both architectures so that the research can rebuild exactly this environment. Daemon instrumentation has a published helper of its own: the [clock helper](#clock-helper-contract-1) carries only the `default` build and its manifest, with no compiler, under its own contract, and is published as `extension-clock-v1`. Both helpers pin the same libfaketime commit unless a change is qualified.
 
 ### Image contract
 
@@ -347,6 +396,8 @@ python3 image/extension_check.py --extension netem --image my-registry/netem-hel
 | Functional (`--functional`) | The quick check, then the runtime on this engine: netem added, changed and removed on the loopback of a disposable namespace with `NET_ADMIN`, the delay scenario for each `--target`, and the scenario of each `--selector` profile for each `--target` |
 | Bandwidth profile (`--rate`) | Whether the image's `tc` parses netem's rate and limit, in a container with no network and no capabilities. With `--functional`, also whether this engine's kernel keeps them, and the [rate scenario](#bandwidth-profile) for each `--target` |
 | Packet-fault profile (`--packet-faults`) | Whether the image's `tc` parses netem's reorder, duplicate and corrupt with correlations, in a container with no network and no capabilities. With `--functional`, also whether this engine's kernel keeps them, and the [packet-fault scenario](#packet-fault-profile) for each `--target` |
+
+The clock helper's quick check starts no container of the helper, and it takes `--target` without `--functional`: each target is a Ceph image that the interposer is loaded in (see [the clock helper](#clock-helper-contract-1)).
 
 The delay scenario uses a private bridge network:
 
@@ -506,8 +557,9 @@ Each helper tag lists `linux/amd64` and `linux/arm64`; `<tag>-linux-<architectur
 | netem | `extension-netem-v1` | Functional check with every selector profile, the bandwidth profile and the packet-fault profile |
 | packet-capture | `extension-capture-v1` | Functional check with every capture and negative control |
 | blockio | `extension-blockio-v1` | Quick check of contract 1 |
+| clock | `extension-clock-v1` | Quick check of contract 1, with the interposer loaded in every release target |
 
-Publication runs only from a manual run of the [checker workflow](../.github/workflows/test.yml) with `publish`; the capture and blockio helpers stage candidates only on the default branch. For each architecture, the job that built the helper and passed its publication gate uploads that exact image under a `ci-<run>-<attempt>-` candidate tag. Every gate includes the helper's quick check: each check that its contract names (`QUICK_CHECKS` in [image/extension_check.py](../image/extension_check.py)) must be recorded exactly once and pass. A probe that reports completion without one of them is incomplete, and a report without one is refused before any upload. Promotion requires the candidates of both architectures from the same run and revision, verifies their configuration, platform, layers and extension label, points the platform tags and then the index at those digests, and checks that the index lists exactly the two tested digests. A platform whose check failed uploads no candidate, so nothing is promoted. [published-extension.yml](../.github/workflows/published-extension.yml) then pulls each platform by the digest that the promotion recorded in the same run and runs the same gate check again. The weekly published image health workflow runs `python3 image/publish.py extension-health`, which fails when a helper tag no longer lists both platform images.
+Publication runs only from a manual run of the [checker workflow](../.github/workflows/test.yml) with `publish`; the capture, blockio and clock helpers stage candidates only on the default branch. For each architecture, the job that built the helper and passed its publication gate uploads that exact image under a `ci-<run>-<attempt>-` candidate tag. Every gate includes the helper's quick check: each check that its contract names (`QUICK_CHECKS` in [image/extension_check.py](../image/extension_check.py)) must be recorded exactly once and pass. A probe that reports completion without one of them is incomplete, and a report without one is refused before any upload. The clock helper runs no probe; the checker records its file checks under the same rule. Promotion requires the candidates of both architectures from the same run and revision, verifies their configuration, platform, layers and extension label, points the platform tags and then the index at those digests, and checks that the index lists exactly the two tested digests. A platform whose check failed uploads no candidate, so nothing is promoted. [published-extension.yml](../.github/workflows/published-extension.yml) then pulls each platform by the digest that the promotion recorded in the same run and runs the same gate check again. The weekly published image health workflow runs `python3 image/publish.py extension-health`, which fails when a helper tag no longer lists both platform images.
 
 ### Selecting a helper
 
@@ -593,6 +645,25 @@ What it does not claim:
 - Kernel support: the device-mapper linear, error and delay targets and loop devices of any engine's kernel.
 - A privileged runtime, access to the engine host's `/dev`, device ownership or cleanup. These belong to the module's runtime admission.
 - Any engine, and any functional block-I/O behavior. Those are qualified natively by the consumer.
+
+### clock helper
+
+```text
+ghcr.io/jsyoo5b/ceph-testcontainers-images:extension-clock-v1
+```
+
+The tag exists once a manual run with `publish` on the default branch has passed; its clock jobs stage candidates only on that branch.
+
+- Built from [image/extensions/clock](../image/extensions/clock) as described under [Reference helper](#reference-helper-1): the libfaketime `default` build of the pinned commit, its manifest, its license and the source notice, on `scratch`. The candidate records the libfaketime tag and commit, the interposer's `sha256` and the newest glibc version it needs.
+- Publication requires, on each architecture, a passing quick report from the current checker and load script in which every check that contract 1 names is recorded exactly once and passed, with the reference labels, and for the official image and the published `essential` role image, selected by its tag, of every release that [the catalogue](../image/releases.json) marks published, a load of exactly the checked interposer by the checked helper on that platform, with every sample recorded, no problem and cleanup that leaves nothing behind. The published digests are checked again the same way, with the same targets.
+
+What the publication claims: on Docker Engine on GitHub-hosted Ubuntu 24.04 runners, natively on `amd64` and `arm64`, this exact image met contract 1. It carried exactly one interposer, the `default` build, at its fixed path, with a manifest whose hash matched the file, no executable, no exported `syscall` and no glibc symbol version newer than `GLIBC_2.34`. In a container of each target, as root without a capability or a network, that interposer loaded into `python3` and moved its public realtime clock by a `+0` and a `+3600` timestamp file while `CLOCK_MONOTONIC` stayed unchanged.
+
+What it does not claim:
+
+- Any Ceph daemon behavior: no daemon is started, and `MON_CLOCK_SKEW`, timecheck, restoration and disposal are qualified natively by the consumer.
+- The vDSO and raw syscall routes, which always bypass the interposer, and the libc `syscall()` route, which the `default` build does not divert.
+- Any other engine, and Ceph images other than the targets above, beyond the stated glibc bound.
 
 ## Not in contract 1
 
