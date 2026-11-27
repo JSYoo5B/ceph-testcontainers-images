@@ -324,6 +324,7 @@ The load check uses a static file. It does not update a file while a process run
 - Any Ceph daemon or client, a time namespace, a virtual machine or a kernel clock fault.
 - A functional check and engine support.
 - The interposer is built for glibc on Debian. A different libc can need its own helper or a changed build, and a build on another base can change the ABI that the module sees.
+- Which variant can instrument a Ceph daemon. The `intercept-syscall` build is for the scratch probe's libc `syscall()` route only. A process that loads tcmalloc hangs at start with it, and the Ceph daemons of the role images load tcmalloc, so daemon instrumentation uses the `default` build. In the research on `amd64`, `ceph-mon --version`, and `date` with `libtcmalloc.so.4` preloaded first, hung with one thread in a futex wait and ignored `SIGTERM`, while both ran normally with the `default` build and `date` and `python3` without tcmalloc ran normally with the `intercept-syscall` build. The cause inside the interposer is not determined.
 
 ## Checking an extension image
 
