@@ -264,7 +264,7 @@ cache_mountinfo() {
 # The command supervisor must observe an exited child while it still owns
 # the child's process group. A signal-zero call checks group access without
 # sending a signal. The context manager reaps the child after the probe.
-if "$cache" || "$rgw"; then
+if "$cache" || "$fsmirror" || "$rgw"; then
     check python-supervisor python3 - <<'PYTHON'
 import os
 import subprocess
