@@ -56,13 +56,13 @@ map tools. The cache daemon, parent-cache plugin and consuming librbd stay
 together in rbd-aux. RGW administration belongs to rgw; CephFS daemons and
 mirror runtime belong to cephfs. No optional role falls back to essential.
 
-The `rgw` and `rbd-aux` roles (and aggregate `all`) provide `python3` on
-`PATH` with the Linux process primitives used to supervise gateway
-administration and cache commands. The quick checker starts a child in its
-own process group, observes its exit with `waitid(..., WNOWAIT)` and checks
-group access before reaping it. Retaining the child through this sequence
-lets the supervisor stop its own process group without signaling a recycled
-PID.
+The `rgw`, `rbd-aux` and `cephfs` roles (and aggregate `all`) provide
+`python3` on `PATH` with the Linux process primitives used to supervise
+gateway administration, cache commands and cephfs-mirror admin-socket reads.
+The quick checker starts a child in its own process group, observes its exit
+with `waitid(..., WNOWAIT)` and checks group access before reaping it.
+Retaining the child through this sequence lets the supervisor stop its own
+process group without signaling a recycled PID.
 
 ## Where each component is used
 
